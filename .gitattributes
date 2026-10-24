@@ -1,0 +1,31 @@
+# 统一换行符为 LF，避免 diff 全量噪音。
+#
+# 根因：Windows 上编辑/工具（如 edit_file、部分 IDE 保存）会把文件写成
+# CRLF，而仓库内的文件与多数文档检查（docs.test.mjs 的正则、CI 的 LF
+# 期望）都按 LF 处理。没有本文件时 Git 不做归一化，一个单行改动会以
+# "整个文件被替换"的假象出现在 diff 里，把真实改动淹没在噪音中。
+#
+# `text=auto eol=lf`：
+#   - text=auto  让 Git 自动识别文本文件并在入库时归一化为 LF；
+#   - eol=lf     检出时统一用 LF，任何编辑器写 CRLF 都会在 checkout
+#                时被归一化，工作区始终保持 LF。
+#
+# 注意：对已在历史里的 CRLF 文件，本规则在下次 `git add`（重新归一化入库）
+# 后生效；`git diff` 可能仍短暂显示历史噪音，那是旧对象，与本规则无关。
+
+* text=auto eol=lf
+
+# 二进制与特定格式不参与换行归一化
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+
+# 生成/第三方文件，不纳入换行归一化
+package-lock.json -text

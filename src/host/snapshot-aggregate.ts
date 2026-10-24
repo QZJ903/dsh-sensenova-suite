@@ -1,0 +1,499 @@
+/**
+ * The snapshot route's DATA AGGREGATION — the peer-free pure half.
+ *
+ * Keeps the router to only the HTTP surface (route registration, the trust
+ * fence, body reading, the `writeJson` responses) while the polling-side
+ * decisions — fetching through the cache, parsing pools/trend/catalog,
+ * computing shape warnings, splitting a pool's coverage into callable vs
+ * locked models, marking quota-exhausted models, identifying vision models,
+ * building the `llm` status block — live here as one testable function.
+ *
+ * What "pure" means HERE, stated honestly: no HTTP surface, no module-level
+ * state, every dependency injected — so `test/routes.test.mjs` can pin every
+ * branch (the 15-key snapshot contract, the vision-vs-catalog distinction, the
+ * quota-flip re-registration) without mounting the full container. It is NOT
+ * side-effect-free: this is the plugin's refresh engine, and a poll that finds
+ * a changed catalogue WRITES the catalog state file and may REBUILD the
+ * provider registration (both awaited, on the read path). Those writes are
+ * deliberate — they are what keeps a panel-closed, provider-open Host serving
+ * fresh offers — and they are idempotent behind the signature debounce, so a
+ * GET is still safe to poll. A caller must not read this function as a pure
+ * view and fan concurrent polls out on that assumption.
+ *
+ * @module dsh-sensenova-suite/snapshot-aggregate
+ */
+
+import { CODE, isAuthFailure } from "./codes.ts";
+import { fetchConsole, fetchModelCatalog } from "./console-client.ts";
+import { MAX_CACHE_AGE_MS } from "./coalesced-fetch.ts";
+import { parsePools, parseTrend, checkShape } from "./parsers.ts";
+import { summarizeCatalog, filterByEnabled, rosterWithAvailability, exhaustedModelIds, drainedPoolsWithoutModels, LLM_PROVIDER_ID, DEFAULT_REASONING_EFFORT } from "./llm-models.ts";
+import { catalogSignature, syncSignaturesAfterPublish, quotaSignatureOf } from "./provider-publish.ts";
+import type { PublishResult } from "./provider-publish.ts";
+import { str, errMsg } from "./util.ts";
+import { resolveSwitchEnabled, switchSource } from "./switch-precedence.ts";
+import type { SnapshotData } from "../shared/wire.ts";
+
+/**
+ * The operator's pseudo multiplier that names one model id, or undefined.
+ *
+ * Matching is a case-insensitive SUBSTRING of the model id, first configured
+ * key wins (insertion order — `resolveTrendMultipliers` preserves it). One
+ * matcher serves BOTH the trend rows and the panel roster, so a model's `×N`
+ * in the consumption chart and its `×N` badge in the model list are the same
+ * computed fact, never two copies that can drift.
+ *
+ * @param {unknown} modelId - a model id (trend row name or roster row id).
+ * @param {Record<string, number>} multipliers - the sanitized config map.
+ * @returns {number|undefined} the hit value, or undefined when nothing matched.
+ */
+export function matchMultiplier(modelId: unknown, multipliers: Record<string, number>): number | undefined {
+  const id = String(modelId ?? "").toLowerCase();
+  for (const [key, value] of Object.entries(multipliers || {})) {
+    if (id.includes(key.toLowerCase())) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Attach the operator's pseudo multipliers to the parsed trend rows.
+ *
+ * A row without a match keeps no `multiplier` field — the panel shows no
+ * factor for it rather than guessing 1. The math lives here as one exported
+ * seam so the tests drive the exact function `buildSnapshotBody` calls, not a
+ * copy.
+ *
+ * @param {{models: Array<{model: string, credits: number, multiplier?: number}>}} trend
+ *   the `parseTrend` result; rows are replaced in place on the object.
+ * @param {Record<string, number>} multipliers - the sanitized config map.
+ * @returns {object} the same trend object with `multiplier` on matching rows.
+ */
+export function applyTrendMultipliers(trend: { models: Array<{ model: string; credits: number; multiplier?: number }> }, multipliers: Record<string, number>): { models: Array<{ model: string; credits: number; multiplier?: number }> } {
+  trend.models = trend.models.map((row) => {
+    const multiplier = matchMultiplier(row.model, multipliers);
+    return multiplier === undefined ? row : { ...row, multiplier };
+  });
+  return trend;
+}
+
+/**
+ * Run one fetch, reporting its failure instead of throwing.
+ *
+ * The snapshot must NOT be all-or-nothing on the console: a signed-out or
+ * unreachable console still leaves the llm block and the model catalog —
+ * neither of which needs the console token — deliverable. The failed source
+ * is named in `quotaError`; the panel says why instead of showing nothing,
+ * and the API / Raccoon tabs stay fully usable without a console login.
+ * @param {() => Promise<unknown>} fn - the fetch.
+ * @returns {Promise<{value: unknown, error: unknown}>} `value` or `error`, never both.
+ */
+async function soft(fn: () => Promise<unknown>): Promise<{ value: unknown; error: unknown }> {
+  try {
+    return { value: await fn(), error: null };
+  } catch (error) {
+    return { value: null, error };
+  }
+}
+
+/**
+ * Map a thrown console/auth error to the one code the panel branches on.
+ *
+ * A raw error message carries no intent, so the panel keys its guidance off
+ * this taxonomy instead: `not_configured` (the user can fix it) and
+ * `jwt_expired` (renewal already failed) pass through verbatim because the
+ * panel words them differently from every other case; a misconfigured row
+ * (`config`, thrown by the auth walk for a bad override or a missing key id)
+ * is reported as `config_error` so the panel says "fix the row" and never
+ * invites a sign-in; an auth-shaped failure becomes `auth_error`; anything
+ * else is a console failure, which usually self-heals on the next poll. The
+ * same mapping answers both the snapshot's in-body `quotaError` and the
+ * route's `ok:false` catch — one copy, one taxonomy.
+ * @param {unknown} error - the error a fetch or parse threw.
+ * @returns {string} the panel-facing code.
+ */
+export function failureCode(error: unknown): string {
+  const code = error && typeof error === "object" ? (error as { code?: string }).code : undefined;
+  if (code === CODE.CONFIG || code === CODE.CONFIG_ERROR) return CODE.CONFIG_ERROR;
+  if (code === CODE.NOT_CONFIGURED || code === CODE.JWT_EXPIRED) return code;
+  return isAuthFailure(error) ? CODE.AUTH_ERROR : CODE.CONSOLE_ERROR;
+}
+
+/**
+ * Fetch the three console sources in parallel and aggregate them into the
+ * snapshot body the route writes.
+ *
+ * The console sources are fetched through the shared `cache` + `inflight`
+ * maps (a single-flight per URL so concurrent polls share one call) and the
+ * `tokenStore` (so a 401 triggers one renewal before the call). The model
+ * catalog is optional: a missing API key degrades the model lists, not the
+ * quota — resolved per poll so a key that arrives after the plugin mounted
+ * still lights the lists on the next poll.
+ *
+ * @param {object} context
+ * @param {object} context.settings - the resolved settings row.
+ * @param {Map} context.cache - the console-response cache (shared across polls).
+ * @param {Map} context.inflight - the single-flight map (shared across polls).
+ * @param {object} context.tokenStore - the `createTokenStore` instance.
+ * @param {object} context.apiKeyStore - the `createApiKeyStore` instance.
+ * @param {object} context.publisher - the `createProviderPublisher` instance.
+ * @param {object} context.catalogStore - the `createFileCatalogStore` instance.
+ * @param {() => Promise<boolean|null>} context.panelSwitch - the panel-saved
+ *   provider switch (`provider-store.enabled()`); null when untouched.
+ * @returns {Promise<SnapshotData>} the snapshot body (`{ ok, now, ..., pools, trend, ... }`).
+ */
+export async function buildSnapshotBody({
+  settings,
+  cache,
+  inflight,
+  tokenStore,
+  apiKeyStore,
+  publisher,
+  catalogStore,
+  panelSwitch,
+  poolSnapshot,
+  onShapeDrift
+}: {
+  settings: import("./host-config.ts").ResolvedSettings;
+  cache: Map<string, { body: unknown; at: number; gen: number }>;
+  inflight: Map<string, Promise<unknown>>;
+  tokenStore: { getToken(): Promise<string>; invalidate(token?: string): void; state(): Promise<unknown> };
+  apiKeyStore: { resolve(): Promise<{ value: string }>; state(): Promise<unknown> };
+  publisher: {
+    state: any;
+    entries?: unknown[];
+    // The publish RESULT is read, so it is typed, not `unknown`: `ok:false`
+    // means this offer was not registered and the previous pair is still
+    // serving — in which case the signature must NOT be adopted, or the next
+    // poll sees "no change" and never retries. Declared as `unknown` this was
+    // unreadable at the call site, which is exactly how the failed-publish
+    // case came to be treated as a landed one.
+    publish: (entries: unknown, enabledIds: unknown, unavailableModelIds?: string[]) => Promise<PublishResult>;
+  };
+  catalogStore: { listEnabledIds(): Promise<string[]>; replace(entries: unknown, enabledIds?: unknown, unavailableIds?: unknown): Promise<boolean>; setUnavailable(ids: string[]): Promise<boolean> };
+  panelSwitch: () => Promise<boolean | null>;
+  /** Key 池诊断快照（可选；测试可省略）。key 打码为尾 4 位。 */
+  poolSnapshot?: () => unknown;
+  /**
+   * Called when the quota payload is READABLE but a drained pool names no
+   * usable models — the one drift that silently disables quota protection
+   * at both ends (nothing is blocked, nothing is bannered). A parameter,
+   * not an import: the aggregator stays pure and the call site owns the logger.
+   */
+  onShapeDrift?: (message: string) => void;
+}): Promise<SnapshotData> {
+  const providerState = publisher.state;
+  const resolveApiKey = async () => (await apiKeyStore.resolve()).value;
+  // 池诊断 + 模型协议覆盖：一次取用（pool 块与 llm 块共源，不会各说各话）。
+  let poolDiag: import("../shared/wire.ts").PoolDiagData | null = null;
+  let modelProtocols: Record<string, string> = {};
+  if (typeof poolSnapshot === "function") {
+    try {
+      const raw = await poolSnapshot() as import("../shared/wire.ts").PoolDiagData & { modelProtocols?: Record<string, string> };
+      poolDiag = raw;
+      modelProtocols = raw.modelProtocols ?? {};
+    } catch {
+      // 池快照失败不拖垮面板。
+    }
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  // Snap the window to the granularity boundary so that two polls inside the
+  // same hour/day bucket build an identical URL and the long-lived trend
+  // cache (5 min) actually hits, instead of re-fetching the console on every
+  // poll. The window length is unchanged — only shifted to align with the
+  // bucket edges; the console returns bucket-aggregated series anyway, so the
+  // panel shows complete buckets rather than a partial one.
+  const bucketSeconds = settings.trendHours <= 72 ? 3600 : 86400;
+  const endBucket = Math.floor(now / bucketSeconds) * bucketSeconds;
+  const start = endBucket - settings.trendHours * 3600;
+  const granularity = settings.trendHours <= 72
+    ? "TOKEN_PLAN_CREDIT_TREND_GRANULARITY_HOUR"
+    : "TOKEN_PLAN_CREDIT_TREND_GRANULARITY_DAY";
+  const [poolResult, trendResult, catalog] = await Promise.all([
+    // The two console sources are SOFT, not fatal: a signed-out or unreachable
+    // console must not blank the whole snapshot. The quota section says why it
+    // is empty (`quotaError`), while the llm block and the model catalog —
+    // neither of which needs the console token — still arrive, so the API and
+    // Raccoon tabs stay usable without a console login.
+    soft(() => fetchConsole(settings, "/lite/console/v1/tokenplan/pool-usage", undefined, settings.cacheSeconds * 1000, cache, inflight, tokenStore)),
+    soft(() => fetchConsole(
+      settings,
+      "/lite/console/v1/tokenplan/credit-usage-trend",
+      { start_time: String(start), end_time: String(endBucket), granularity },
+      Math.max(settings.cacheSeconds, 300) * 1000,
+      cache,
+      inflight,
+      tokenStore
+    )),
+    // Optional: a missing API key degrades the model lists, not the quota.
+    // The catalog read rides the shared coalesced cache with the cache's own
+    // maximum age (`MAX_CACHE_AGE_MS`) as its request TTL — a catalog poll can
+    // never be served stale beyond the window the cache itself allows.
+    (async () => {
+      const apiKey = await resolveApiKey();
+      return apiKey === "" ? null : fetchModelCatalog(settings, MAX_CACHE_AGE_MS, cache, inflight, apiKey).catch(() => null);
+    })()
+  ]);
+  const pools = parsePools(poolResult.value);
+  const trend = parseTrend(trendResult.value, settings.trendHours);
+  // Pseudo multipliers ride on the rows the Host computes, so the client
+  // never re-implements the matching (and the tests drive the same math).
+  applyTrendMultipliers(trend, settings.trendMultipliers);
+  // The console could not be reached (no account, a rejected token, the
+  // console down): the quota block is empty and says WHY, keyed by the same
+  // taxonomy the failure path uses. Pool is the auth probe — its failure wins
+  // the code when both sources missed.
+  const consoleFailure = poolResult.error ?? trendResult.error ?? null;
+  const quotaError = consoleFailure === null
+    ? null
+    : {
+        code: failureCode(consoleFailure),
+        message: errMsg(consoleFailure)
+      };
+  // A shape drift does not fail the poll — the parsers still return what they
+  // understood — but it must reach the panel, or a renamed field would read
+  // as "no usage" forever. A source that failed outright is reported through
+  // `quotaError` instead, so it is skipped here: reporting both would blame
+  // the shape for a network error.
+  const shapeWarnings = [
+    ...(poolResult.error === null
+      ? checkShape(poolResult.value, "pool-usage").missing.map((key: string) => ({ api: "pool-usage", missing: key }))
+      : []),
+    ...(trendResult.error === null
+      ? checkShape(trendResult.value, "credit-usage-trend").missing.map((key: string) => ({ api: "credit-usage-trend", missing: key }))
+      : [])
+  ];
+  // Split each pool's advertised coverage into what this key can call and
+  // what the plan lists but the key has no permission for yet.
+  const catalogIds = Array.isArray(catalog) ? catalog.map((entry) => str((entry as { id?: unknown })?.id, "")) : [];
+  if (Array.isArray(catalog)) {
+    const available = new Set(catalogIds);
+    pools.pools = pools.pools.map((pool) => {
+      const callable = pool.modelIds.filter((model: string) => available.has(model));
+      const locked = pool.modelIds.filter((model: string) => !available.has(model));
+      return { ...pool, callableModels: callable, lockedModels: locked };
+    });
+  } else {
+    pools.pools = pools.pools.map((pool) => ({
+      ...pool,
+      callableModels: pool.modelIds,
+      lockedModels: []
+    }));
+  }
+  // Models whose quota pool is exhausted would answer every chat request with
+  // `429 quota_exceeded`. The picker must not offer them (the adapter drops
+  // them via `unavailableModelIds`), and the panel greys them (via
+  // `rosterWithAvailability`). The set also drives a re-registration when it
+  // flips between catalogue polls.
+  //
+  // THREE states, not two. `exhaustedModelIds` cannot tell "the console
+  // answered and nothing is exhausted" from "the console never answered" —
+  // both arrive as an empty pool list, because `parsePools(null)` reads an
+  // absent body as `{ pools: [] }`. Collapsing them made a failed poll (signed
+  // out, JWT expired, network blip — this plugin's most common state) publish
+  // an EMPTY unavailable set, and since an empty set downstream means "no pool
+  // is exhausted", every model the user had just been protected from was
+  // handed back to the picker. Data missing was encoded as "all available".
+  //
+  // `null` = unknown, and unknown must never widen the offer. When the console
+  // did not answer, the last KNOWN set stands: the panel keeps greying what it
+  // greyed, and the registration keeps the models it dropped. The next
+  // successful poll corrects it — the cost of being wrong meanwhile is a model
+  // still hidden one poll too long, which is the direction to err in.
+  const unavailableModelIds = poolResult.error === null ? exhaustedModelIds(pools) : null;
+  // A drained pool that names no models is INVISIBLE at both ends: nothing gets
+  // blocked (`exhaustedModelIds` sees an empty coverage list) and the panel's
+  // banner stays silent (it needs a model in the blocked set). Both behaviours
+  // are right; only the SILENCE is the hazard — a renamed `model_ids` would
+  // disable quota protection while every visible reading still looked correct.
+  // So the caller's logger gets told, once per readable poll that hits it.
+  if (poolResult.error === null) {
+    const drifted = drainedPoolsWithoutModels(pools);
+    if (drifted.length > 0) {
+      onShapeDrift?.(`pools: ${drifted.length} drained pool(s) declare no usable modelIds (${drifted.join(", ")}); quota blocking is inactive for them`);
+    }
+  }
+  const effectiveUnavailable = unavailableModelIds ?? providerState.unavailableIds;
+
+  // Step three: persist the fetched catalog to the PRIVATE state file and
+  // rebuild the registered provider, but ONLY when the offered set actually
+  // changed — the catalog fetch is cached for an hour while the panel polls
+  // every 30 s, so a write/re-register per poll would be pure churn. The
+  // reported model counts come from the fresh catalog when one arrived, else
+  // from whatever the mount seed had stored.
+  const keyState = (await apiKeyStore.state().catch(() => ({ hasApiKey: false, keySource: null, ephemeral: false }))) as Record<string, unknown>;
+  // The effective switch: a panel-saved value beats the patch default. Both
+  // are reported so the panel can say which side is in charge.
+  const effectivePanelSwitch = await panelSwitch().catch(() => null);
+  // The curated allow-list is read on every poll, not only when a fresh
+  // catalogue arrived: a /models save must reach the picker even on a poll
+  // that serves a cached catalogue.
+  const enabledIds = await catalogStore.listEnabledIds().catch(() => providerState.enabledIds);
+  let offered = providerState.entries;
+  let catalogChanged = false;
+  // Whether the catalogue branch's publish actually LANDED. It is threaded into
+  // the quota branch below because that branch syncs the same signatures: if
+  // the catalogue publish failed, the quota branch must not "fix up" the
+  // signature for it, or the whole point of not syncing here is undone one
+  // line later.
+  let catalogPublishOk = true;
+  // Whether the catalogue write actually LANDED on the disk. The signature is
+  // the poll's "did the offer change?" signal, and it also gates the NEXT
+  // write (an equal signature skips it), so it must not advance past a write
+  // that never reached the disk: the next poll would serve the cached
+  // catalogue, see an equal signature, skip the write that would fix it, and
+  // the disk would keep the old catalogue until a restart re-seeded it. The
+  // publish side has its own gate below; this one is about the disk.
+  let catalogPersisted = true;
+  if (Array.isArray(catalog)) {
+    const freshSignature = catalogSignature(catalog, enabledIds);
+    if (freshSignature !== providerState.signature) {
+      catalogChanged = true;
+      // The quota dimension travels with the catalog write (`undefined` when
+      // this poll never answered quota = keep the stored statement): a restart
+      // must inherit the LAST KNOWN exhausted set, not a wide-open offer.
+      catalogPersisted = await catalogStore.replace(catalog, enabledIds, unavailableModelIds ?? undefined).catch(() => false);
+      // `effectiveUnavailable`, never the raw three-state value: a catalogue
+      // change still re-registers, and it must re-register with the LAST
+      // KNOWN unavailable set rather than an empty one.
+      const published = await publisher.publish(catalog, enabledIds, effectiveUnavailable);
+      // A failed publish RETURNS `{ok:false}` (it keeps the pair that was
+      // already serving) instead of throwing, so execution still reaches this
+      // line. Syncing unconditionally used to stamp the NEW catalogue's
+      // signature onto a registration that is still the OLD one: the next poll
+      // compared signatures, saw no change, and never retried. The catalogue
+      // store has already been rewritten above, so the panel quoted the new
+      // model count while the picker served the old list — until the catalogue
+      // changed again or the Host restarted. That is why this class of bug
+      // always presented as "a restart fixes it".
+      catalogPublishOk = published?.ok !== false;
+      if (catalogPublishOk && catalogPersisted) {
+        // Keep the signatures in lock-step with what was just published — the SAME
+        // formulas the route path uses, so the "did the offer change?" signal has a
+        // single source and cannot drift between the two publish paths.
+        syncSignaturesAfterPublish(providerState);
+      }
+    }
+    offered = catalog;
+  }
+  // Quota state can flip (a pool hits zero, or its window resets) without the
+  // catalogue changing. When it does, rebuild the registration so the picker
+  // drops/restores the affected models — `PiAiAdapter` memoizes the profiles
+  // snapshot on Map identity, so only a fresh registration can change the
+  // offered set (ROADMAP.md §3.3). Skip when the catalogue branch already
+  // published this exact set a moment ago.
+  //
+  // Skipped entirely when the quota is UNKNOWN. An unknown state is not a
+  // state: comparing its signature against the last known one would always
+  // differ ("" vs "glm-5.2,…"), and that difference is not a flip to react to —
+  // it is the poll failing. Publishing there is what turned a signed-out Host
+  // into one that offers every exhausted model.
+  if (unavailableModelIds !== null) {
+    const quotaSig = quotaSignatureOf(unavailableModelIds);
+    if (quotaSig !== providerState.quotaSignature) {
+      let publishOk = catalogPublishOk;
+      // Same reason as the catalogue branch: a quota write that never reached
+      // the disk must not let the signature skip the retry.
+      let quotaPersisted = true;
+      if (!catalogChanged) {
+        // Persist the flipped quota even when the catalogue branch did not
+        // write (it is cached an hour, a quota pool flips per poll): the seed
+        // reads THIS on the next restart. When the catalogue branch DID
+        // publish, it stamped the same set already — one write per poll.
+        quotaPersisted = await catalogStore.setUnavailable(unavailableModelIds).catch(() => false);
+        const published = await publisher.publish(providerState.entries, providerState.enabledIds, unavailableModelIds);
+        publishOk = published?.ok !== false;
+      }
+      // Same single-source sync as the catalogue branch above; sets both signatures
+      // from the published offer so the next poll sees a stable signal. Gated on
+      // the publish having landed, for the reason stated there — and gated on the
+      // CATALOGUE publish too, so a failure up there is not silently adopted here.
+      // The write gate is the same story one level down: a quota write that never
+      // reached the disk must not let the signature skip the retry.
+      if (publishOk && catalogPersisted && quotaPersisted) {
+        syncSignaturesAfterPublish(providerState);
+      }
+    }
+  }
+  // The counts describe the OFFER, not the catalogue: the adapter is built
+  // from the allow-list-filtered entries, so a panel line that quoted the raw
+  // count would claim to have registered models that were ticked off.
+  //
+  // ...and "the offer" is what the adapter ACTUALLY serves: a quota-blocked
+  // model is dropped from it (`buildDescriptors`), so counting it would tell
+  // the reader "3 models" while the picker answers `no configured model`. The
+  // blocked set is subtracted here for the same reason it is subtracted there —
+  // one fact, one place it is derived, quoted by both.
+  const blockedForOffer = new Set(effectiveUnavailable.filter((id: string) => typeof id === "string" && id !== ""));
+  const offerForCounts = filterByEnabled(offered, enabledIds).filter((entry) => {
+    const id = str((entry as { id?: unknown })?.id, "");
+    return id === "" || !blockedForOffer.has(id);
+  });
+  const summary = summarizeCatalog(offerForCounts);
+  // Secret-free by construction: the store reports booleans/source only, never
+  // the key value.
+  const llmStatus = {
+    ...keyState,
+    registerProvider: resolveSwitchEnabled(effectivePanelSwitch, settings.registerProvider),
+    registerSource: switchSource(effectivePanelSwitch),
+    llmAvailable: providerState.llmAvailable,
+    providerRegistered: providerState.registered,
+    providerId: LLM_PROVIDER_ID,
+    modelCount: summary.modelCount,
+    visionCount: summary.visionCount,
+    // What DSH's 思考强度 "Default" actually means on this provider. The
+    // adapter profile pins this constant, the panel quotes it — same source,
+    // so the two cannot drift.
+    thinkingDefault: DEFAULT_REASONING_EFFORT,
+    // 每模型协议覆盖（面板"协议"列的数据源；缺省 = auto）。
+    modelProtocols,
+    // The panel roster: every chat model this catalogue can offer, each tagged
+    // with whether its quota pool is currently exhausted, plus the curated
+    // allow-list. An empty allow-list means "no filter". Every row also carries
+    // the operator's pseudo `×N` under the SAME matcher the trend rows use —
+    // the badge and the consumption chart quote one computed fact, and an
+    // unmatched model simply gets no badge (never a guessed 1).
+    models: rosterWithAvailability(offered, pools, settings.maxTokensOverrides).map((row) => {
+      const multiplier = matchMultiplier(row.id, settings.trendMultipliers);
+      return multiplier === undefined ? row : { ...row, multiplier };
+    }),
+    enabledModelIds: enabledIds,
+    // The LAST KNOWN exhausted set, not this poll's reading: when the console
+    // could not be reached the panel must keep greying the models it greyed
+    // rather than flip them all back to available. `quotaError` (above) is
+    // what tells the user why the numbers are stale. Wire type unchanged —
+    // "unknown" is a Host-side fact, and the client already renders an absent
+    // list correctly, so there is no third value to add to the contract.
+    quotaBlockedModelIds: effectiveUnavailable,
+    ...(providerState.error !== null ? { providerError: providerState.error } : {})
+  };
+
+  return {
+    ok: true,
+    now: Date.now(),
+    consoleBase: settings.consoleBase,
+    pool: poolDiag,
+    // The panel polls on the Host's cadence and quotes the Host's cache age,
+    // so neither number is written down twice.
+    cacheSeconds: settings.cacheSeconds,
+    pollSeconds: settings.pollSeconds,
+    // Token state, with no secret in it: the panel uses this to say whether
+    // the token renews itself or is waiting on an account.
+    auth: (await tokenStore.state()) as import("../shared/wire.ts").AuthData,
+    catalogAvailable: Array.isArray(catalog),
+    catalogModels: catalogIds,
+    // With the console unreachable the pools are empty, so every catalogue
+    // model would read as "uncounted" — noise that blames the models for the
+    // missing quota data. The `quotaError` line already explains the blank.
+    uncountedModels: quotaError === null && Array.isArray(catalog)
+      ? catalogIds.filter((model) => !pools.pools.some((pool) => pool.modelIds.includes(model)))
+      : [],
+    // Step three status: key presence/source, opt-in, registration state, and
+    // model/vision counts — never the key itself.
+    llm: llmStatus,
+    pools,
+    trend,
+    quotaError,
+    shapeWarnings
+  };
+}

@@ -1,0 +1,55 @@
+# 凭据与本机状态：绝不进版本库
+.env
+.env.*
+*.env
+.zcode/
+# 运行时产物
+*.log
+logs/
+tmp/
+
+# Box-Agent 运行时任务状态：本机自动写入，绝不进版本库
+.box-agent/
+.box-agent-scratch/
+.zcode/
+.agnes/
+
+# 依赖与构建（link 安装下通常没有实体目录，保险起见）
+node_modules/
+
+# 无锁文件是设计决定（ci.yml：peer 包解析不到任何 registry，缓存键故意用
+# package.json）；本机 `npm install` 生成的锁是副产物，绝不误卷入提交。
+package-lock.json
+dist/
+build/
+# 注意是 `.build/` 而不是 `build/`：上面那条模式匹配不到带点的目录名，所以
+# `.build/` 下的会话临时文件（比对脚本、发版正文草稿）曾被原样提交进仓库。
+# 那两个 scratch 文件已在 0.4.10 前清理，这条规则防止复发。
+.build/
+*.tsbuildinfo
+
+# lib/ 与根 client.js 是**受版本管理的产物**（与兄弟插件 dsh-connect-qoder
+# 同款决策，见其 .gitignore 的 docs/issues/19 说明）：DSH 市场的 `github:` 安装源
+# 走 pnpm git-dep，pnpm 11 在没有 allowBuilds 批准时**不会**替它跑 prepack /
+# prepare——若 lib/ 不入库，用户打 GitHub 仓库地址装出来的插件就没有宿主入口
+# （lib/index.js），卡片直接失效。策略：改 src/ 后跑 `npm run build` 并把 lib/
+# 与 client.js 与源码一起提交（CI 的 build-freshness job 有新鲜度门禁：重建后
+# `git diff --exit-code -- lib client.js` 必须为空，否则即「源码动了却没重生成产物」）；
+# 发到 registry 的那一份仍由 prepack 现场重建，两条路径都不靠手工。
+# 注意：不要把 lib/、client.js 加回忽略（下面两行已删除）。
+
+# 编辑器与系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# 上游仓库容器：里面每个上游各占一个「用各自仓库原名」的子目录
+# （如 upstream/sensenova-usage-dashboard/），各自带独立 .git 与 remote。
+# 仅本地容纳、绝不进本仓库历史；保持各嵌套 .git 完好即可独立提交/推送。
+# 以后要塞别的上游，直接在 upstream/ 下并排加同名目录即可，无需改此规则。
+/upstream/
+
+# 本地深检配置（paths 指向本机 dsh-llm 类型树，公网克隆不需要）
+tsconfig.local.json

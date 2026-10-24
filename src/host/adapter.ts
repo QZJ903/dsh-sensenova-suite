@@ -1,0 +1,1267 @@
+/**
+ * SenseNova（OpenAI 兼容）provider 适配器（host 侧）。
+ *
+ * 复用参考插件 @mars-sea/dsh-commandcode-provider 的适配器结构，但只保留
+ * OpenAI 兼容的目录拉取与 SSE 流式翻译，外加「流开始前的 401 账号轮换」
+ * （429 不轮换：一个会话固定一个 key，保护服务端按 key 命中的 prompt 缓存，
+ * 429 交由宿主重试层退避后原 key 重试）。
+ * 与 pi-ai 的 `toStreamChunks` 不同，这里直接消费 OpenAI SSE（`data:` 行、
+ * `[DONE]`、`choices[].delta`、`finish_reason`、`usage`），不引入第三方流库。
+ *
+ * 适配器刻意不依赖 cordis/schemastery：每请求的连接事实与 key 解析/轮换
+ * 全部通过构造注入，node 测试可直接驱动。
+ *
+ * @module dsh-sensenova-suite/adapter
+ */
+import {
+  LlmAdapter,
+  LlmError,
+  ReasoningEffortId,
+  attributionHeaders,
+  errorChain,
+  projectImagesForTextModel,
+  resolveRetryPolicy,
+} from '@deepseek-ai/dsh-llm';
+import { ToolCallId } from './brand.ts';
+import type {
+  FinishReason,
+  GenerateOptions,
+  LlmModelInfo,
+  LlmModelReasoningInfo,
+  LlmProviderInfo,
+  LlmResolvedModelInfo,
+  ModelModality,
+  ResolvedRetryPolicy,
+  StreamChunk,
+  TokenUsage,
+} from '@deepseek-ai/dsh-llm';
+import { parseRetryAfterMs, classify429Body, classify429Full, QUOTA_RATE_RETRY_FLOOR_MS, TPM_PROBE_BACKOFF_STEPS_MS } from './rate-classify.ts';
+import { retryableCodes } from './llm-retry.ts';
+import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
+
+/**
+ * SenseNova 目录通常不披露上下文字段，这里用 131072 作为合理默认
+ * （DeepSeek 系列与 SenseNova 常见模型窗口）；目录有字段时优先采用。
+ */
+const DEFAULT_CONTEXT_WINDOW = 131_072;
+const MODELS_TIMEOUT_MS = 10_000;
+/**
+ * 目录缓存 TTL（毫秒）：宿主（模型选择器/策略 UI）会以秒级周期反复调用
+ * listModels()（2026-10-10 Loon 实测 ~5s 一次），而模型目录变化极慢。
+ * 缓存命中期间从内存应答，不发 HTTP；用户明确「一天一次够用」。
+ */
+const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
+/** 目录刷新失败后的退避（毫秒）：防止故障时退化为秒级重试循环。 */
+const CATALOG_FAILURE_RETRY_MS = 60_000;
+/**
+ * 提交给 provider 重试层的延迟上限（毫秒）：本地退避与非配额 429 的
+ * Retry-After 均受此约束，同时作为重试策略退避单次上限。
+ * fix-sensenova-429-quota-retry（2026-09-04 实测）：原 3000ms 与配额窗口量级
+ * 不符——TPM 为 60 秒窗口，提升到 60000ms（spec 允许区间 60–120s 的下沿）。
+ */
+const PROVIDER_RETRY_AFTER_CAP_MS = 60_000;
+/** 配额类 429 退避指导（providerRetryAfterMs）的绝对上限（毫秒）：与
+ * PROVIDER_RETRY_AFTER_CAP_MS（即重试策略单次延迟上限）一致。宿主 dsh-llm-retry
+ * （normal 模式）在 providerRetryAfterMs 超过单次延迟上限时会直接放弃重试，封顶
+ * 对齐后保证任何采用值都会被宿主按指导延迟重试；不影响 TPM 分级档（3–15s）与
+ * code 8 固定档（15s）的正常取值。 */
+const QUOTA_RETRY_AFTER_CEILING_MS = 60_000;
+/** 配额类 429（code 8，rps/rpm exhausted）退避下限（毫秒）。2026-09-04 实测：速率桶补充 ≈1 个/14s，15s 覆盖一个完整补充周期。 */
+/** 生成请求连接/首字节超时（毫秒）。2026-09-04 实测：传输挂起 ≈1/5 且无 RST，45s 覆盖大 prompt 建连+首包（design D4/D6）。 */
+export const CONNECT_TIMEOUT_MS = 45_000;
+/** SSE 流空闲看门狗（毫秒）：距上一事件 ≥ 该值无任何 chunk/事件即按停摆结束。2026-09-04 实测：思考期渠道有空事件/心跳自然重置计时（design D4/D6）。 */
+export const STREAM_IDLE_TIMEOUT_MS = 60_000;
+/** 已知不可路由的模型 id 清单（已下线路由，调用返回 404）。 */
+const KNOWN_UNROUTABLE_MODELS: ReadonlySet<string> = new Set(['sensenova-6.7-flash-lite']);
+/** 明确的模型不可用错误码（不在默认可重试集合内，故不触发 provider 重试）。 */
+const MODEL_NOT_FOUND_CODE = 'MODEL_NOT_FOUND';
+/** 模型 id → 标准显示名的显式品牌映射。 */
+const DISPLAY_NAME_OVERRIDES: ReadonlyMap<string, string> = new Map([
+  ['sensenova-6.7-flash-lite', 'Sensenova 6.7 Flash Lite'],
+]);
+/** 官方文档声明的模型族事实已迁入 src/wire/facts.ts（add-model-facts 2.2）；
+ * adapter 仅消费 factsFor/staticFacts，不复制第二份。 */
+import { factsFor, staticFacts } from './wire/facts.ts';
+/** Chat 请求体构造已迁出至 wire/body-chat.ts（make-responses-default-wire-protocol 4.1，行为不变）。 */
+import { buildChatBody } from './wire/body-chat.ts';
+import { buildResponsesBody, type ReasoningSummary } from './wire/body-responses.ts';
+import { buildAnthropicBody } from './wire/body-anthropic.ts';
+import { parseResponsesSse } from './wire/sse-responses.ts';
+import { parseAnthropicSse } from './wire/sse-anthropic.ts';
+import { resolveWirePlan, type WireProtocol } from './wire/plan.ts';
+import { prepareImages, type ImageAccessResolver, type PreparedImage } from './wire/blocks.ts';
+import type { WireKind } from './wire/types.ts';
+
+export interface SensenovaConnection {
+  apiBase: string;
+  /** 已配置账户槽位总数，用于轮换上限（tried.size < accountCount）。 */
+  accountCount: number;
+  /** 每 key 并发生成请求上限（正整数）；非法值在并发闸内回退 1。 */
+  concurrency?: number;
+  /** 配额类 429 粘性换 key 开关（默认关；开启后仅配额类 429 触发切换，design D5）。 */
+  quotaRotation?: boolean;
+  /** wire 协议模式（make-responses-default-wire-protocol §5.1；缺省 auto：优先 Responses，
+   * 语义会丢失时按决策表降级 Chat）。 */
+  wireProtocol?: WireProtocol;
+  /** Responses 推理摘要（reasoning.summary；缺省 auto）。 */
+  reasoningSummary?: ReasoningSummary;
+}
+
+/** 生成请求三段超时注入（毫秒，测试用）；缺省用模块级常量/并发闸默认。 */
+export interface SensenovaTimeouts {
+  /** 连接/首字节超时；缺省 CONNECT_TIMEOUT_MS。 */
+  connectMs?: number;
+  /** SSE 流空闲看门狗；缺省 STREAM_IDLE_TIMEOUT_MS。 */
+  streamIdleMs?: number;
+  /** 并发闸排队超时；缺省 concurrency.DEFAULT_QUEUE_TIMEOUT_MS。 */
+  queueMs?: number;
+}
+
+export interface SensenovaAdapterDeps {
+  /** 每请求的连接事实（apiBase、账户数、并发上限、配额轮换开关）。 */
+  options: () => SensenovaConnection;
+  /** 解析一个可用 key（无可解析 key 时抛 MISSING_CREDENTIAL）。 */
+  resolveApiKey: (connection: SensenovaConnection) => Promise<string>;
+  /**
+   * 轮换到下一个 key：401（'invalid-credential'）永久禁用被拒账号；
+   * 速率/TPM 类 429（'quota-exhausted'）与积分池类 429（'pool-exhausted'，
+   * dsh-sensenova-suite 扩展）不写任何账号状态，仅用于换 key。
+   * 返回 undefined 表示无更多 key。
+   */
+  rotateApiKey: (
+    rejectedKey: string,
+    rejection: 'invalid-credential' | 'quota-exhausted' | 'pool-exhausted',
+  ) => Promise<string | undefined>;
+  /**
+   * 请求结局上报（dsh-sensenova-suite 扩展，可选）：2xx 时回调 'success'，
+   * 池层据此清连续限流计数并救回被借用的阻塞 key。缺省 undefined 不影响原行为。
+   */
+  reportOutcome?: (key: string, outcome: 'success') => void;
+  /**
+   * 目录过滤（dsh-sensenova-suite 扩展，可选）：listModels 的输出按
+   * { enabledIds（空 = 全量）, unavailableIds } 过滤——面板的允许清单与
+   * 额度标记语义在 wire 适配器上的落点。缺省 undefined = 不过滤。
+   */
+  catalogFilter?: () => { enabledIds: string[]; unavailableIds: string[] };
+  /**
+   * 每模型协议覆盖（dsh-sensenova-suite 扩展，可选）：面板"协议"列的运行期
+   * 读取——覆盖为具体协议时该模型从它起步（auto/未覆盖走决策表；运行期 400
+   * 兜底降级仍然生效）。缺省 undefined = 全部 auto。
+   */
+  protocolOverrides?: () => Record<string, string>;
+  fetchImpl?: typeof fetch;
+  /**
+   * 按请求解析 key（dsh-sensenova-suite 扩展点，可选）：与 resolveApiKey 不同，
+   * 这里拿到会话标识与模型 id，供池层做「按积分组的粘性/轮转」分派。
+   * 缺省 undefined 时回落 resolveApiKey（行为与原 provider 插件一致）。
+   */
+  resolveApiKeyForRequest?: (request: { sessionId: string | undefined; model: string }) => Promise<string>;
+  /**
+   * 全局在途槽（dsh-sensenova-suite 扩展点，可选）：一次 stream() 请求全程持有，
+   * 结束（含异常）释放；缺省 undefined 时不限全局并发（仅每 key 闸）。
+   */
+  requestSlot?: (signal?: AbortSignal) => Promise<() => void>;
+  /** 每 key 并发闸；缺省为进程内实例（可注入以利测试）。 */
+  concurrencyGate?: KeyedConcurrencyGate;
+  /** 三段超时注入（测试用）；缺省为生产常量。 */
+  timeouts?: SensenovaTimeouts;
+  /**
+   * 图像来源解析器（add-multimodal-input）：宿主 ImageBlock 只带 attachment 引用，
+   * 字节须经 resolveImageAttachmentAccess 桥接的本地只读路径（或现成 URL）取得。
+   * 缺省 undefined → 图像按宿主 textOnlyImageText 占位出站（不静默丢弃）。
+   */
+  resolveImageAccess?: ImageAccessResolver;
+}
+
+/** 目录条目：宿主所需的能力元数据快照（listModels 后缓存，resolveModel 消费）。 */
+interface CatalogEntry {
+  id: string;
+  name: string;
+  inputModalities: readonly ModelModality[];
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  reasoning?: LlmModelReasoningInfo;
+  /** 目录 supported_sampling_parameters 白名单（模型支持的采样参数列表，缺失时用静态兜底）。 */
+  supportedSamplingParameters?: readonly string[];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function toNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+/** wire → 端点路径（三条协议共享同一 apiBase，路径各不同）。 */
+function endpointOf(wire: WireKind): string {
+  if (wire === 'anthropic') return '/messages';
+  if (wire === 'responses') return '/responses';
+  return '/chat/completions';
+}
+
+/** 把模型 id 标准化为可读显示名：显式映射优先，否则按品牌前缀回退。 */
+function displayNameFor(id: string): string {
+  const override = DISPLAY_NAME_OVERRIDES.get(id);
+  if (override !== undefined) return override;
+  const normalized = id.trim();
+  // 回退规则：按连字符/下划线切词（点号属于版本号，如 6.8、u1.5，需保留），
+  // 再按大写边界切词，首字母大写其余小写。
+  const words = normalized
+    .split(/[-_]+/)
+    .filter((part) => part !== '')
+    .flatMap((part) => part.split(/(?<=[a-z0-9])(?=[A-Z])/));
+  if (words.length === 0) return normalized;
+  const titled = words.map((word) => (word.length > 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word));
+  return titled.join(' ').replace(/\s+/g, ' ').trim();
+}
+
+/** 从目录条目读取一个正数能力字段（按优先级），缺失/非法返回 undefined。 */
+function firstPositiveNumber(raw: Record<string, unknown>, keys: readonly string[]): number | undefined {
+  for (const key of keys) {
+    const value = raw[key];
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  }
+  return undefined;
+}
+
+function firstContextField(raw: Record<string, unknown>): number | undefined {
+  return firstPositiveNumber(raw, ['context_length', 'context_window', 'max_context_length', 'contextLength']);
+}
+
+function firstMaxOutputField(raw: Record<string, unknown>): number | undefined {
+  // max_output_length 是 SenseNova /models 目录的实际字段名，置首优先；OpenAI 风格字段保留兜底。
+  return firstPositiveNumber(raw, ['max_output_length', 'max_tokens', 'max_output_tokens', 'max_completion_tokens', 'maxTokens', 'maxOutputTokens', 'maxCompletionTokens']);
+}
+
+/** 把目录声明的输入模态映射为宿主 ModelModality 列表；未声明时回退 ['text']。 */
+function inputModalitiesFrom(raw: Record<string, unknown>): readonly ModelModality[] {
+  const declared = raw.input_modalities;
+  if (!Array.isArray(declared)) return ['text'];
+  const modalities: ModelModality[] = [];
+  for (const item of declared) {
+    const modality = toString(item);
+    if (modality === 'text' || modality === 'image') {
+      if (!modalities.includes(modality)) modalities.push(modality);
+    }
+  }
+  return modalities.length > 0 ? modalities : ['text'];
+}
+
+/** 读取目录中的 effort 词表字段；返回字符串数组或 undefined（无明确词表）。 */
+function effortListField(raw: Record<string, unknown>): readonly string[] | undefined {
+  for (const key of ['reasoning_efforts', 'reasoning_levels']) {
+    const value = raw[key];
+    if (Array.isArray(value)) {
+      const efforts = value.filter((item): item is string => typeof item === 'string' && item !== '');
+      if (efforts.length > 0) return efforts;
+    }
+  }
+  return undefined;
+}
+
+/** 读取嵌套 reasoning.efforts / thinking.efforts 词表；返回字符串数组或 undefined。 */
+function nestedEffortListField(raw: Record<string, unknown>): readonly string[] | undefined {
+  for (const key of ['reasoning', 'thinking']) {
+    const holder = raw[key];
+    if (!isRecord(holder)) continue;
+    const efforts = holder.efforts;
+    if (Array.isArray(efforts)) {
+      const list = efforts.filter((item): item is string => typeof item === 'string' && item !== '');
+      if (list.length > 0) return list;
+    }
+  }
+  return undefined;
+}
+
+/** 读取目录中的默认 effort 字段；返回字符串或 undefined。 */
+function defaultEffortField(raw: Record<string, unknown>): string | undefined {
+  const direct = raw.default_reasoning_effort;
+  if (typeof direct === 'string' && direct !== '') return direct;
+  for (const key of ['reasoning', 'thinking']) {
+    const holder = raw[key];
+    if (isRecord(holder)) {
+      const value = holder.defaultEffort ?? holder.default_effort;
+      if (typeof value === 'string' && value !== '') return value;
+    }
+  }
+  return undefined;
+}
+
+/** 目录是否声明支持 reasoning；仅用于静态已知模型族的档位补全。 */
+function hasReasoningSupport(raw: Record<string, unknown>): boolean {
+  const features = raw.supported_features;
+  if (Array.isArray(features) && features.includes('reasoning')) return true;
+  // 兼容旧目录的宽松支持标记，但不把任意模型 id 当作已知模型。
+  if (raw.reasoning_effort !== undefined) return true;
+  const thinking = raw.thinking;
+  return thinking === true || isRecord(thinking);
+}
+
+/** 读取目录 supported_sampling_parameters 白名单；缺失返回 undefined。 */
+function samplingListField(raw: Record<string, unknown>): readonly string[] | undefined {
+  const value = raw.supported_sampling_parameters;
+  if (!Array.isArray(value)) return undefined;
+  const list = value.filter((item): item is string => typeof item === 'string' && item !== '');
+  return list.length > 0 ? list : undefined;
+}
+
+/** 目录未返回 supported_sampling_parameters 时的静态兜底已迁入 src/wire/facts.ts
+ * （静态档案 samplingParameters 字段；kimi-k3 依文档 :2455-2457 补 seed/parallel_tool_calls）。 */
+
+/** 解析目录条目的 reasoning 词表；目录词表优先，静态表仅补全已知且有支持标记的模型。
+ * defaultEffort：目录声明的默认档优先；目录未带（或命中静态表）时回退静态表默认档
+ * （align-request-fields-with-docs 1.2：命中静态表即声明 defaultEffort）。 */
+function reasoningInfoFrom(raw: Record<string, unknown>, modelId: string): LlmModelReasoningInfo | undefined {
+  const efforts = effortListField(raw) ?? nestedEffortListField(raw);
+  const knownFacts = staticFacts(modelId);
+  const selectedEfforts = efforts ?? (knownFacts !== undefined && hasReasoningSupport(raw) ? knownFacts.efforts : undefined);
+  if (selectedEfforts === undefined || selectedEfforts.length === 0) return undefined;
+  const infos = selectedEfforts.map((effort) => ({ id: ReasoningEffortId(effort), name: effort }));
+  const declaredDefault = efforts !== undefined ? defaultEffortField(raw) : undefined;
+  const fallbackDefault = knownFacts?.defaultEffort ?? undefined;
+  const defaultEffort = declaredDefault ?? fallbackDefault;
+  const defaultId = defaultEffort !== undefined && selectedEfforts.includes(defaultEffort)
+    ? ReasoningEffortId(defaultEffort)
+    : undefined;
+  return {
+    efforts: infos,
+    ...(defaultId !== undefined ? { defaultEffort: defaultId } : {}),
+  };
+}
+
+/** 解析 OpenAI 模型目录为目录条目；应用自动过滤与失败缓存。 */
+function parseCatalog(value: unknown, failedModels: ReadonlySet<string>): CatalogEntry[] {
+  if (!isRecord(value) || !Array.isArray(value.data)) {
+    throw new LlmError('llm-sensenova: unexpected models response shape', 'PROVIDER_PROTOCOL_ERROR');
+  }
+  const out: CatalogEntry[] = [];
+  for (const raw of value.data) {
+    if (!isRecord(raw)) continue;
+    const id = toString(raw.id);
+    if (id === undefined || id === '') continue;
+    // 1) image-only 永远排除：output_modalities 必须含 text，否则不可进入 chat 选择器。
+    const output = raw.output_modalities;
+    const outputsText = Array.isArray(output) ? output.some((item) => toString(item) === 'text') : false;
+    if (!outputsText) continue;
+    // 2) 按已知不可路由清单与失败缓存过滤；目录是唯一模型来源。
+    if (KNOWN_UNROUTABLE_MODELS.has(id)) continue;
+    if (failedModels.has(id)) continue;
+    const contextWindow = firstContextField(raw);
+    const maxOutputTokens = firstMaxOutputField(raw);
+    const reasoning = reasoningInfoFrom(raw, id);
+    const supportedSamplingParameters = samplingListField(raw);
+    out.push({
+      id,
+      name: displayNameFor(id),
+      inputModalities: inputModalitiesFrom(raw),
+      ...(contextWindow !== undefined ? { contextWindow } : {}),
+      ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+      ...(reasoning !== undefined ? { reasoning } : {}),
+      ...(supportedSamplingParameters !== undefined ? { supportedSamplingParameters } : {}),
+    });
+  }
+  return out;
+}
+
+/** OpenAI usage → 宿主 TokenUsage（inputTokens 为未缓存输入，缓存读单独计）。 */
+function mapUsage(usage: Record<string, unknown>): TokenUsage {
+  const prompt = toNumber(usage.prompt_tokens);
+  const completion = toNumber(usage.completion_tokens);
+  const total = toNumber(usage.total_tokens);
+  const promptDetails = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : undefined;
+  const completionDetails = isRecord(usage.completion_tokens_details) ? usage.completion_tokens_details : undefined;
+  const cacheRead = promptDetails !== undefined ? toNumber(promptDetails.cached_tokens) : 0;
+  const reasoning = completionDetails !== undefined ? toNumber(completionDetails.reasoning_tokens) : 0;
+  return {
+    inputTokens: Math.max(0, prompt - cacheRead),
+    outputTokens: completion,
+    totalTokens: total > 0 ? total : prompt + completion,
+    ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
+    ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
+  };
+}
+
+/** OpenAI finish_reason → 宿主 FinishReason。 */
+function mapFinishReason(reason: string): FinishReason {
+  switch (reason) {
+    case 'stop': return { kind: 'stop' };
+    case 'tool_calls':
+    case 'function_call': return { kind: 'tool-calls' };
+    case 'length': return { kind: 'max-tokens' };
+    case 'aborted': return { kind: 'aborted', failure: { message: 'SenseNova stream aborted', code: 'ABORTED' } };
+    default: return { kind: 'stop' };
+  }
+}
+
+/** 解析一行 SSE；返回解析后的数据对象，`[DONE]` 或空行/注释行返回 undefined。 */
+function parseSseDataLine(line: string): unknown {
+  let trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith(':')) return undefined;
+  if (trimmed.startsWith('data:')) trimmed = trimmed.slice(5).trim();
+  if (!trimmed || trimmed === '[DONE]') return undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+}
+
+/** SSE 翻译期间的增量组装状态。 */
+interface SseState {
+  nextIndex: number;
+  textIndex: number;
+  textContent: string;
+  reasoningIndex: number;
+  reasoningContent: string;
+  toolIndexById: Map<string, number>;
+  toolIndexByProtocolIndex: Map<number, number>;
+  /** 无 index 且无 id 的退化分片：name → 槽位（name 是工具边界）。 */
+  toolIndexByAnonymousName: Map<string, number>;
+  /** 最近一次无键续片指向的槽（无 name 续片回退目标）。 */
+  lastAnonymousIndex: number;
+  toolIdByIndex: Map<number, string>;
+  toolNameByIndex: Map<number, string>;
+  toolArgsByIndex: Map<number, string>;
+  sawContent: boolean;
+  pendingUsage: TokenUsage | undefined;
+  usageEmitted: boolean;
+  finished: boolean;
+}
+
+function createSseState(): SseState {
+  return {
+    nextIndex: 0,
+    textIndex: -1,
+    textContent: '',
+    reasoningIndex: -1,
+    reasoningContent: '',
+    toolIndexById: new Map(),
+    toolIndexByProtocolIndex: new Map(),
+    toolIndexByAnonymousName: new Map(),
+    lastAnonymousIndex: -1,
+    toolIdByIndex: new Map(),
+    toolNameByIndex: new Map(),
+    toolArgsByIndex: new Map(),
+    sawContent: false,
+    pendingUsage: undefined,
+    usageEmitted: false,
+    finished: false,
+  };
+}
+
+function closeText(state: SseState): StreamChunk[] {
+  if (state.textIndex < 0) return [];
+  const chunk: StreamChunk = {
+    type: 'block-end',
+    index: state.textIndex,
+    block: { type: 'text', text: state.textContent },
+  };
+  state.textIndex = -1;
+  state.textContent = '';
+  return [chunk];
+}
+
+function closeReasoning(state: SseState): StreamChunk[] {
+  if (state.reasoningIndex < 0) return [];
+  const chunk: StreamChunk = {
+    type: 'block-end',
+    index: state.reasoningIndex,
+    block: { type: 'reasoning', text: state.reasoningContent },
+  };
+  state.reasoningIndex = -1;
+  state.reasoningContent = '';
+  return [chunk];
+}
+
+function closeToolCalls(state: SseState): StreamChunk[] {
+  const chunks: StreamChunk[] = [];
+  for (const [index, args] of [...state.toolArgsByIndex.entries()]) {
+    const name = state.toolNameByIndex.get(index) ?? '';
+    if (name === '') continue; // name 始终未到达的残缺调用不产出 tool-call block，避免污染历史导致后续 400
+    const id = state.toolIdByIndex.get(index) ?? `sensenova-tool-${index}`;
+    chunks.push({
+      type: 'block-end',
+      index,
+      block: {
+        type: 'tool-call',
+        id: ToolCallId(id),
+        name,
+        arguments: args !== '' ? args : '{}',
+      },
+    });
+  }
+  state.toolArgsByIndex.clear();
+  state.toolIdByIndex.clear();
+  state.toolNameByIndex.clear();
+  state.toolIndexById.clear();
+  state.toolIndexByProtocolIndex.clear();
+  state.toolIndexByAnonymousName.clear();
+  state.lastAnonymousIndex = -1;
+  return chunks;
+}
+
+/** 将事件中的 usage 转成单次 usage chunk，避免 finish/trailing 重复发出。 */
+function usageChunksFrom(event: unknown, state: SseState): StreamChunk[] {
+  if (state.usageEmitted || !isRecord(event)) return [];
+  const usageRec = isRecord(event.usage) ? event.usage : undefined;
+  if (state.pendingUsage === undefined && usageRec === undefined) return [];
+  const usage = state.pendingUsage ?? mapUsage(usageRec as Record<string, unknown>);
+  state.pendingUsage = undefined;
+  state.usageEmitted = true;
+  return [{ type: 'usage', usage }];
+}
+
+/** 处理一个 OpenAI SSE 数据对象，返回对应的宿主 StreamChunk 序列。 */
+function processChunkEvent(event: unknown, state: SseState): StreamChunk[] {
+  if (!isRecord(event)) return [];
+  const choices = event.choices;
+  if (!Array.isArray(choices)) return usageChunksFrom(event, state);
+  const chunks: StreamChunk[] = [];
+  for (const rawChoice of choices) {
+    if (state.finished) break;
+    if (!isRecord(rawChoice)) continue;
+    const delta = isRecord(rawChoice.delta) ? rawChoice.delta : undefined;
+    const finishReasonRaw = rawChoice.finish_reason;
+    const finishReason = typeof finishReasonRaw === 'string' && finishReasonRaw !== '' && finishReasonRaw !== 'null' ? finishReasonRaw : undefined;
+
+    if (delta !== undefined) {
+      const content = toString(delta.content) ?? '';
+      // 6.8 系使用 reasoning，其他模型使用 reasoning_content；同一事件以前者为优先。
+      const reasoning = toString(delta.reasoning_content) ?? toString(delta.reasoning) ?? '';
+      const toolCalls = Array.isArray(delta.tool_calls) ? delta.tool_calls.filter(isRecord) : [];
+
+      if (reasoning !== '') {
+        chunks.push(...closeText(state));
+        if (state.reasoningIndex < 0) {
+          state.reasoningIndex = state.nextIndex;
+          state.nextIndex += 1;
+          chunks.push({ type: 'block-start', index: state.reasoningIndex, blockType: 'reasoning' });
+        }
+        state.reasoningContent += reasoning;
+        chunks.push({ type: 'reasoning-delta', index: state.reasoningIndex, text: reasoning });
+      }
+
+      if (content !== '') {
+        chunks.push(...closeReasoning(state));
+        if (state.textIndex < 0) {
+          state.textIndex = state.nextIndex;
+          state.nextIndex += 1;
+          chunks.push({ type: 'block-start', index: state.textIndex, blockType: 'text' });
+        }
+        state.textContent += content;
+        state.sawContent = true;
+        chunks.push({ type: 'text-delta', index: state.textIndex, text: content });
+      }
+
+      for (const tc of toolCalls) {
+        const id = toString(tc.id) ?? '';
+        const protocolIndex = typeof tc.index === 'number' && Number.isInteger(tc.index) ? tc.index : undefined;
+        const fn = isRecord(tc.function) ? tc.function : undefined;
+        const name = fn !== undefined ? (toString(fn.name) ?? '') : '';
+        const argsDelta = fn !== undefined ? (toString(fn.arguments) ?? '') : '';
+        // OpenAI 规范的 index 优先；非规范响应依次回退到稳定 id、匿名 name。
+        let index: number | undefined;
+        if (protocolIndex !== undefined) {
+          index = state.toolIndexByProtocolIndex.get(protocolIndex);
+        } else if (id !== '') {
+          index = state.toolIndexById.get(id);
+        } else if (name !== '') {
+          // name 是匿名分片流的工具边界：同 name 归同槽（可能跨事件续片）。
+          index = state.toolIndexByAnonymousName.get(name);
+        } else {
+          // 纯 arguments 续片：无 name 无法标识工具，续最近匿名槽（防御性，
+          // 真实网关不会发既无 index/id 也无 name 的分片流）。
+          index = state.lastAnonymousIndex >= 0 ? state.lastAnonymousIndex : undefined;
+        }
+        if (index === undefined) {
+          chunks.push(...closeText(state), ...closeReasoning(state));
+          index = state.nextIndex;
+          state.nextIndex += 1;
+          if (protocolIndex !== undefined) state.toolIndexByProtocolIndex.set(protocolIndex, index);
+          if (id !== '') state.toolIndexById.set(id, index);
+          if (name !== '' && protocolIndex === undefined && id === '') {
+            state.toolIndexByAnonymousName.set(name, index);
+            state.lastAnonymousIndex = index;
+          }
+          state.toolIdByIndex.set(index, id);
+          state.toolNameByIndex.set(index, name);
+          state.toolArgsByIndex.set(index, '');
+          chunks.push({ type: 'block-start', index, blockType: 'tool-call' });
+          state.sawContent = true;
+        }
+        if (id !== '') {
+          state.toolIdByIndex.set(index, id);
+          state.toolIndexById.set(id, index);
+        }
+        if (name !== '') state.toolNameByIndex.set(index, name);
+        if (protocolIndex === undefined && id === '' && name !== '') {
+          state.toolIndexByAnonymousName.set(name, index);
+          state.lastAnonymousIndex = index;
+        }
+        const accumulated = (state.toolArgsByIndex.get(index) ?? '') + argsDelta;
+        state.toolArgsByIndex.set(index, accumulated);
+        const effectiveName = state.toolNameByIndex.get(index) ?? '';
+        chunks.push({
+          type: 'tool-call-delta',
+          index,
+          id: ToolCallId(state.toolIdByIndex.get(index) ?? `sensenova-tool-${index}`),
+          ...(effectiveName !== '' ? { name: effectiveName } : {}),
+          argumentsDelta: argsDelta,
+        });
+      }
+    }
+
+    if (finishReason !== undefined) {
+      state.finished = true;
+      chunks.push(...closeText(state), ...closeReasoning(state), ...closeToolCalls(state));
+      chunks.push(...usageChunksFrom(event, state));
+      chunks.push({ type: 'finish', reason: mapFinishReason(finishReason) });
+      continue;
+    }
+
+    const usageRec = isRecord(event.usage) ? event.usage : undefined;
+    if (usageRec !== undefined && state.pendingUsage === undefined) {
+      state.pendingUsage = mapUsage(usageRec);
+    }
+  }
+  return chunks;
+}
+
+/** 把 OpenAI SSE 响应体翻译为宿主 StreamChunk 序列。 */
+async function* parseOpenAiSse(
+  body: ReadableStream<Uint8Array>,
+  signal: AbortSignal | undefined,
+  idleTimeoutMs: number,
+): AsyncIterable<StreamChunk> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const state = createSseState();
+  let buffer = '';
+  let finished = false;
+  // 流空闲看门狗（design D4，2026-09-04 实测：思考期渠道有空事件/心跳自然重置）：
+  // 每次读到事件即重置计时；距上一事件 ≥ idleTimeoutMs 无任何 chunk/事件时以
+  // TimeoutError 中断挂起的 read，走 finally 释放额度并在 catch 映射可重试 TIMEOUT。
+  let watchdogReject: ((error: unknown) => void) | undefined;
+  let watchdogTimer: ReturnType<typeof setTimeout> | undefined;
+  const armWatchdog = () => {
+    if (watchdogTimer !== undefined) clearTimeout(watchdogTimer);
+    watchdogTimer = setTimeout(() => {
+      watchdogReject?.(new DOMException(`SenseNova stream idle for ${idleTimeoutMs}ms`, 'TimeoutError'));
+    }, idleTimeoutMs);
+  };
+  const disarmWatchdog = () => {
+    if (watchdogTimer !== undefined) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = undefined;
+    }
+  };
+  try {
+    for (;;) {
+      // read 与看门狗竞争：看门狗先触发则中断挂起的 read（消费侧背压不计入空闲）。
+      const read: ReadableStreamReadResult<Uint8Array> = await new Promise((resolve, reject) => {
+        watchdogReject = reject;
+        reader.read().then(resolve, reject);
+        armWatchdog();
+      });
+      disarmWatchdog();
+      const { done, value } = read;
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const event = parseSseDataLine(line);
+        if (event === undefined) continue;
+        if (finished) {
+          for (const chunk of usageChunksFrom(event, state)) yield chunk;
+          continue;
+        }
+        for (const chunk of processChunkEvent(event, state)) {
+          yield chunk;
+          if (chunk.type === 'finish') finished = true;
+        }
+      }
+    }
+    if (buffer.trim() !== '') {
+      const event = parseSseDataLine(buffer);
+      if (event !== undefined) {
+        if (finished) {
+          for (const chunk of usageChunksFrom(event, state)) yield chunk;
+        } else {
+          for (const chunk of processChunkEvent(event, state)) {
+            yield chunk;
+            if (chunk.type === 'finish') finished = true;
+          }
+        }
+      }
+    }
+    if (!finished) {
+      const trailing = [...closeText(state), ...closeReasoning(state), ...closeToolCalls(state)];
+      for (const chunk of trailing) yield chunk;
+      if (!state.sawContent) {
+        throw new LlmError('llm-sensenova: SenseNova returned an empty response；SenseNova 返回了空响应，重试通常可恢复', 'EMPTY_RESPONSE');
+      }
+      if (state.pendingUsage !== undefined) yield { type: 'usage', usage: state.pendingUsage };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    }
+  } catch (error) {
+    // 连接超时 signal（与 fetch 共用）在流阶段触发时，reason 为 TimeoutError：
+    // 同样按可重试 TIMEOUT 收口（宿主 signal abort 保持原样透传）。
+    if ((signal?.aborted && isTimeoutReason(signal.reason)) || isTimeoutReason(error)) {
+      throw new LlmError(
+        `llm-sensenova: SenseNova stream stalled or timed out；SenseNova 流式响应停摆或超时（空闲/首字节超时，已释放并发额度），交宿主重试层处理`,
+        'TIMEOUT',
+        { cause: error },
+      );
+    }
+    if (signal?.aborted || error instanceof LlmError) throw error;
+    throw new LlmError(`llm-sensenova: SenseNova stream failed: ${errorChain(error)}；SenseNova 流式响应中途失败`, 'TRANSPORT', { cause: error });
+  } finally {
+    disarmWatchdog();
+    await reader.cancel().catch(() => void 0);
+    reader.releaseLock();
+  }
+}
+
+/** 判断错误文本是否为「模型不可路由」的 404 措辞。 */
+function isModelNotFoundText(errText: string): boolean {
+  const lower = errText.toLowerCase();
+  return lower.includes('model route not found') || lower.includes('model is not found');
+}
+
+/** §5.3：400 响应体是否为 error.type === 'invalid_request_error'（Responses 运行时不符信号）。 */
+function isInvalidRequestError(errText: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(errText);
+    return isRecord(parsed) && isRecord(parsed.error) && parsed.error.type === 'invalid_request_error';
+  } catch {
+    return false;
+  }
+}
+
+/** 是否为 AbortSignal.timeout / 看门狗 / 排队超时产生的 TimeoutError。 */
+function isTimeoutReason(value: unknown): value is Error {
+  return value instanceof Error && value.name === 'TimeoutError';
+}
+
+/** Anthropic 协议的错误 type 词表（公开规范；商汤 /v1/messages 遵循）。 */
+const ANTHROPIC_OVERLOADED = 'overloaded_error';
+const ANTHROPIC_RATE_LIMIT = 'rate_limit_error';
+const ANTHROPIC_AUTH = new Set(['authentication_error', 'permission_error']);
+
+/** 从错误体取 Anthropic 形状的 error.type（非该形状返回 undefined）。 */
+function anthropicErrorType(errText: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(errText);
+    if (!isRecord(parsed) || !isRecord(parsed.error)) return undefined;
+    const type = parsed.error.type;
+    return typeof type === 'string' ? type : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 把预流 HTTP 失败映射为稳定 LlmError。
+ * dynamicFloorMs：stream 层算好的配额类动态退避下限（429001 分级探测），
+ * 覆盖 classify429Body 返回的静态 floor；undefined 时用静态 floor。
+ * wire：当前请求走的协议；Anthropic 协议的错误体用 type 字符串而非数字 code，
+ * 需单独识别 overloaded / rate_limit，否则会被当成普通 HTTP 5xx/4xx 漏判。 */
+function httpError(status: number, errText: string, retryAfterMs: number | undefined, dynamicFloorMs?: number, wire?: WireKind): LlmError {
+  const anthropicType = wire === 'anthropic' ? anthropicErrorType(errText) : undefined;
+  if (status === 401) {
+    return new LlmError(
+      'llm-sensenova: SenseNova API error 401 — the API key is missing or invalid；SenseNova API 返回 401：密钥缺失或无效',
+      'INVALID_CREDENTIAL',
+      { status: 401 },
+    );
+  }
+  if (status === 404 && isModelNotFoundText(errText)) {
+    return new LlmError(
+      'llm-sensenova: SenseNova model is not routable — the model id is no longer served；SenseNova 模型不可路由：该模型 id 已下线',
+      MODEL_NOT_FOUND_CODE,
+      { status: 404 },
+    );
+  }
+  if (status === 429) {
+    // SenseNova 429 按 error.code 二分类（design D1，2026-09-04 实测）：
+    // 配额类（code 8 速率耗尽 / 429001 TPM 耗尽）携带退避下限 providerRetryAfterMs；
+    // 429001 用 stream 层算好的分级探测档（dynamicFloorMs：3/5/10/15s，成功清零），
+    // code 8 用静态 floor（15s≈一个桶补充周期）。响应 Retry-After 大于下限时优先采用，
+    // 但整体封顶（防异常 Retry-After 把退避拖到分钟级外）。
+    // 非配额类维持现行短退避语义：Retry-After <= 上限时透传，超长整值不透传
+    // （也不截断），由宿主本地退避策略计算。任何 429 都不轮换、不冷却账号。
+    const classified = classify429Body(errText);
+    // Anthropic 协议用 type 字符串表达限流（无数字 code）：同样按配额类处理。
+    const classifiedWithAnthropic = anthropicType === ANTHROPIC_RATE_LIMIT && !classified.quota
+      ? { quota: true, retryFloorMs: QUOTA_RATE_RETRY_FLOOR_MS, kind: 'rate' as const }
+      : classified;
+    const floorMs = dynamicFloorMs ?? classifiedWithAnthropic.retryFloorMs;
+    let providerRetryAfterMs: number | undefined;
+    if (floorMs !== undefined) {
+      // 配额类：退避下限生效，Retry-After 更大时优先，整体封顶 60s（对齐单次
+      // 延迟上限，防止宿主因采用值超限而放弃重试）。
+      providerRetryAfterMs = Math.min(
+        Math.max(floorMs, retryAfterMs !== undefined && retryAfterMs > 0 ? retryAfterMs : 0),
+        QUOTA_RETRY_AFTER_CEILING_MS,
+      );
+    } else {
+      providerRetryAfterMs = retryAfterMs !== undefined && retryAfterMs > 0 && retryAfterMs <= PROVIDER_RETRY_AFTER_CAP_MS
+        ? retryAfterMs
+        : undefined;
+    }
+    return new LlmError('llm-sensenova: SenseNova API error 429 — rate limited；SenseNova API 返回 429：请求被限流', 'RATE_LIMIT', {
+      status: 429,
+      ...(providerRetryAfterMs !== undefined ? { providerRetryAfterMs } : {}),
+    });
+  }
+  if (anthropicType === ANTHROPIC_OVERLOADED) {
+    return new LlmError(
+      `llm-sensenova: SenseNova API error 529 overloaded；SenseNova 返回 overloaded_error：服务端过载，重试通常可恢复`,
+      'PROVIDER_HTTP_ERROR',
+      { status },
+    );
+  }
+  if (anthropicType !== undefined && ANTHROPIC_AUTH.has(anthropicType)) {
+    return new LlmError(
+      'llm-sensenova: SenseNova API error 401 — the API key is missing or invalid；SenseNova API 返回 401：密钥缺失或无效',
+      'INVALID_CREDENTIAL',
+      { status },
+    );
+  }
+  return new LlmError(`llm-sensenova: SenseNova API error ${status}: ${errText.slice(0, 500)}`, 'PROVIDER_HTTP_ERROR', { status });
+}
+
+/** SenseNova（OpenAI 兼容）适配器。 */
+export class SensenovaAdapter extends LlmAdapter {
+  private readonly deps: SensenovaAdapterDeps;
+  private readonly fetchImpl: typeof fetch;
+  private readonly gate: KeyedConcurrencyGate;
+  private catalog: CatalogEntry[] = [];
+  /** 进程内失败缓存：运行时返回 MODEL_NOT_FOUND 的模型 id。 */
+  private readonly failedModels = new Set<string>();
+  /** §5.3 运行时不符兜底：Responses 400 invalid_request_error 的模型 id（进程内，
+   * 不持久化；命中后 resolveWirePlan 第 4 条判定直接降级 Chat）。 */
+  private readonly responsesUnsupported = new Set<string>();
+  /** 同上机制用于 Anthropic wire：400 invalid_request_error 后该模型降级 Responses。 */
+  private readonly anthropicUnsupported = new Set<string>();
+  /** 上一次成功目录请求使用的 key/base；变化时旧失败缓存不再可信。 */
+  private catalogCredential: string | undefined;
+  private catalogApiBase: string | undefined;
+  /** 目录缓存时间戳（毫秒 epoch）；与 TTL 共同决定下次调用是否实发 HTTP。 */
+  private catalogFetchedAt = 0;
+  /** 目录刷新失败后的下次重试时间（毫秒 epoch）；仅失败时写入。 */
+  private catalogNextRetryAt = 0;
+  /** 目录单飞去重：并发的 listModels 共享同一 in-flight Promise。 */
+  private catalogInflight: Promise<CatalogEntry[]> | undefined;
+  /**
+   * 配额类 429 粘住 key（design D5，仅 quotaRotation 开启时读写）：
+   * 有 sessionId 的请求按会话分桶（同一会话后续请求粘住切换后的 key）；
+   * 无 sessionId 的请求共享进程级桶（undefined 键）——宿主 GenerateOptions
+   * 仅提供 sessionId 这一会话标识，粘性粒度即「会话（无标识时为进程）」，
+   * 与 spec「同一会话后续请求继续使用新 key」对齐。条目仅存内存，随适配器
+   * 生命周期结束。
+   */
+  private readonly quotaStickyKeys = new Map<string | undefined, string>();
+  /**
+   * 429001 连续命中计数（per-session，分级探测用）：命中 +1、成功/换 key 清零，
+   * 决定下次探测档位 TPM_PROBE_BACKOFF_STEPS_MS[count]。仅内存，随适配器生命周期。
+   */
+  private readonly tpmHitCounts = new Map<string | undefined, number>();
+
+  constructor(deps: SensenovaAdapterDeps) {
+    super();
+    this.deps = deps;
+    this.fetchImpl = deps.fetchImpl ?? fetch;
+    this.gate = deps.concurrencyGate ?? new KeyedConcurrencyGate();
+  }
+
+  override providerInfo(provider: string): LlmProviderInfo {
+    return { id: provider, name: 'SenseNova' };
+  }
+
+  override providerRetryPolicy(_provider: string): ResolvedRetryPolicy | undefined {
+    return resolveRetryPolicy(
+      {
+        mode: 'normal',
+        // tune-sensenova-429-retry-budget：预算放大（10→100）。fix-sensenova-429-quota-retry
+        // 的 10 次 × 15s 档（约 2 分钟）实测不足以覆盖多会话共享 key 耗干 TPM 桶的恢复
+        // 窗口；100 次 × 15s 封顶档约 25 分钟，仍为有限预算（宿主按步骤边界重置计数，
+        // 此为单个 agent 步骤内预算），更长故障显式失败。分级档位维持 3–15s 封顶不变
+        // （保住恢复第一时间接上的探测灵敏度）。
+        maxRetries: 100,
+        // suite：重试类别由 llm-retry 的单一决策模块给出（EMPTY/RATE_LIMIT/SERVER/
+        // TIMEOUT/TRANSPORT 重试；QUOTA/ACCOUNT_QUOTA 池耗尽不硬重试——
+        // contract.test 钉的就是这份决策，这里恢复它的运行时读者）。
+        retryableCodes: retryableCodes(),
+        backoff: { maxDelayMs: PROVIDER_RETRY_AFTER_CAP_MS },
+      },
+      'dsh-sensenova-suite.retryPolicy',
+    );
+  }
+
+  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    const models = await this.fetchCatalog();
+    // suite 扩展：面板允许清单与额度标记在目录出线处过滤（缺省不过滤）。
+    const filter = this.deps.catalogFilter?.();
+    const allowed = (set: Set<string>) => (m: CatalogEntry) => set.size === 0 || set.has(m.id);
+    const keep = (m: CatalogEntry) => {
+      if (filter === undefined) return true;
+      return allowed(new Set(filter.enabledIds))(m) && !filter.unavailableIds.includes(m.id);
+    };
+    return models.filter(keep).map((model) => ({
+      provider,
+      id: model.id,
+      name: model.name,
+      inputModalities: model.inputModalities,
+    }));
+  }
+
+  /**
+   * 目录获取入口（listModels 专用）：TTL 内从缓存应答，过期后单飞实发 HTTP。
+   * 成功刷新 TTL=CATALOG_TTL_MS（24h）；失败退避 CATALOG_FAILURE_RETRY_MS（60s）
+   * 并维持旧缓存可读，避免宿主秒级问询在故障时退化为秒级重试循环。
+   * 凭据或 apiBase 变化立即失效（换 key/换端点后旧目录不再可信）。
+   */
+  private async fetchCatalog(): Promise<CatalogEntry[]> {
+    const connection = this.deps.options();
+    let apiKey: string;
+    try {
+      apiKey = await this.deps.resolveApiKey(connection);
+    } catch (error) {
+      // 没有任何 key 时保持空目录；其他解析/凭据桥接错误必须交给 host，
+      // 否则 modelCatalog 只会静默丢失 provider 分组而没有 failures 诊断。
+      if (error instanceof LlmError && error.code === 'MISSING_CREDENTIAL') return [];
+      throw error;
+    }
+    const now = Date.now();
+    const credentialChanged = this.catalogCredential !== undefined && this.catalogCredential !== apiKey;
+    const apiBaseChanged = this.catalogApiBase !== undefined && this.catalogApiBase !== connection.apiBase;
+    // 缓存命中：同 key、同 base、未过期。
+    if (
+      !credentialChanged && !apiBaseChanged
+      && this.catalogFetchedAt > 0
+      && now - this.catalogFetchedAt < CATALOG_TTL_MS
+    ) {
+      return this.catalog;
+    }
+    // 失败退避期内也直接返回现有缓存（可能为空数组=首次加载仍失败），不再实发。
+    if (this.catalogNextRetryAt > now) {
+      return this.catalog;
+    }
+    // 单飞去重：并发调用共享同一请求。
+    if (this.catalogInflight !== undefined) {
+      return this.catalogInflight;
+    }
+    const inflight = this.fetchCatalogUncached(connection, apiKey, credentialChanged || apiBaseChanged);
+    this.catalogInflight = inflight;
+    // 完成后无论成败都清掉 inflight；失败时设定退避时间戳。
+    inflight.then(
+      () => { this.catalogInflight = undefined; },
+      () => {
+        this.catalogInflight = undefined;
+        this.catalogNextRetryAt = Date.now() + CATALOG_FAILURE_RETRY_MS;
+      },
+    );
+    return inflight;
+  }
+
+  /** 实际发起 HTTP 目录请求并更新缓存（仅 fetchCatalog 调用）。 */
+  private async fetchCatalogUncached(
+    connection: SensenovaConnection,
+    apiKey: string,
+    invalidateFailedModels: boolean,
+  ): Promise<CatalogEntry[]> {
+    const response = await this.fetchImpl(`${connection.apiBase}/models`, {
+      headers: {
+        accept: 'application/json',
+        authorization: `Bearer ${apiKey}`,
+        ...attributionHeaders(),
+      },
+      signal: AbortSignal.timeout(MODELS_TIMEOUT_MS),
+    });
+    if (response.status === 401) {
+      throw new LlmError('llm-sensenova: SenseNova API rejected the API key (401)', 'INVALID_CREDENTIAL', { status: 401 });
+    }
+    if (!response.ok) {
+      throw new LlmError(`llm-sensenova: models endpoint returned HTTP ${response.status}`, 'PROVIDER_HTTP_ERROR', { status: response.status });
+    }
+    const parsed: unknown = await response.json();
+    // 失败缓存只对同一凭据和 API 地址成立；换 key 或切换端点后，旧 404 不应继续隐藏新目录。
+    if (invalidateFailedModels) this.failedModels.clear();
+    // 以新快照原子替换缓存，避免 listModels 新目录与 resolveModel 旧能力不一致。
+    const models = parseCatalog(parsed, this.failedModels);
+    this.catalogCredential = apiKey;
+    this.catalogApiBase = connection.apiBase;
+    this.catalogFetchedAt = Date.now();
+    this.catalog = models;
+    return models;
+  }
+
+  override async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    const entry = this.catalog.find((m) => m.id === model);
+    // SenseNova 目录若无上下文字段，用 131072 作为合理默认（见顶部常量注释）。
+    const contextWindow = entry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    return {
+      provider,
+      id: model,
+      name: entry?.name ?? displayNameFor(model),
+      inputModalities: entry?.inputModalities ?? ['text'],
+      context: { contextWindow },
+      ...(entry?.maxOutputTokens !== undefined ? { defaultMaxTokens: entry.maxOutputTokens } : {}),
+      ...(entry?.reasoning !== undefined ? { reasoning: entry.reasoning } : {}),
+    };
+  }
+
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const connection = this.deps.options();
+    // 全局在途槽：排队等待而非报错，异常/中止同样释放。
+    const releaseSlot = this.deps.requestSlot !== undefined
+      ? await this.deps.requestSlot(options.signal)
+      : undefined;
+    // 目录条目驱动字段分派（catalog 未命中时静态表兜底；测试适配器常无目录）。
+    const entry = this.catalog.find((m) => m.id === options.model);
+    // §6.1 分派点：factsFor → resolveWirePlan → 按 wire 构建请求体与路径。
+    // wire 一旦选定，整次请求（含所有轮换重试）不再切换——否则同一轮对话会出现
+    // Responses/Chat 混合历史，function_call 与 role:tool 的 id 体系会串。
+    // 唯一例外是下方 400 兜底（且发生在任何内容流出之前）。
+    const facts = factsFor(options.model, entry);
+    const plan = resolveWirePlan(options, connection, facts, {
+      responsesUnsupported: this.responsesUnsupported,
+      anthropicUnsupported: this.anthropicUnsupported,
+    });
+    let wire: WireKind = plan.wire;
+    // 面板协议覆盖（suite 扩展）：覆盖为具体协议时作为起始 wire（决策表被
+    // 用户选择压过）；覆盖为 auto/未设置时维持决策表结果。
+    const override = this.deps.protocolOverrides?.()[options.model];
+    if (override === 'anthropic' || override === 'responses' || override === 'chat-completions') {
+      wire = override;
+    }
+    // add-multimodal-input 2.1：纯文本模型（supportsImages=false）经宿主
+    // projectImagesForTextModel 投影（插件不自造投影）；多模态模型原样携带。
+    const projectedMessages = facts.supportsImages
+      ? options.messages
+      : projectImagesForTextModel(options.messages);
+    const request: GenerateOptions = projectedMessages === options.messages
+      ? options
+      : { ...options, messages: [...projectedMessages] };
+    // 图像载荷按 wire 预解析（格式交集与 kimi URL 降级是 wire 相关的）；400 兜底
+    // 切 wire 时按新 wire 重建（发生在任何内容流出之前，无部分发送风险）。
+    const imagePayloads = new Map<WireKind, Map<string, PreparedImage>>();
+    const payloadsFor = async (w: WireKind): Promise<Map<string, PreparedImage>> => {
+      let payloads = imagePayloads.get(w);
+      if (payloads === undefined) {
+        payloads = await prepareImages(request, entry, w, this.deps.resolveImageAccess);
+        imagePayloads.set(w, payloads);
+      }
+      return payloads;
+    };
+    const buildBody = async (w: WireKind): Promise<string> => JSON.stringify(
+      w === 'anthropic'
+        ? buildAnthropicBody(request, entry, await payloadsFor(w))
+        : w === 'responses'
+          ? buildResponsesBody(request, entry, { reasoningSummary: connection.reasoningSummary }, await payloadsFor(w))
+          : buildChatBody(request, entry, await payloadsFor(w)),
+    );
+    let body = await buildBody(wire);
+    // 400 兜底只在本请求内切换一次（§5.3：标记 + 立即换 Chat 重试一次）。
+    let responsesFallbackUsed = false;
+    const tried = new Set<string>();
+    const limit = connection.concurrency;
+    // 三段超时（design D4/D6，2026-09-04 实测）：生产用常量，测试可注入小值。
+    const connectMs = this.deps.timeouts?.connectMs ?? CONNECT_TIMEOUT_MS;
+    const streamIdleMs = this.deps.timeouts?.streamIdleMs ?? STREAM_IDLE_TIMEOUT_MS;
+    const queueMs = this.deps.timeouts?.queueMs;
+    const quotaRotation = connection.quotaRotation === true;
+    // 粘性起点（design D5）：开关开启时优先从「该会话粘住的 key」起步（指针初始
+    // undefined 时等价 resolveApiKey 默认结果）；粘住的 key 若已失效（如被删除/禁用）
+    // 会走既有 401 轮换路径自然恢复。开关关闭时不读写指针，行为与现状完全一致。
+    const stickyKey = quotaRotation ? this.quotaStickyKeys.get(options.sessionId) : undefined;
+    let apiKey = stickyKey ?? (
+      this.deps.resolveApiKeyForRequest !== undefined
+        ? await this.deps.resolveApiKeyForRequest({ sessionId: options.sessionId, model: options.model })
+        : await this.deps.resolveApiKey(connection)
+    );
+    let response: Response | undefined;
+    // 当前 attempt 持有的并发额度；成功进入流式阶段后保持到 finally 释放。
+    let release: Release | undefined;
+    // 各 attempt 的连接超时清理（清计时器 + 摘除宿主 abort 转发 listener），finally 统一执行。
+    const connectCleanups: Array<() => void> = [];
+
+    try {
+      for (let rotations = 0; ; ) {
+        tried.add(apiKey);
+        // 按本次 attempt 实际使用的 key 获取并发额度；排队期间中止会在此 reject
+        // （不占额度），排队超时以 TimeoutError reject（同样不占额度），统一映射
+        // 可重试 TIMEOUT 交宿主重试层（design D4）。await 抛出时 release 保持
+        // undefined，finally 不误放他人额度。
+        try {
+          release = await this.gate.acquire(apiKey, limit, options.signal, queueMs);
+        } catch (error) {
+          if (!isTimeoutReason(error)) throw error;
+          throw new LlmError(
+            `llm-sensenova: request queued behind the per-key concurrency limit for over ${queueMs ?? DEFAULT_QUEUE_TIMEOUT_MS}ms；SenseNova 请求排队超时（未占用并发额度），交宿主重试层退避后重试`,
+            'TIMEOUT',
+            { cause: error },
+          );
+        }
+        let attempt: Response;
+        try {
+          // 连接/首字节超时（design D4，2026-09-04 实测传输挂起 ≈1/5 且无 RST）：
+          // 自管 AbortController + setTimeout，响应头到达即清除计时器——超时只约束
+          // 建连/首包阶段（不可用 AbortSignal.timeout：undici 下它会在整个 body
+          // 读取阶段持续生效，超过 connectMs 的健康长流会被误杀）。控制器全程转发
+          // 宿主 abort，body 阶段的中止语义与直传宿主 signal 等价。
+          const connectController = new AbortController();
+          const connectTimer = setTimeout(() => {
+            connectController.abort(new DOMException('connect timed out', 'TimeoutError'));
+          }, connectMs);
+          const onHostAbort = () => connectController.abort(options.signal?.reason);
+          if (options.signal !== undefined) {
+            if (options.signal.aborted) connectController.abort(options.signal.reason);
+            else options.signal.addEventListener('abort', onHostAbort, { once: true });
+          }
+          connectCleanups.push(() => {
+            clearTimeout(connectTimer);
+            options.signal?.removeEventListener('abort', onHostAbort);
+          });
+          attempt = await this.fetchImpl(`${connection.apiBase}${endpointOf(wire)}`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              authorization: `Bearer ${apiKey}`,
+              ...attributionHeaders(),
+            },
+            body,
+            signal: connectController.signal,
+          });
+          // 响应头已到达：连接超时使命完成（finally 里的 clearTimeout 为幂等兜底）。
+          clearTimeout(connectTimer);
+        } catch (error) {
+          release();
+          release = undefined;
+          if (options.signal?.aborted) throw error;
+          if (isTimeoutReason(error)) {
+            throw new LlmError(
+              `llm-sensenova: request to ${connection.apiBase} timed out after ${connectMs}ms；SenseNova 请求建连或首包超时（已释放并发额度），交宿主重试层处理`,
+              'TIMEOUT',
+              { cause: error },
+            );
+          }
+          throw new LlmError(`llm-sensenova: request to ${connection.apiBase} failed: ${errorChain(error)}；连接 SenseNova API 失败，通常是网络或代理问题`, 'TRANSPORT', { cause: error });
+        }
+        if (attempt.ok) {
+          response = attempt;
+          // 请求成功：429001 分级探测计数归零（下次再限流从最短档 3s 重新探测）。
+          this.tpmHitCounts.delete(options.sessionId);
+          this.deps.reportOutcome?.(apiKey, 'success');
+          break; // 额度随 response 保留，由外层 finally 在流结束后释放
+        }
+        const errText = await attempt.text().catch(() => '');
+        const retryAfterMs = parseRetryAfterMs(attempt.headers.get('retry-after'));
+        // §5.3 运行时不符兜底：现代协议（Anthropic / Responses）400 且
+        // error.type=invalid_request_error → 记进程内 unsupported 集合 + 打日志，
+        // 同请求立即沿降级链换下一条 wire 重试一次（发生在任何内容流出之前，是 wire
+        // 粘性的唯一例外）；后续该模型在该协议上直连下一级。不持久化、不写配置——
+        // 重启即清空，文档与实况不符只退化为「该模型少一条协议」。
+        if (attempt.status === 400 && wire !== 'chat-completions' && !responsesFallbackUsed && isInvalidRequestError(errText)) {
+          const nextWire = wire === 'anthropic' ? 'responses' : 'chat-completions';
+          if (wire === 'anthropic') this.anthropicUnsupported.add(options.model);
+          else this.responsesUnsupported.add(options.model);
+          // eslint-disable-next-line no-console -- 适配器不持有 cordis logger，降级说明走 stderr 日志（避免用户困惑）。
+          console.warn(
+            `[dsh-sensenova-suite] ${wire} wire rejected model "${options.model}" with 400 invalid_request_error; ` +
+              `falling back to ${nextWire} for this and subsequent requests in this process`,
+          );
+          wire = nextWire;
+          body = await buildBody(wire);
+          responsesFallbackUsed = true;
+          release();
+          release = undefined;
+          continue;
+        }
+        // 404 模型不可路由：标记失败且不轮换/不重试。
+        const modelNotFound = attempt.status === 404 && isModelNotFoundText(errText);
+        if (modelNotFound) {
+          release();
+          release = undefined;
+          this.failedModels.add(options.model);
+          // 使目录缓存失效：下次 listModels 重新拉取并过滤掉该模型（TTL 缓存否则会返回含此模型的旧快照）。
+          this.catalogFetchedAt = 0;
+          throw httpError(attempt.status, errText, retryAfterMs, undefined, wire);
+        }
+        // 429：SenseNova 渠道常态性限流，不代表账号异常。不冷却账号；默认不轮换 key
+        // （一个会话固定使用一个 key，保护服务端按 key 命中的 prompt 缓存），直接抛
+        // RATE_LIMIT 交宿主重试层自动退避后原 key 重试。quotaRotation 开启时，仅
+        // 配额类 429（error.code 8 / 429001）粘性切换到下一把未试过的 key 重试本次
+        // 请求；环回无新 key 则停留在当前 key 抛 RATE_LIMIT。401 轮换路径不变。
+        // 并发闸已在源头抑制并发超限，此处为兜底。
+        const classified = classify429Body(errText);
+        const quota429 = attempt.status === 429 && classified.quota;
+        // suite 扩展：积分池类 429（Allocated quota exceeded 形态）同样参与
+        // 粘性换 key；池类不冷却不禁用，只由池层记 (key, 组) 格子。
+        const pool429 = attempt.status === 429 && !classified.quota
+          && classify429Full(errText).kind === 'pool';
+        // 429001 分级探测档位：连续命中计数决定本次退避（3/5/10/15s，封顶后保持），
+        // 命中即 +1——每次宿主重试都带一个递增的探测等待，成功后清零回到最短档。
+        let dynamicFloorMs: number | undefined;
+        if (classified.kind === 'tpm') {
+          const hits = this.tpmHitCounts.get(options.sessionId) ?? 0;
+          dynamicFloorMs = TPM_PROBE_BACKOFF_STEPS_MS[Math.min(hits, TPM_PROBE_BACKOFF_STEPS_MS.length - 1)];
+          this.tpmHitCounts.set(options.sessionId, hits + 1);
+        }
+        // 配额类 429 且开关开启：轮换到下一把本请求未试过的 key（tried 集合做单次
+        // 请求内防乒乓——每次宿主重试都会清空 tried、重新探测各 key，因此配额恢复
+        // 或另一把 key 空闲时下一次重试即可切过去；不再用跨请求环回 Set，那会把
+        // 会话永久锁死在已耗尽的 key 上干等退避）。
+        const quotaRotate = (quota429 || pool429) && quotaRotation;
+        const rotatable = attempt.status === 401 || quotaRotate;
+        if (rotatable && options.signal?.aborted !== true && rotations < connection.accountCount) {
+          // 'quota-exhausted' / 'pool-exhausted' 不写任何账号状态；401 仍走禁用轮换。
+          const next = await this.deps.rotateApiKey(
+            apiKey,
+            attempt.status === 401
+              ? 'invalid-credential'
+              : pool429 ? 'pool-exhausted' : 'quota-exhausted',
+          );
+          if (next !== undefined && !tried.has(next)) {
+            // 预流轮换：先释放旧 key 额度，下一轮为新 key 重新获取。
+            release();
+            release = undefined;
+            apiKey = next;
+            rotations += 1;
+            if (quotaRotate) {
+              this.quotaStickyKeys.set(options.sessionId, next); // 粘住新 key
+              this.tpmHitCounts.delete(options.sessionId); // 新 key 配额新鲜，探测档位归零
+            }
+            continue;
+          }
+        }
+        release();
+        release = undefined;
+        throw httpError(attempt.status, errText, retryAfterMs, dynamicFloorMs, wire);
+      }
+
+      if (response === undefined) {
+        // 不可达：循环要么 break（成功）要么 throw；仅用于满足明确赋值分析。
+        throw new LlmError('llm-sensenova: SenseNova API returned no response', 'PROVIDER_PROTOCOL_ERROR');
+      }
+      if (response.body === null) {
+        throw new LlmError('llm-sensenova: SenseNova API returned no response body', 'PROVIDER_PROTOCOL_ERROR');
+      }
+      yield* wire === 'anthropic'
+        ? parseAnthropicSse(response.body, options.signal, streamIdleMs)
+        : wire === 'responses'
+          ? parseResponsesSse(response.body, options.signal, streamIdleMs)
+          : parseOpenAiSse(response.body, options.signal, streamIdleMs);
+    } finally {
+      for (const cleanup of connectCleanups) cleanup();
+      release?.();
+      releaseSlot?.();
+    }
+  }
+}

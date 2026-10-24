@@ -1,0 +1,2370 @@
+[
+  {
+    "name": "S1 unconfigured: no attempt and no throttle",
+    "frames": [
+      {
+        "t": 0,
+        "note": "initial",
+        "calls": [],
+        "records": {},
+        "refs": {},
+        "throttle": null,
+        "result": null
+      },
+      {
+        "t": 0,
+        "note": "getToken with no grant and no account",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          }
+        ],
+        "records": {},
+        "refs": {},
+        "throttle": null,
+        "error": {
+          "code": "not_configured",
+          "message": "no console account is configured"
+        }
+      },
+      {
+        "t": 0,
+        "note": "state after the not_configured failure",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {},
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": false,
+          "hasAccount": false,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": "no console account is configured"
+        }
+      }
+    ]
+  },
+  {
+    "name": "S2 env login persists the grant then serves from cache",
+    "frames": [
+      {
+        "t": 0,
+        "note": "getToken performs one login",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT1"
+      },
+      {
+        "t": 0,
+        "note": "getToken again is served from cache",
+        "calls": [],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT1"
+      },
+      {
+        "t": 0,
+        "note": "state after login",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": true,
+          "autoRecoverArmed": true,
+          "hasRefreshToken": true,
+          "expiresAt": 10800000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "S3 parked refusal survives a restart with no new login",
+    "frames": [
+      {
+        "t": 0,
+        "note": "saveAccount with a wrong password",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "set",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          }
+        ],
+        "records": {},
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": {
+          "code": "login_rejected",
+          "parked": true,
+          "until": null,
+          "attempt": 1
+        },
+        "error": {
+          "code": "login_rejected",
+          "message": "platform: invalid account or password"
+        }
+      },
+      {
+        "t": 0,
+        "note": "state reports the parked refusal",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          }
+        ],
+        "records": {},
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": {
+          "code": "login_rejected",
+          "parked": true,
+          "until": null,
+          "attempt": 1
+        },
+        "result": {
+          "configured": false,
+          "hasAccount": true,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": true,
+          "error": null
+        }
+      },
+      {
+        "t": 0,
+        "note": "getToken after restart refuses without a login attempt",
+        "calls": [],
+        "records": {},
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": {
+          "code": "login_rejected",
+          "parked": true,
+          "until": null,
+          "attempt": 1
+        },
+        "error": {
+          "code": "login_rejected",
+          "message": "sign-in is not being retried automatically: the account needs to be entered again"
+        }
+      },
+      {
+        "t": 0,
+        "note": "state after restart still shows the park",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          }
+        ],
+        "records": {},
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": {
+          "code": "login_rejected",
+          "parked": true,
+          "until": null,
+          "attempt": 1
+        },
+        "result": {
+          "configured": false,
+          "hasAccount": true,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": true,
+          "error": "sign-in is not being retried automatically: the account needs to be entered again"
+        }
+      }
+    ]
+  },
+  {
+    "name": "S4 local backoff doubles, then success clears it",
+    "frames": [
+      {
+        "t": 0,
+        "note": "getToken #1 fails: 60s local backoff",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          }
+        ],
+        "records": {},
+        "refs": {},
+        "throttle": {
+          "code": "rate_limited",
+          "parked": false,
+          "until": 60000,
+          "attempt": 1
+        },
+        "error": {
+          "code": "rate_limited",
+          "message": "platform: too many attempts (1)"
+        }
+      },
+      {
+        "t": 61000,
+        "note": "getToken #2 after the window fails: doubled 120s backoff",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          }
+        ],
+        "records": {},
+        "refs": {},
+        "throttle": {
+          "code": "rate_limited",
+          "parked": false,
+          "until": 181000,
+          "attempt": 2
+        },
+        "error": {
+          "code": "rate_limited",
+          "message": "platform: too many attempts (2)"
+        }
+      },
+      {
+        "t": 182000,
+        "note": "getToken #3 after the doubled window succeeds",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10982000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT1"
+      },
+      {
+        "t": 182000,
+        "note": "state after success",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10982000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": true,
+          "autoRecoverArmed": true,
+          "hasRefreshToken": true,
+          "expiresAt": 10982000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "S5 platform-stated window is honoured untruncated",
+    "frames": [
+      {
+        "t": 0,
+        "note": "getToken fails carrying the 2h platform window",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          }
+        ],
+        "records": {},
+        "refs": {},
+        "throttle": {
+          "code": "rate_limited",
+          "parked": false,
+          "until": 7200000,
+          "attempt": 1
+        },
+        "error": {
+          "code": "rate_limited",
+          "message": "platform: try again in 2 hours"
+        }
+      },
+      {
+        "t": 0,
+        "note": "state shows the full 2h countdown",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          }
+        ],
+        "records": {},
+        "refs": {},
+        "throttle": {
+          "code": "rate_limited",
+          "parked": false,
+          "until": 7200000,
+          "attempt": 1
+        },
+        "result": {
+          "configured": true,
+          "hasAccount": true,
+          "autoRecoverArmed": true,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": 7200000,
+          "needsUserAction": false,
+          "error": "platform: try again in 2 hours"
+        }
+      }
+    ]
+  },
+  {
+    "name": "S6a near-expiry grant is renewed and the rotation persisted",
+    "frames": [
+      {
+        "t": 0,
+        "note": "getToken renews the near-expiry grant",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "refresh",
+            "token": "RT1"
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT2",
+              "refreshToken": "RT2",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT2"
+      },
+      {
+        "t": 0,
+        "note": "state after renewal",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT2",
+              "refreshToken": "RT2",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": false,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": true,
+          "expiresAt": 10800000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "S6b three concurrent polls share exactly one refresh",
+    "frames": [
+      {
+        "t": 0,
+        "note": "three concurrent getToken calls",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "refresh",
+            "token": "RT1"
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT2",
+              "refreshToken": "RT2",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": [
+          "AT2",
+          "AT2",
+          "AT2"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "S6c refresh write defers to a concurrently rotated grant",
+    "frames": [
+      {
+        "t": 0,
+        "note": "getToken returns the other process's newer grant",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "refresh",
+            "token": "RT1"
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT9",
+              "refreshToken": "RT9",
+              "expiresAt": 10000000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT9"
+      },
+      {
+        "t": 0,
+        "note": "state keeps the newer grant",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT9",
+              "refreshToken": "RT9",
+              "expiresAt": 10000000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": false,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": true,
+          "expiresAt": 10000000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "S7a dead refresh with no account reaps the grant",
+    "frames": [
+      {
+        "t": 0,
+        "note": "getToken surfaces refresh_rejected and reaps the grant",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "refresh",
+            "token": "RT1"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {},
+        "refs": {},
+        "throttle": null,
+        "error": {
+          "code": "refresh_rejected",
+          "message": "refresh token is dead"
+        }
+      },
+      {
+        "t": 0,
+        "note": "state after the reap",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {},
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": false,
+          "hasAccount": false,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": "refresh token is dead"
+        }
+      }
+    ]
+  },
+  {
+    "name": "S7b dead refresh with an account re-logs-in",
+    "frames": [
+      {
+        "t": 0,
+        "note": "getToken falls through to a password login",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "refresh",
+            "token": "RT1"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT2",
+              "refreshToken": "RT2",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT2"
+      },
+      {
+        "t": 0,
+        "note": "state after re-login",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT2",
+              "refreshToken": "RT2",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": true,
+          "autoRecoverArmed": true,
+          "hasRefreshToken": true,
+          "expiresAt": 10800000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "S8 invalidated token is renewed once, never replayed",
+    "frames": [
+      {
+        "t": 0,
+        "note": "getToken serves the fresh stored token",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10000000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT1"
+      },
+      {
+        "t": 0,
+        "note": "invalidate marks that token refused",
+        "calls": [],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10000000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": null
+      },
+      {
+        "t": 0,
+        "note": "next getToken renews instead of replaying it",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "refresh",
+            "token": "RT1"
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT2",
+              "refreshToken": "RT2",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT2"
+      },
+      {
+        "t": 0,
+        "note": "following getToken is served from cache",
+        "calls": [],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT2",
+              "refreshToken": "RT2",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT2"
+      }
+    ]
+  },
+  {
+    "name": "S9a legacy grant is adopted and the old record deleted",
+    "frames": [
+      {
+        "t": 0,
+        "note": "state adopts the legacy grant on first read",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10000000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": false,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": true,
+          "expiresAt": 10000000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      },
+      {
+        "t": 0,
+        "note": "getToken serves the adopted grant with no auth call",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10000000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT1"
+      }
+    ]
+  },
+  {
+    "name": "S9b legacy parked throttle is adopted then swept on resubmit",
+    "frames": [
+      {
+        "t": 0,
+        "note": "getToken adopts the current-address park and refuses",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$SCOPE/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$LEGACY/$THROTTLE": {
+            "kind": "grant",
+            "payload": {
+              "marker": "signin-throttle",
+              "version": 1,
+              "code": "verification_required",
+              "parked": true,
+              "attempt": 2
+            }
+          }
+        },
+        "refs": {},
+        "throttle": {
+          "code": "login_rejected",
+          "parked": true,
+          "until": null,
+          "attempt": 3
+        },
+        "error": {
+          "code": "login_rejected",
+          "message": "sign-in is not being retried automatically: the account needs to be entered again"
+        }
+      },
+      {
+        "t": 0,
+        "note": "state keeps the park; the other legacy record waits for sweep",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          }
+        ],
+        "records": {
+          "$LEGACY/$THROTTLE": {
+            "kind": "grant",
+            "payload": {
+              "marker": "signin-throttle",
+              "version": 1,
+              "code": "verification_required",
+              "parked": true,
+              "attempt": 2
+            }
+          }
+        },
+        "refs": {},
+        "throttle": {
+          "code": "login_rejected",
+          "parked": true,
+          "until": null,
+          "attempt": 3
+        },
+        "result": {
+          "configured": false,
+          "hasAccount": false,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": true,
+          "error": "sign-in is not being retried automatically: the account needs to be entered again"
+        }
+      },
+      {
+        "t": 0,
+        "note": "saveAccount with the correct password sweeps both legacy records",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "set",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": null,
+        "result": null
+      },
+      {
+        "t": 0,
+        "note": "state after resubmit",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": true,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": true,
+          "expiresAt": 10800000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "S9c legacy stored password is swept on first contact",
+    "frames": [
+      {
+        "t": 0,
+        "note": "state sweeps the legacy password reference",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {},
+        "refs": {
+          "undefined": "legacy-secret"
+        },
+        "throttle": null,
+        "result": {
+          "configured": false,
+          "hasAccount": false,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "S10 saveAccount then forgetAccount leaves the grant serving",
+    "frames": [
+      {
+        "t": 0,
+        "note": "saveAccount stores the username and logs in",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "set",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": null,
+        "result": null
+      },
+      {
+        "t": 0,
+        "note": "state after saveAccount",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": true,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": true,
+          "expiresAt": 10800000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      },
+      {
+        "t": 0,
+        "note": "forgetAccount removes the username",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": null
+      },
+      {
+        "t": 0,
+        "note": "state after forgetAccount still shows the grant",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": false,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": true,
+          "expiresAt": 10800000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      },
+      {
+        "t": 0,
+        "note": "getToken keeps serving the surviving grant",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {},
+        "throttle": null,
+        "result": "AT1"
+      }
+    ]
+  },
+  {
+    "name": "S11 wrong-password park is cleared by a corrected resubmit",
+    "frames": [
+      {
+        "t": 0,
+        "note": "saveAccount with the wrong password parks",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "set",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          }
+        ],
+        "records": {},
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": {
+          "code": "login_rejected",
+          "parked": true,
+          "until": null,
+          "attempt": 1
+        },
+        "error": {
+          "code": "login_rejected",
+          "message": "platform: invalid account or password"
+        }
+      },
+      {
+        "t": 0,
+        "note": "state shows needsUserAction",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$PASS"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          }
+        ],
+        "records": {},
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": {
+          "code": "login_rejected",
+          "parked": true,
+          "until": null,
+          "attempt": 1
+        },
+        "result": {
+          "configured": false,
+          "hasAccount": true,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": true,
+          "error": null
+        }
+      },
+      {
+        "t": 0,
+        "note": "saveAccount with the corrected password clears the park",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "set",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "deleteRecord",
+            "key": "$LEGACY/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$GRANT"
+          },
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          },
+          {
+            "via": "credentials",
+            "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": null,
+        "result": null
+      },
+      {
+        "t": 0,
+        "note": "state after the corrected resubmit",
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$THROTTLE"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$LEGACY/$THROTTLE"
+          }
+        ],
+        "records": {
+          "$SCOPE/$GRANT": {
+            "kind": "grant",
+            "payload": {
+              "version": 1,
+              "accessToken": "AT1",
+              "refreshToken": "RT1",
+              "expiresAt": 10800000
+            }
+          }
+        },
+        "refs": {
+          "$USER": "alice"
+        },
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": true,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": true,
+          "expiresAt": 10800000,
+          "needsAccount": false,
+          "ephemeral": false,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "S12 no credentials service still works, marked ephemeral",
+    "frames": [
+      {
+        "t": 0,
+        "note": "saveAccount works against the in-memory vault",
+        "calls": [
+          {
+            "via": "auth",
+            "op": "login",
+            "username": "alice",
+            "hasPassword": true
+          }
+        ],
+        "records": {},
+        "refs": {},
+        "throttle": null,
+        "result": null
+      },
+      {
+        "t": 0,
+        "note": "getToken serves the token",
+        "calls": [],
+        "records": {},
+        "refs": {},
+        "throttle": null,
+        "result": "AT1"
+      },
+      {
+        "t": 0,
+        "note": "state reports ephemeral",
+        "calls": [],
+        "records": {},
+        "refs": {},
+        "throttle": null,
+        "result": {
+          "configured": true,
+          "hasAccount": true,
+          "autoRecoverArmed": false,
+          "hasRefreshToken": true,
+          "expiresAt": 10800000,
+          "needsAccount": false,
+          "ephemeral": true,
+          "retryAfterMs": null,
+          "needsUserAction": false,
+          "error": null
+        }
+      }
+    ]
+  }
+]

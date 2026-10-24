@@ -1,0 +1,163 @@
+# dsh-sensenova-suite — the bundle's own patch layer.
+#
+# Reads the SenseNova Token Plan quota through the console API and shows it in
+# a config card on the Plugins page (`plugins.bundle.config` slot) — not in the
+# sidebar. Everything below is plain configuration: edit it here (or
+# override the same id in the profile's cordis.patch.yml) and reinstall/reload.
+#
+# The console token is NOT configured here. Open the panel and sign in once:
+# the Host logs in, keeps the account in the DSH credentials, and renews the
+# token on its own from then on. See README.md.
+- insert:
+    - id: dsh-sensenova-suite
+      name: dsh-sensenova-suite
+      config:
+        # Console origin. Override if you use a mirror or proxy.
+        consoleBase: https://platform.sensenova.cn
+        # The OpenAI-compatible API base, used only for the optional model
+        # catalog (which models a pool can call). Leave it alone unless the
+        # platform moves the endpoint.
+        apiBase: https://token.sensenova.cn/v1
+        # How many hours of per-model credit consumption to show (max 168 = 7d).
+        trendHours: 24
+        # Pseudo multipliers for the trend table: keys are case-insensitive
+        # SUBSTRINGS of a model id (first match in writing order wins), values
+        # are positive numbers. The platform returns raw credits with no
+        # official per-model rate, so these are the operator's own comparison
+        # aid — the panel labels each hit `×N` with a "not official" note, and
+        # rows without a match stay unmultiplied. Set `{}` to disable all.
+        # Invalid entries (empty key / value <= 0 / non-number) are dropped.
+        trendMultipliers: { "glm-5.2": 10, "kimi-k3": 20, "sensenova": 1, "deepseek": 1 }
+        # How long the Host caches each console response, in seconds.
+        cacheSeconds: 60
+        # How often the panel asks the Host again, in seconds. The Host states
+        # this to the bundle on every snapshot, so the two cannot disagree about
+        # how fresh the screen is.
+        pollSeconds: 30
+        # Deadline for one console call, in milliseconds. The login flow has its
+        # own (loginTimeoutMs, below) because it walks several IAM hops.
+        consoleTimeoutMs: 15000
+        # Background freshness for a REGISTERED provider. The panel polls only
+        # while it is open, but a registered provider is a standing execution
+        # channel: while the EFFECTIVE provider switch is on, the Host drives
+        # one aggregate refresh every N minutes (the same engine and cache the
+        # panel's poll uses, so no extra upstream traffic within a cache
+        # window). 0 disables it and keeps the panel-only shape. Every tick
+        # re-reads the switch, so a Host that never registers a provider runs
+        # no refresh at all. (2026-10 review #1b.)
+        providerRefreshMinutes: 15
+        # ── Key 池：多账号轮转 / 按积分组路由 / 全局并发 ──────────
+        # 多账号清单：每项 { id, label, apiKeyRef }；apiKeyRef 是 DSH 凭据
+        # 服务的 ref 名（面板保存的默认 key 始终作为第一把参与轮转，不必
+        # 在此重复）。解析失败的条目静默跳过。
+        # accounts: []
+        #   - id: backup
+        #     label: Backup
+        #     apiKeyRef: SENSENOVA_API_KEY_2
+        # 钉选账号 id（手动优先级）；空 = 纯轮转。
+        activeAccount: ""
+        # 全局在途上限（per-key 固定 1）；0 = 跟随 key 数，调小 = 温和模式。
+        globalConcurrency: 0
+        # 模型 → 积分组映射：商汤组（sensenova-*）单独积分池走会话粘性，
+        # 其余归 general 走裸轮转；组间不回退。键为精确模型 id。
+        modelGroups:
+          sensenova-6.8-flash-lite: sensenova
+          sensenova-u1.5-lite: sensenova
+          sensenova-u1.5-fast: sensenova
+        # ── 出图 + 视觉 ────────────────────────────────────────────────────────
+        # 工具开关（部署默认；面板「多模态」的开关是主要设置）：opt-in——
+        # agent 工具是 Host 级变更；无 tools 服务的 Host 静默缺席。
+        # key 全部经池解析。参数（模型/尺寸/格式/水印/落盘目录）在面板
+        # 「多模态」设置，存插件状态文件。
+        text2imgEnabled: false
+        img2imgEnabled: false
+        visionToolsEnabled: false
+        text2imgModel: sensenova-u1.5-lite
+        img2imgModel: sensenova-u1.5-lite
+        imageTimeoutMs: 180000
+        # 视觉转述模型（单模型，用户选择；429 走池教义）。
+        visionModel: sensenova-6.8-flash-lite
+        visionImageMode: image_url
+        visionTimeoutMs: 120000
+        visionBridgeMode: auto
+        visionBridgePrompt: ""
+        # Renew the console token this many seconds before it actually expires,
+        # so a poll never races the expiry boundary. 120 = two minutes.
+        tokenSkewSeconds: 120
+        # Extra host names this Host answers as, beyond the loopback defaults
+        # (localhost / 127.0.0.1 / ::1). ADDED to them, never substituted — see
+        # docs/SETUP.md. Uncomment and list to serve the panel from another name.
+        # allowedHosts: []
+        # The rest of the login flow's endpoints. Everything below is optional:
+        # a key left commented keeps the platform default. Only touch these for
+        # an enterprise mirror or a staging tenant. Any endpoint that is not an
+        # absolute http(s) URL fails the mount with code "config_error" instead
+        # of surfacing later as a confusing network failure.
+        # iamBase: https://iam.sensecoreapi.cn
+        # tokenEndpoint: https://signin.sensecore.cn/oauth2/token
+        # jwksEndpoint: https://signin.sensecore.cn/.well-known/jwks.json
+        # redirectUri: https://platform.sensenova.cn
+        # clientId: nova
+        # scope: openid offline offline_access
+        # encKeyId: public:hydra.openid.id-token
+        # maxHops: 6
+        # Overall deadline for one sign-in attempt (the multi-hop OIDC walk), in
+        # ms. requestTimeoutMs below is its older spelling and still wins when
+        # only it is set; the console calls use consoleTimeoutMs above.
+        # loginTimeoutMs: 20000
+        # requestTimeoutMs: 20000
+        # ------------------------------------------------------------------
+        # Step three ("one-stop service"): register the SenseNova LLM
+        # provider DIRECTLY, with no hand-written llm-pi-ai row. When true
+        # the Host offers an OpenAI-compatible provider
+        # (`sensenova-token-plan`, base apiBase above): the panel's API-key
+        # field stores the `sk-` key in the DSH credentials (the process
+        # environment still works as a fallback), the catalog poll builds
+        # the model list, and vision models accept image input
+        # automatically. The cached catalog and the model allow-list live
+        # in this plugin's own state file, never on this row. Off by
+        # default - registering a model source is a Host-wide change.
+        # This value is now the DEPLOYMENT DEFAULT only: the panel's
+        #「模型接入」switch (POST /api/<name>/provider) overrides it live,
+        # with no restart. See docs/PROVIDER-HOT-RELOAD.md.
+        registerProvider: false
+        # ------------------------------------------------------------------
+        # Per-model OUTPUT CEILING overrides, keyed by EXACT model id (no
+        # substring matching — unlike `trendMultipliers` above this becomes a
+        # request parameter, so a loose key would silently retune models you
+        # never named). Values are positive whole numbers of tokens.
+        #
+        # Why this exists at all: the catalog is FETCHED, not authored, and it
+        # can understate a model. Probed 2026-10-02: `deepseek-v4-flash`
+        # accepts 131072 while the catalog states 65536. Editing the stored
+        # catalog does not stick — the next poll overwrites it — so a
+        # correction has to live here.
+        #
+        # Precedence: this map > the catalog's `max_output_length` >
+        # undeclared (the harness then applies its own `defaultMaxTokens ??
+        # 32768`, so declaring nothing is NOT "no ceiling"). `{}` keeps the
+        # platform authoritative. The panel's「最大输出」badge quotes the SAME
+        # resolution, so the number you read is the number the request sends.
+        # Applies to the directly-registered provider only; the Raccoon hosted
+        # route builds its own descriptors.
+        # maxTokensOverrides: { "deepseek-v4-flash": 131072 }
+        maxTokensOverrides: {}
+        # ------------------------------------------------------------------
+        # the Host exposes a tools service, the agent gains a
+        # `sensenova_draw_image` tool that POSTs to
+        # `{apiBase}/images/generations` with the panel-saved
+        # `SENSENOVA_API_KEY`. Draw models are identified from the catalog's
+        # own `output_modalities` (never a name regex), the key is resolved
+        # per call, and a failed draw starts a 30s cooldown. Off by default -
+        # an agent tool is a Host-wide change; a Host without the tools
+        # service simply never sees it.
+        #      (e.g. sensenova-u1-fast).
+        #      clamped into [5000, 1800000] (30 min is the ceiling).
+        # ------------------------------------------------------------------
+        # Host exposes a `ctx.web` service, the Raccoon hosted `web_search` MCP
+        # server is registered as a search provider, so DSH's own `web_search`
+        # tool searches through it with the panel-signed-in Raccoon credential.
+        # The plugin takes the search selection over (remembering whatever it
+        # displaced) so a second provider does not raise WEB_PROVIDER_AMBIGUOUS.
+        # Off by default - a search provider is a Host-wide change.
+        # ------------------------------------------------------------------

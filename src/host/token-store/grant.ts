@@ -1,0 +1,237 @@
+/**
+ * Block 1 of the token-store split: the GRANT read/write and freshness
+ * judgments. Owns the grant record's lifecycle — parse, adopt, persist,
+ * reap, fresh check.
+ *
+ * This module has no state of its own; it operates on the shared context
+ * (`wiring` + `state`) built by `state.ts`. The ownership table is in
+ * `docs/TOKEN-STORE-SPLIT.md` §1.
+ *
+ * @module dsh-sensenova-suite/token-store/grant
+ */
+
+import { readJwtExpiry } from "../sensenova-auth.ts";
+import { verbatim, obj, num, numOrNull } from "../util.ts";
+import { LEGACY_SCOPE, RECORD_ID } from "./constants.ts";
+import type { StoredGrant, StoreContextWiring, TokenStoreState } from "./state.ts";
+
+/** Bumped if the stored payload shape ever changes incompatibly. */
+const GRANT_VERSION = 1;
+
+/**
+ * The stored grant, or `undefined` when nothing usable is stored.
+ *
+ * A payload that does not match the expected shape reads as absent rather
+ * than throwing: a hand-edited or downgraded record should degrade the panel
+ * into "not configured", not crash the route on every poll.
+ * @param {unknown} record - a credential record.
+ * @returns {{accessToken: string, refreshToken: string, expiresAt: number|null}|undefined}
+ */
+export function parseGrant(record: unknown): StoredGrant | undefined {
+  if (record === undefined || record === null || obj(record).kind !== "grant") return undefined;
+  const payload = obj(obj(record).payload);
+  if (num(payload.version) !== GRANT_VERSION) return undefined;
+  const accessToken = verbatim(payload.accessToken, "");
+  if (accessToken === "") return undefined;
+  return {
+    accessToken,
+    // Same rule as the access token above: the refresh token is replayed
+    // verbatim to the refresh endpoint.
+    refreshToken: verbatim(payload.refreshToken, ""),
+    // Prefer the value the token ENDPOINT reported (`issuedAt + expiresIn` —
+    // the authority for when this grant dies) and fall back to the `exp` claim
+    // read off the token itself only when the stored value is unreadable.
+    expiresAt: numOrNull(payload.expiresAt) ?? readJwtExpiry(accessToken)
+  };
+}
+
+/**
+ * Read the durable grant through the credentials service.
+ * @param {object} wiring - the store context wiring.
+ * @param {object} state - the store context state.
+ */
+export async function readStored(wiring: StoreContextWiring, state: TokenStoreState): Promise<StoredGrant | undefined> {
+  const { backend, key } = wiring;
+  try {
+    const current = parseGrant(await backend().readRecord(key));
+    if (current !== undefined) return current;
+    return await adoptLegacyGrant(wiring, state);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Take over a grant a previous version saved under the old namespace.
+ *
+ * Runs once, when the record under the current name is absent. The legacy
+ * record is re-written at the current address and deleted, so the next read
+ * is a plain lookup; a grant that is still good must not be abandoned to the
+ * "please log in again" path just because this plugin was renamed.
+ * @returns {Promise<object|undefined>} the adopted grant, or undefined.
+ */
+export async function adoptLegacyGrant(wiring: StoreContextWiring, _state: TokenStoreState): Promise<StoredGrant | undefined> {
+  const { backend, key, credentialKey } = wiring;
+  try {
+    const legacyKey = credentialKey(LEGACY_SCOPE, RECORD_ID);
+    const grant = parseGrant(await backend().readRecord(legacyKey));
+    if (grant === undefined) return undefined;
+    await backend().modifyRecord(key, () => Promise.resolve({
+      kind: "grant",
+      payload: {
+        version: GRANT_VERSION,
+        accessToken: grant.accessToken,
+        refreshToken: grant.refreshToken,
+        expiresAt: grant.expiresAt ?? null
+      }
+    }));
+    await backend().deleteRecord(legacyKey).catch(() => {});
+    return grant;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Persist a token pair.
+ *
+ * Goes through `modifyRecord` so the read-decide-replace is exclusive: a
+ * refresh token is single-use, and two processes racing on it would
+ * otherwise invalidate each other's grant.
+ * @param {string} accessToken - the new console JWT.
+ * @param {string} refreshToken - the refresh token the platform just issued.
+ * @param {number} expiresIn - the access token lifetime in seconds.
+ * @param {string} [replacing] - the access token this write supersedes:
+ *   passed by every refresh, and by a password login that read an existing
+ *   grant. A record still holding exactly that token is the one we read, so
+ *   replacing it is right; a record holding anything else was rotated by
+ *   someone else in the meantime and is kept. Absent only for a first-ever
+ *   login that read no grant.
+ * @returns {Promise<{accessToken: string, refreshToken: string, expiresAt: number|null}>}
+ *   the grant now in effect — ours, or the newer one we deferred to.
+ */
+export async function storeGrant(
+  wiring: StoreContextWiring,
+  state: TokenStoreState,
+  accessToken: string,
+  refreshToken: string,
+  expiresIn: number,
+  replacing: string | undefined
+): Promise<StoredGrant> {
+  const { backend, key, now } = wiring;
+  const issuedAt = now();
+  const payload = {
+    version: GRANT_VERSION,
+    accessToken,
+    refreshToken,
+    expiresAt: issuedAt + num(expiresIn, 10800) * 1000
+  };
+  try {
+    const record = await backend().modifyRecord(key, (current) => {
+      const existing = parseGrant(current);
+      if (replacing !== undefined) {
+        // A named predecessor: compare-and-set used by every refresh AND by a
+        // password login that read an existing grant. If the record moved to
+        // some other token while this write was in flight, that other write
+        // won and this one defers — two processes racing a login/refresh
+        // cannot invalidate each other's rotated refresh token, while an
+        // intentional account switch replaces the grant it read.
+        if (existing !== undefined && existing.accessToken !== replacing) {
+          return undefined;
+        }
+      } else if (existing !== undefined
+        && existing.expiresAt !== null && existing.expiresAt > issuedAt + 60_000) {
+        // No named predecessor — a first-ever login that read no grant. Two
+        // processes bootstrapping at once both land here; the one whose write
+        // lands second keeps the already-healthy grant instead of rotating
+        // the refresh token under the first. A login over an EXISTING grant
+        // always names it, so an account switch is never swallowed by this.
+        return undefined;
+      }
+      return Promise.resolve({ kind: "grant", payload });
+    });
+    const stored = parseGrant(record) ?? payload;
+    state.cached = stored;
+    return stored;
+  } catch (error) {
+    // A read-only store must not break the panel: keep the token in memory
+    // for this process and let the next start re-login.
+    state.cached = { accessToken, refreshToken, expiresAt: payload.expiresAt };
+    throw new Error(
+      `could not persist the console token (${error instanceof Error ? error.message : String(error)}); ` +
+        "it stays valid until dsh restarts"
+    );
+  }
+}
+
+/**
+ * Remove a grant that can no longer be of any use.
+ *
+ * A refresh token the platform has rejected (`refresh_rejected`) is dead for
+ * good, and when no account is stored to re-login with there is no path that
+ * ever revives it. Leaving it on disk did two things: it kept an ownerless
+ * token pair in the credentials file after "forget account", and it made
+ * every poll hit the dead refresh token before giving up. This reaps it.
+ * Best-effort: a read-only store keeps serving from memory until restart.
+ * @param {string} [accessToken] - the dead token, also dropped from the
+ *   in-memory cache and rejection set.
+ */
+export async function purgeGrant(wiring: StoreContextWiring, state: TokenStoreState, accessToken?: string): Promise<void> {
+  const { backend, key } = wiring;
+  state.cached = null;
+  if (accessToken !== undefined) state.rejected.delete(accessToken);
+  // Compare-and-reap: the grant this build is about to delete must still be the
+  // dead token it failed on. A second Host process sharing this credentials
+  // document (PITFALLS §22: desktop dir copy + web symlink) may have already
+  // rotated the refresh token and written a *healthy* grant with a different
+  // access token. Deleting that unconditionally would
+  // silently log the other process out and defeat silent renewal. So when a
+  // specific dead token is named, only reap the on-disk grant if it is still
+  // that token; otherwise adopt the newer pair into our in-memory cache (the
+  // next poll reads it fresh) and leave the document alone. The `accessToken`
+  // is `undefined` only on the explicit "forget account" path, where the only
+  // correct action is to delete whatever is stored.
+  if (accessToken !== undefined) {
+    // A READ FAILURE IS NOT A MATCH.
+    //
+    // "The document could not be read right now" is not the same input as "the
+    // record is absent": folding them together (a `.catch(() => undefined)` on
+    // the read does exactly that) opens this gate whenever a second Host
+    // process is mid-rewrite, and this call then deletes the healthy grant it
+    // just wrote, signing out both. A gate that fails open is worse than no
+    // gate, because nobody looks for the hole.
+    //
+    // The conservative direction when the record cannot be seen is to leave it
+    // alone: a stale grant costs one failed request that the caller is already
+    // handling, while a deleted one costs the user a silent sign-out.
+    let onDisk: StoredGrant | undefined;
+    try {
+      onDisk = parseGrant(await backend().readRecord(key));
+    } catch {
+      return;
+    }
+    if (onDisk !== undefined && onDisk.accessToken !== accessToken) {
+      state.cached = onDisk;
+      return;
+    }
+  }
+  await backend().deleteRecord(key).catch(() => {});
+}
+
+/**
+ * Whether a token is still good for at least `skewMs`.
+ * @param {object} wiring - the store context wiring.
+ * @param {object} state - the store context state.
+ * @param {object} token - a stored grant, or null/undefined.
+ * @param {number} [at] - the clock reference; defaults to `now()`.
+ * @returns {boolean}
+ */
+export function isFresh(wiring: StoreContextWiring, state: TokenStoreState, token: StoredGrant | null | undefined, at?: number): token is StoredGrant {
+  const { now, skewMs } = wiring;
+  if (at === undefined) at = now();
+  if (token === undefined || token === null) return false;
+  // A token the console refused is never fresh, however long its `exp` says.
+  if (state.rejected.has(token.accessToken)) return false;
+  if (token.expiresAt === null) return true; // unknown expiry: let the console decide
+  return token.expiresAt - at > skewMs;
+}

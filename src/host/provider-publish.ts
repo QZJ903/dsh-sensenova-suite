@@ -1,0 +1,451 @@
+/**
+ * The directly-registered provider's PUBLISH STATE MACHINE — the peer-free
+ * control-plane half of step three ("one-stop service").
+ *
+ * Three load-bearing semantics, each pinned by a test that must keep running:
+ *   - the publish chain queues a publish behind every one in flight, so a slow
+ *     publish can never be overwritten by a fast one (PITFALLS §18);
+ *   - the `disposed` gate stops a publish arriving after dispose from
+ *     registering into a Host that has withdrawn the plugin;
+ *   - the single-point `registerPair` (with its factory-await + shape check,
+ *     PITFALLS §19) is used by both the publish and the rollback path.
+ *
+ * Peer-free: imports no runtime peer. The adapter factory is injected by the
+ * caller (`loadAdapterModule`, defaulting to `import("./llm-adapter.ts")`),
+ * so the offline suites can substitute a fake factory without touching the
+ * Host's node_modules.
+ *
+ * 跨切面行为指路：catalog 变化 / switch 翻转 / Key 清除 → 重注册 = `index.ts` seed poll + provider route handler + `publishProvider` 调用链。
+ * 看到"为什么 catalog 一小时缓存"的疑问，先读 `ARCHITECTURE.md` §5.2 的快照去抖与 `catalog-store.ts` 头注。
+ *
+ * @module dsh-sensenova-suite/provider-publish
+ */
+
+import { LLM_PROVIDER_ID, LLM_DISPLAY_NAME } from "./llm-models.ts";
+import { identifyVisionModel } from "./parsers.ts";
+import { str } from "./util.ts";
+import { resolveSwitchEnabled } from "./switch-precedence.ts";
+import {
+  createPublishQueue,
+  createPairReleaser,
+  createAdapterFactoryResolver,
+  registerProviderPair,
+  isBuiltAdapter,
+  BAD_FACTORY_SHAPE_ERROR,
+  describeBuildFailure,
+  warnBuildFailure,
+  swapRegistration,
+  resolveRegistrationService,
+  unregister
+} from "./publish-core.ts";
+import type { ProviderPublisherDeps } from "./types.ts";
+import type { PublisherStateBase } from "./publish-core.ts";
+
+/**
+ * The Token Plan publisher's live state: the shared registration fields plus
+ * the catalog/allow-list facts this upstream rolls back on.
+ */
+export interface ProviderPublisherState extends PublisherStateBase {
+  /** The catalog entries the current registration was built from. */
+  entries: any[];
+  /** The curated allow-list at registration time (empty = all models). */
+  enabledIds: string[];
+  /** The last quota-exhausted model ids published to the picker. */
+  unavailableIds: string[];
+  /** A cheap signature of the offered set (catalog ids + vision bits + allow-list). */
+  signature: string;
+  /** A cheap signature of the quota-exhausted set; flips when a pool crosses zero. */
+  quotaSignature: string;
+}
+
+/**
+ * What a publish answers.
+ *
+ * A real `interface`, not the JSDoc `@returns` that used to sit on `publish`:
+ * in a `.ts` file JSDoc is a comment, not a type source (the trap `codes.ts`
+ * spells out for `CodeValue`), so the declared shape reached no call site —
+ * each consumer re-declared `Promise<unknown>` and the result became
+ * unreadable. That is how a FAILED publish came to be treated as a landed one:
+ * nothing downstream could see `ok`.
+ *
+ * `ok:false` never means "the provider is down". It means this offer was NOT
+ * registered and the previously serving pair was left in place, so the caller
+ * must not adopt the new state's signature.
+ */
+export interface PublishResult {
+  /** True when the offer was registered (or deliberately unregistered). */
+  ok: boolean;
+  /** True when the publish was declined rather than failed (disposed, switch off). */
+  skipped?: boolean;
+  /** The redacted reason, present when `ok` is false. */
+  error?: unknown;
+}
+
+/**
+ * The provider publisher.
+ *
+ * Holds the live registration state (`state`); the publish queue, the
+ * `disposed` gate and the single-point `registerPair` are the shared
+ * `publish-core.ts` bones. The caller drives `publish` from the mount seed, the
+ * catalog poll, the provider switch, the roster save and the api-key forget;
+ * it calls `dispose` from the `ctx.effect` teardown.
+ *
+ * The `getLlm` resolver is a FUNCTION, not a snapshot, because the `llm`
+ * service may register with the Host after this plugin mounts — the same
+ * resolver-not-snapshot pattern used for `credentials`.
+ *
+ * @param {object} [deps]
+ * @param {object} [deps.settings] - the resolved settings row (reads `registerProvider` and `apiBase` only).
+ * @param {() => Promise<boolean|null>} [deps.panelSwitch] - the panel-saved value
+ *   (`provider-store.enabled()`); null when the state file is untouched.
+ * @param {() => Promise<{createSensenovaAdapter: Function}>} [deps.loadAdapterModule] - the
+ *   peer-dependent adapter factory module; defaults to the real `llm-adapter.ts`.
+ * @param {(service: string) => object|null} [deps.getLlm] - optional-service
+ *   resolver for the `llm` registration service.
+ * @param {() => Promise<string>} [deps.resolveApiKey] - resolves the live `sk-`
+ *   key per request (the `api-key-store.ts` seam). The adapter factory reads
+ *   it, so it must be a real resolver, never a snapshot.
+ * @param {(event: string) => void} [deps.emit] - `ctx.emit` for the adapter
+ *   update event.
+ * @param {object} [deps.logger] - `ctx.logger` for the build-failure warning.
+ * @returns {{
+ *   state: {entries, enabledIds, unavailableIds, signature, quotaSignature,
+ *           llmAvailable, registered, error, built, releaseAdapter,
+ *           releaseDirectory},
+ *   publish: (entries: object[], enabledIds: string[],
+ *             unavailableModelIds?: string[]) => Promise<object>,
+ *   release: () => void,
+ *   dispose: () => void,
+ *   isDisposed: () => boolean
+ * }}
+ */
+export function createProviderPublisher(deps: ProviderPublisherDeps = {}) {
+  const {
+    settings,
+    panelSwitch,
+    loadAdapterModule,
+    getLlm,
+    resolveApiKey,
+    emit,
+    logger
+  } = deps;
+  const effectiveSettings: Partial<import("./host-config.ts").ResolvedSettings> = settings ?? {};
+  const effectivePanelSwitch = panelSwitch ?? (async () => null);
+    const effectiveLoadAdapterModule = loadAdapterModule ?? (() => import("./llm-adapter.ts"));
+  const effectiveGetLlm = getLlm ?? (() => null);
+  const effectiveResolveApiKey = resolveApiKey ?? (async () => "");
+  // `emit` is deliberately NOT defaulted here. The publish path hands the raw
+  // (possibly absent) `ctx.emit` down to `publish-core`, whose
+  // `emitAdaptersUpdated` copes with both a missing and a refusing emitter — a
+  // local no-op stand-in could only ever mask a mistake, never add safety.
+  const effectiveLogger = logger ?? { warn: () => {} };
+
+  /**
+   * The live registration state. A plain object the caller reads as `state`
+   * (the snapshot's `llm` block pulls `registered` / `error` off it). The
+   * release functions live here rather than being returned, because a
+   * registration that throws AFTER the adapter was registered must still
+   * be reachable, or the adapter outlives the plugin (see `registerPair`).
+   */
+  const state: ProviderPublisherState = {
+    /** The catalog entries the current registration was built from. */
+    entries: [],
+    /** The curated allow-list at registration time (empty = all models). */
+    enabledIds: [],
+    /** The last quota-exhausted model ids published to the picker. */
+    unavailableIds: [],
+    /** A cheap signature of the offered set (catalog ids + vision bits + allow-list). */
+    signature: "",
+    /** A cheap signature of the quota-exhausted set; flips when a pool crosses zero. */
+    quotaSignature: "",
+    /** Whether an `llm` service answering `registerAdapter` is present. */
+    llmAvailable: false,
+    /** Whether our provider pair is currently registered without error. */
+    registered: false,
+    /** The last registration error, surfaced secret-free in the snapshot. */
+    error: null,
+    releaseAdapter: null,
+    releaseDirectory: null,
+    /** The built adapter the active release functions belong to. */
+    built: null
+  };
+
+  /**
+   * The publish queue and the `disposed` gate — the first two of the three
+   * load-bearing semantics. Both live in `publish-core.ts` now, so the
+   * Raccoon publisher's copy cannot drift from this one.
+   */
+  const queue = createPublishQueue();
+
+  /** Resolve the peer-dependent adapter factory once and memoize it. */
+  const resolveAdapterFactory = createAdapterFactoryResolver(
+    effectiveLoadAdapterModule,
+    "createSensenovaAdapter"
+  );
+
+  /** Release the registered pair. Releases are idempotent in the Host. */
+  const release = createPairReleaser(state);
+
+  /**
+   * Hand one built adapter to the llm service and record its release
+   * functions onto `target`.
+   *
+   * The body is the shared `registerProviderPair` (PITFALLS §19) — one copy
+   * for both publishers and both paths; this wrapper only supplies which
+   * provider the row is for.
+   * @param {object} llm - the registration service.
+   * @param {{providerIds: string[], adapter: unknown}} built - what to register.
+   * @param {object} target - where the release functions are recorded (`state`).
+   * @returns {void}
+   */
+  const registerPair = (llm: { registerAdapter: (providerIds: string[], adapter: unknown) => () => void; registerConfigurableProviders?: (rows: object[]) => () => void }, built: { providerIds: string[]; adapter: unknown }, target: import("./publish-core.ts").PublisherStateBase) => registerProviderPair(llm, built, target, {
+    providerId: LLM_PROVIDER_ID,
+    displayName: LLM_DISPLAY_NAME
+  });
+
+  /**
+   * (Re)build and register the provider for one catalog/allow-list snapshot.
+   *
+   * Rebuild-and-reregister rather than mutate: `PiAiAdapter` memoizes its
+   * profiles snapshot internally, so only a fresh registration can change the
+   * offered model list. On a failed registration the PREVIOUS pair is
+   * restored, so a bad publish can never take down models that were already
+   * serving.
+   * @param {object[]} entries - the normalized catalog entries.
+   * @param {string[]} enabledIds - the curated allow-list (empty = all).
+   * @param {string[]} [unavailableModelIds] - quota-exhausted model ids to
+   *   drop from the picker's offer.
+   * @returns {Promise<{ok: boolean, skipped?: boolean, error?: unknown}>}
+   */
+  const publishProviderOnce = async (entries: unknown, enabledIds: unknown, unavailableModelIds: string[] = []): Promise<PublishResult> => {
+    // A publish that arrives after the plugin was disposed registers a
+    // provider into a Host that has already withdrawn this plugin: no owner,
+    // no release, and nothing on screen saying where it came from.
+    if (queue.isDisposed()) return { ok: false, skipped: true };
+    const previousBuilt = state.built;
+    const previousEntries = state.entries;
+    const previousEnabledIds = state.enabledIds;
+    const previousUnavailable = state.unavailableIds;
+    // The three domain fields are written BEFORE the switch is consulted, and
+    // the switch-off branch below deliberately does NOT roll them back. That
+    // asymmetry is load-bearing, not an oversight: `routes/provider.ts` and
+    // `routes/models.ts` re-publish from exactly these fields when the switch
+    // comes back on, so they are where the user's allow-list edits and the last
+    // fetched catalogue must SURVIVE the off period. Restoring `previous*`
+    // here would silently discard both — a save made while the provider was
+    // switched off would vanish the moment it was switched on again.
+    // `swapRegistration`'s `onRollback` does restore them, but only for the
+    // path where a registration actually threw (PITFALLS §19) — a failure
+    // that must leave the previously serving pair serving, which is a
+    // different promise from "the switch is off".
+    state.entries = Array.isArray(entries) ? entries : [];
+    state.enabledIds = Array.isArray(enabledIds) ? enabledIds : [];
+    state.unavailableIds = Array.isArray(unavailableModelIds) ? unavailableModelIds : [];
+    // Opt-in: with the switch off there must be no registration left behind
+    // from a row that flipped it after mounting. The EFFECTIVE switch is
+    // panel-first (`provider-store.ts`), falling back to the patch value —
+    // re-read here on every publish, so a flip applies without a restart.
+    const panelValue = await effectivePanelSwitch().catch(() => null);
+    const registerWanted = resolveSwitchEnabled(panelValue, effectiveSettings.registerProvider === true);
+    if (!registerWanted) return unregister({ state, release });
+    const llm = resolveRegistrationService({ state, getLlm: effectiveGetLlm, release });
+    if (llm === null) return { ok: false, error: state.error };
+    let createSensenovaAdapter;
+    let built;
+    try {
+      createSensenovaAdapter = await resolveAdapterFactory();
+      // Awaited, not assumed synchronous: a factory that ever becomes async
+      // would otherwise hand a Promise to `registerAdapter`, and the Host
+      // would be offered a provider whose adapter is `undefined` — a failure
+      // that surfaces as broken model routing, nowhere near its cause.
+      if (createSensenovaAdapter === undefined) throw new Error(BAD_FACTORY_SHAPE_ERROR);
+      built = await createSensenovaAdapter({
+        entries: state.entries,
+        enabledIds: state.enabledIds,
+        baseUrl: effectiveSettings.apiBase ?? "",
+        resolveApiKey: effectiveResolveApiKey,
+        get: effectiveGetLlm,
+        unavailableModelIds: state.unavailableIds,
+        // Read on EVERY publish from the live settings, like `apiBase` above:
+        // editing the map in the row must take effect on the next catalog poll
+        // or switch flip, with no restart. A value captured at mount would make
+        // the knob look dead until the Host was reloaded.
+        maxTokensOverrides: effectiveSettings.maxTokensOverrides
+      });
+      // The same reason, stated: an adapter is registered Host-wide, so a
+      // factory that returns anything else must fail here rather than publish
+      // a provider that cannot serve a request.
+      if (!isBuiltAdapter(built)) throw new Error(BAD_FACTORY_SHAPE_ERROR);
+    } catch (e) {
+      // A missing llm peer surfaces as Node's ERR_MODULE_NOT_FOUND on the
+      // thrown value (which may not be a plugin Error at all) — the shared
+      // describer reads it, redacts the message, and appends the remedy.
+      const described = describeBuildFailure(e);
+      state.error = described.note;
+      warnBuildFailure(effectiveLogger, "SenseNova", described);
+      return { ok: false, error: described.error };
+    }
+    // The swap (and the rollback behind it) is the shared mechanism: a failed
+    // re-registration must restore the pair that was serving. What is restored
+    // on THIS side is the catalog identity — entries, allow-list, and the
+    // quota-exhausted set (which must not keep pointing at a set we failed to
+    // publish).
+    return swapRegistration({
+      llm,
+      built,
+      previousBuilt,
+      state,
+      release,
+      registerPair,
+      emit,
+      isDisposed: () => queue.isDisposed(),
+      onRollback: () => {
+        state.entries = previousEntries;
+        state.enabledIds = previousEnabledIds;
+        state.unavailableIds = previousUnavailable;
+      }
+    });
+  };
+
+  /**
+   * Publish, queued behind every other publish in flight.
+   *
+   * The wrapper exists so no caller has to remember the queue: the mount seed,
+   * a catalog poll, an api-key forget and a provider switch all reach the same
+   * critical section, and any one of them racing another is the bug above.
+   * @param {object[]} entries - the normalized catalog entries.
+   * @param {string[]} enabledIds - the curated allow-list (empty = all).
+   * @param {string[]} [unavailableModelIds] - quota-exhausted model ids.
+   * @returns {Promise<{ok: boolean, skipped?: boolean, error?: unknown}>}
+   */
+  const publish = (entries: unknown, enabledIds: unknown, unavailableModelIds: string[] = []) =>
+    queue.enqueue(() => publishProviderOnce(entries, enabledIds, unavailableModelIds));
+
+  /**
+   * Mark the publisher as disposed: any in-flight or later publish becomes a
+   * no-op that cannot register into a withdrawn Host.
+   */
+  const dispose = () => queue.dispose();
+
+  return {
+    state,
+    publish,
+    release,
+    dispose,
+    // Exposed so the caller can read whether a publish was skipped due to
+    // disposal (the mount seed checks this to stay quiet).
+    isDisposed: () => queue.isDisposed()
+  };
+}
+
+/**
+ * Seed the registration from the persisted catalog so a restarted Host offers
+ * models before its first poll (and with no console login at all).
+ *
+ * Fire-and-forget: a state dir that cannot be read just waits for the poll.
+ *
+ * The quota dimension rides the seed (2026-10-17, review #1a): the persisted
+ * LAST-KNOWN exhausted set is re-published with the catalog, so a restart does
+ * not hand the picker back the models the last known poll had blocked. A v1
+ * record / fresh install states NOTHING (`listUnavailable` reads `null`), and
+ * the offer then defaults to wide — which is the correct FRESH-INSTALL answer
+ * (nothing was ever known to be exhausted), not a widening of a known state.
+ * `quotaSignature` is stamped from the same set so the first poll that reads
+ * the identical set sees no flip and does not churn the registration — and it
+ * is stamped ONLY after a LANDED publish: a seed that pre-stamped would stamp
+ * the new offer's signature onto a registration that never happened, and the
+ * first poll would compare, see "no change", and never retry the blocked set
+ * until a real change or a restart. Same lesson as F2/F3 in
+ * `test/snapshot-aggregate.test.mjs`, at the boot boundary.
+ * @param {Pick<ReturnType<typeof createProviderPublisher>, "state" | "publish">} publisher
+ *   — the only two members the seed touches. Typed off the REAL publisher
+ *   rather than a hand-written structural copy: that copy declared the third
+ *   `publish` parameter as `unknown`, which is WIDER than the `string[]` the
+ *   publisher actually accepts, so under `strictFunctionTypes` the genuine
+ *   publisher was not assignable to it. `lifecycle.ts` passing `wiring: any`
+ *   is the only reason this never surfaced — tightening that annotation
+ *   exposed it. The seed passes a `string[]` for the quota dimension (below),
+ *   so the narrower type is what the call actually needs.
+ * @param {() => Promise<object[]>} listCatalog - read the persisted catalog entries.
+ * @param {() => Promise<string[]>} listEnabled - read the persisted allow-list.
+ * @param {() => Promise<string[]|null>} [listUnavailable] - read the persisted
+ *   last-KNOWN exhausted set; `null`/absent reader = never stated (seed wide).
+ */
+export function seedPublisherFromCatalog(publisher: Pick<ReturnType<typeof createProviderPublisher>, "state" | "publish">, listCatalog: () => Promise<object[]>, listEnabled: () => Promise<string[]>, listUnavailable?: () => Promise<string[] | null>) {
+  return (async () => {
+    try {
+      const [stored, storedEnabled, storedQuota] = await Promise.all([
+        listCatalog(),
+        listEnabled(),
+        listUnavailable === undefined ? Promise.resolve(null) : listUnavailable()
+      ]);
+      const unavailable = storedQuota ?? [];
+      const landed = await publisher.publish(stored, storedEnabled, unavailable);
+      // Signatures ONLY after a landed publish (see the note above): the same
+      // single-source sync the poll and the route handlers use, computed from
+      // what the publisher ACTUALLY offered. A skipped/failed publish leaves
+      // both stamps as they were, so the first poll retries the offer.
+      if (landed?.ok !== false) syncSignaturesAfterPublish(publisher.state);
+    } catch {
+      // No seed catalog: the first successful poll publishes.
+    }
+  })();
+}
+
+/**
+ * A cheap signature of the model set a provider registration would offer.
+ *
+ * It only has to answer "would rebuilding change anything?": the model ids in
+ * catalog order, each tagged with the SAME vision decision the descriptors
+ * use (an id whose modality flipped must rebuild even though the id list did
+ * not change), plus the curated allow-list. Anything else changing in a
+ * catalog entry does not affect the registered offer.
+ * @param {object[]} entries - the normalized catalog entries.
+ * @param {string[]} enabledIds - the allow-list (empty = all).
+ * @returns {string}
+ */
+export function catalogSignature(entries: unknown, enabledIds: unknown): string {
+  const models = (Array.isArray(entries) ? entries : [])
+    .map((entry) => `${str((entry as { id?: unknown })?.id, "")}:${identifyVisionModel(entry).vision === true ? 1 : 0}`)
+    .join(",");
+  return `${models}|${(Array.isArray(enabledIds) ? enabledIds : []).join(",")}`;
+}
+
+/**
+ * The signature of a quota-unavailable set: the poll's "did the exhausted set
+ * change?" signal.
+ *
+ * Exported so the poll path and {@link syncSignaturesAfterPublish} cannot
+ * drift — they used to spell this formula out twice (`[...ids].sort().join(",")`),
+ * which is exactly the kind of pair that diverges the first time one side is
+ * touched, and the failure mode is silent: the two sides stop seeing each
+ * other's publishes, so the registration either churns every poll or never
+ * rebuilds. Order-independent by construction (sorted), so two equal sets
+ * always produce one string.
+ * @param {string[]} unavailableIds - the exhausted model ids.
+ * @returns {string}
+ */
+export function quotaSignatureOf(unavailableIds: string[]): string {
+  return [...unavailableIds].sort().join(",");
+}
+
+/**
+ * Recompute the state's `signature` and `quotaSignature` from the offer the
+ * publisher just published. Call it after every direct `publishProvider` that
+ * bypasses the poll's change-detection in `snapshot-aggregate`: those two
+ * fields are the poll's "did the offer change?" signal, so they must track what
+ * was actually offered or the next poll needlessly churns (rebuilds) the
+ * registration. The formulas here are the SAME ones the poll uses — they are
+ * the exported functions, not copies of them — so the two can never drift
+ * apart. Only meaningful after a successful publish: on a failed one the
+ * caller's rollback already restored the previous fields.
+ * @param {{entries: object[], enabledIds: string[], unavailableIds: string[],
+ *          signature: string, quotaSignature: string}} state - `publisher.state`.
+ */
+export function syncSignaturesAfterPublish(state: { entries?: unknown; enabledIds?: unknown; unavailableIds?: unknown; signature: string; quotaSignature: string }) {
+  const entries = Array.isArray(state.entries) ? state.entries : [];
+  const enabledIds = Array.isArray(state.enabledIds) ? state.enabledIds : [];
+  const unavailable = Array.isArray(state.unavailableIds) ? state.unavailableIds : [];
+  state.signature = catalogSignature(entries, enabledIds);
+  state.quotaSignature = quotaSignatureOf(unavailable);
+}

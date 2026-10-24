@@ -1,0 +1,143 @@
+{
+  "name": "dsh-sensenova-suite",
+  "displayName": "DSH SenseNova Suite",
+  "icon": "./icon.svg",
+  "version": "0.1.0-alpha.1",
+  "description": "SenseNova (Token Plan) all-in-one for DeepSeek Harness: credits panel with usage pill, multi-account key pool with per-credit-group routing, tri-protocol LLM provider (anthropic/responses/chat-completions), image generation/editing tools, and vision relay for text-only models.",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "sensenova",
+    "token-plan",
+    "credits",
+    "quota"
+  ],
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client.js",
+    "icon.svg",
+    "locale",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "build:client": "tsdown -c tsdown.config.mjs",
+    "duplicate-check": "jscpd src --min-tokens 70 --reporters console-full",
+    "test": "node test/run-all.mjs",
+    "test:list": "node test/run-all.mjs --list",
+    "commit:lint": "node test/commit-lint.mjs",
+    "test:live": "node test/live-jwks.test.mjs",
+    "test:live:contract": "node test/live-contract.mjs",
+    "test:live:raccoon": "node test/live-raccoon.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "doctor": "node tools/doctor.mjs",
+    "doctor:json": "node tools/doctor.mjs --json",
+    "host-range:update": "node tools/update-host-range.mjs",
+    "host-range:check": "node tools/update-host-range.mjs --check",
+    "build": "tsdown -c tsdown.config.mjs",
+    "prepack": "npm run build"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.2 <5.0.0",
+    "@deepseek-ai/dsh-client-locale": ">=0.1.5 <0.3",
+    "@deepseek-ai/dsh-client-ui-layout": ">=0.1.5 <0.3",
+    "@deepseek-ai/dsh-client-ui-renderer": ">=0.1.5 <0.3",
+    "@deepseek-ai/dsh-credentials": ">=0.1.5 <0.3",
+    "@deepseek-ai/dsh-home-paths": ">=0.1.5 <0.3",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.5 <0.3",
+    "@deepseek-ai/dsh-llm": ">=0.1.5 <0.3",
+    "@deepseek-ai/dsh-llm-pi-ai": ">=0.1.5 <0.3",
+    "@deepseek-ai/dsh-settings": ">=0.1.5 <0.3",
+    "@deepseek-ai/dsh-tools": ">=0.1.5 <0.3",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "@earendil-works/pi-ai": ">=0.85.0 <2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-layout": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-renderer": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-credentials": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-home-paths": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm-pi-ai": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QZJ903/dsh-sensenova-suite.git"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "js-yaml": "^5.5.0",
+    "jscpd": "^5.4.0",
+    "jsdom": "^30.1.3",
+    "jsqr": "^1.4.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tsdown": "0.23.1",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "rolldown": "1.2.14"
+  }
+}
