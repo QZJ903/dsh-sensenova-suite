@@ -44,9 +44,12 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   onDone?: () => void;
   tt: Tt;
 }): unknown {
-  const models = Array.isArray(llm?.models) ? llm.models : [];
+  const models = Array.isArray(llm?.allModels) ? llm.allModels : (Array.isArray(llm?.models) ? llm.models : []);
   const imageModels = models.filter((model: ModelData) => model?.imageGen === true);
-  const visionModels = models.filter((model: ModelData) => model?.vision === true);
+  // 识图模型 = 用户在接入 API tab 思考档位旁勾选的模型（vision.visionModels 数组）。
+  // 不再按目录声明或全部对话模型列；用户认为可识图的，才出现在识图下拉。
+  const visionSelected = Array.isArray(pool?.settings?.vision?.visionModels) ? pool.settings.vision.visionModels : [];
+  const visionModels = models.filter((model: ModelData) => visionSelected.includes(String(model?.id ?? "")));
   const settings = pool?.settings ?? { toolsEnabled: {}, text2img: {}, img2img: {}, vision: {} };
   const [busySection, setBusySection] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);

@@ -156,8 +156,9 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
  * panel grew one SectionCard per concern: key, provider+push are
  * three different functions and no longer share a card.
  */
-export function ProviderForm({ llm, onDone, tt }: {
+export function ProviderForm({ llm, pool, onDone, tt }: {
   llm?: LlmData | null;
+  pool?: PoolDiagData | null;
   onDone?: () => void;
   tt: Tt;
 }): unknown {
@@ -169,7 +170,7 @@ export function ProviderForm({ llm, onDone, tt }: {
     // closes the card. At the top it competed with the title and
     // duplicated the roster's own counts out of reading order.
     h(ProviderSwitch, { llm, onDone, tt }),
-    h(ModelPicker, { llm, onDone, tt }),
+    h(ModelPicker, { llm, pool, onDone, tt }),
     h(ProviderRegStatus, { llm, tt })
   );
 }
@@ -188,7 +189,7 @@ export function PoolManager({ pool, onDone, tt }: {
 }): unknown {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const savedConcurrency = pool?.globalConcurrency ?? 0;
+  const savedConcurrency = pool?.globalConcurrency ?? 2;
   const [concurrency, setConcurrency] = useState<number | null>(null);
   const concurrencyValue = concurrency ?? savedConcurrency;
   const concurrencyDirty = concurrency !== null && concurrency !== savedConcurrency;
@@ -295,8 +296,9 @@ export function PoolManager({ pool, onDone, tt }: {
                     type: "button", style: S.rosterBulk, disabled: busyId !== null,
                     onClick: () => void setNote(entry.id, noteDraft)
                   }, tt("poolMng.saveName"))
-                : h("button", {
-                    type: "button", style: S.rosterBulk, disabled: busyId !== null,
+                : h("span", {
+                    // 备注以内容为准：显示「备注」两个字，点它整行变成输入框再回车保存
+                    style: { ...S.muted, fontSize: 12, cursor: "pointer" },
                     onClick: () => { setEditingId(entry.id); setNoteDraft(entry.note ?? ""); }
                   }, tt("poolMng.note")),
               entry.deleted
@@ -328,9 +330,19 @@ export function PoolManager({ pool, onDone, tt }: {
                   style: { ...S.input, width: "100%", boxSizing: "border-box", marginTop: 6 },
                   value: noteDraft,
                   autoFocus: true,
+                  placeholder: tt("poolMng.note"),
                   disabled: busyId !== null,
                   onChange: (event: { target: { value: string } }) => setNoteDraft(event.target.value),
-                  onKeyDown: (event: { key: string }) => { if (event.key === "Enter") void setNote(entry.id, noteDraft); }
+                  onBlur: () => { if (editingId === entry.id) void setNote(entry.id, noteDraft); },
+                  onKeyDown: (event: { key: string; preventDefault?: () => void }) => {
+                    // 回车保存备注；必须 preventDefault，否则会冒泡到外层
+                    // form 的 onSubmit（填 key 的表单），把空的 apiKey 提交并报
+                    // 「请输入 sk- 开头的 API Key」——2026-10-25 用户实测。
+                    if (event.key === "Enter") {
+                      event.preventDefault?.();
+                      void setNote(entry.id, noteDraft);
+                    }
+                  }
                 })
               : null
           ))

@@ -2,7 +2,7 @@
  * The curated model allow-list UI: the hook-free row list and the hook-based
  * picker around it.
  */
-import { MODELS_PATH } from "./const.ts";
+import { MODELS_PATH, POOL_PATH } from "./const.ts";
 const PROTOCOLS = ["auto", "anthropic", "responses", "chat-completions"] as const;
 import { errorText, format, tokenSize } from "./format.ts";
 import { postJsonOrThrow } from "./http.ts";
@@ -11,7 +11,7 @@ import { bulkModelsIn, modelIsOn, toggleModelIn } from "./models.ts";
 import { dictKey, h, useCallback, useEffect, useMemo, useRef, useState } from "./runtime.ts";
 import type { Tt } from "./runtime.ts";
 import { S } from "./styles.ts";
-import type { LlmData, ModelData } from "./wire.ts";
+import type { LlmData, ModelData, PoolDiagData } from "./wire.ts";
 
 /**
  * The single empty roster every "the Host sent no list" fallback resolves to.
@@ -47,7 +47,7 @@ const NO_IDS: string[] = [];
  * only") earns no badge, and a figure the catalogue does not declare draws no
  * segment - the list quotes facts, never guesses.
  */
-export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange }: {
+export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle }: {
   models: ModelData[];
   enabledIds: unknown;
   busy: boolean | undefined;
@@ -56,8 +56,18 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
   /** 每模型协议覆盖（缺省 = auto）；面板"协议"列的数据源。 */
   modelProtocols?: Record<string, string>;
   onProtocolChange?: (id: string, protocol: string) => void;
+  /** 用户勾选的「可识图」模型 id 集合；缺省 = 空（不显示识图勾选）。 */
+  visionIds?: string[];
+  /** 勾选/取消某模型的识图能力（存 vision.visionModels）。 */
+  onVisionToggle?: (id: string, on: boolean) => void;
+  /** 每模型可用思考档位（{ modelId → level[] }；用户勾选）。 */
+  thinkingById?: Record<string, string[]>;
+  /** 切换某模型的一个思考档位（存 thinking 分区）。 */
+  onThinkingToggle?: (id: string, level: string, on: boolean) => void;
 }): unknown {
   const list = Array.isArray(models) ? models : [];
+  const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
+  const THINKING_CHOICES = ["off", "low", "medium", "high", "xhigh", "max"];
   return h(
     "ul",
     { style: S.modelList, role: "list" },
@@ -81,6 +91,7 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
         : null;
       const meta = [ctx, out, levels].filter(Boolean).join(" · ");
       const rate = typeof model?.multiplier === "number" ? model.multiplier : null;
+      const visionOn = visionSet !== null && visionSet.has(id);
       return h(ModelRow, {
         key: id,
         id,
@@ -98,9 +109,53 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
         // quoting, and `quota exhausted` says why a ticked row still will
         // not show up in the DSH picker (the buildDescriptors parity rule).
         badges: [
-          model?.vision === true ? h("span", { key: "vision", style: S.modelBadge }, tt("llm.rosterVision")) : null,
           model?.quotaExhausted === true
             ? h("span", { key: "exhausted", style: { ...S.modelBadge, color: "var(--dsw-alias-state-error-primary)" } }, tt("llm.rosterExhausted"))
+            : null,
+          // 识图勾选（思考档位旁，同列）：用户认定该模型可看图。勾选的进
+          // 图片转述下拉（vision.visionModels）。目录声明不再作数——用户说了算。
+          visionSet !== null
+            ? h("label", {
+                key: "vision",
+                style: { display: "inline-flex", gap: 4, alignItems: "center", cursor: busy ? "default" : "pointer", marginLeft: 8, fontSize: 11, color: "var(--dsw-alias-label-secondary)" },
+              },
+              h("input", {
+                type: "checkbox",
+                checked: visionOn,
+                disabled: busy === true,
+                style: S.modelCheck,
+                "aria-label": `${label} 识图`,
+                onChange: onVisionToggle
+                  ? () => onVisionToggle(id, !visionOn)
+                  : undefined
+              }),
+              tt("llm.rosterVision"))
+            : null,
+          // 思考档位（用户可配置该模型支持哪些档位）：小复选框簇，紧贴识图后。
+          // 勾选存 pool.json `thinking` 分区；DSH 对话界面的可选档位 = 此勾选集。
+          onThinkingToggle !== undefined
+            ? h("span", {
+                key: "thinking",
+                style: { display: "inline-flex", gap: 2, alignItems: "center", marginLeft: 8, fontSize: 11, color: "var(--dsw-alias-label-secondary)" },
+                title: tt("llm.rosterThinking"),
+              },
+              tt("llm.rosterThinking"),
+              ...THINKING_CHOICES.map((level) => {
+                const picking = Array.isArray(thinkingById?.[id]) && (thinkingById[id] as string[]).includes(level);
+                return h("label", {
+                  key: level,
+                  style: { display: "inline-flex", gap: 1, alignItems: "center", cursor: busy ? "default" : "pointer", marginLeft: 2, fontSize: 11 },
+                },
+                h("input", {
+                  type: "checkbox",
+                  checked: picking,
+                  disabled: busy === true,
+                  style: { ...S.modelCheck, width: 11, height: 11 },
+                  "aria-label": `${label} 思考档位 ${level}`,
+                  onChange: () => onThinkingToggle(id, level, !picking)
+                }),
+                tt(dictKey("llm.level", level)));
+              }))
             : null,
           // 协议列（右对齐）：该模型的起始协议；auto = 决策表（默认）。
           onProtocolChange !== undefined
@@ -135,15 +190,32 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
  * never reached the Host keeps showing the edits, and an edit that ends
  * up identical to the Host's value shows neither button.
  */
-export function ModelPicker({ llm, onDone, tt }: {
+export function ModelPicker({ llm, pool, onDone, tt }: {
   llm?: LlmData | null;
+  pool?: PoolDiagData | null;
   onDone?: () => void;
   tt: Tt;
 }): unknown {
   const hostProtocols = llm?.modelProtocols ?? {};
   const models = Array.isArray(llm?.models) ? llm.models : NO_MODELS;
   const hostIds = Array.isArray(llm?.enabledModelIds) ? llm.enabledModelIds : NO_IDS;
+  // 用户勾选的「可识图」模型（存在 vision.visionModels；图片转述下拉以此为准）。
+  const visionHost = Array.isArray(pool?.settings?.vision?.visionModels)
+    ? (pool.settings.vision.visionModels as string[])
+    : [];
   const [ids, setIds] = useState<string[]>(() => hostIds.slice());
+  const [visionIds, setVisionIds] = useState<string[]>(() => visionHost.slice());
+  // 每模型可用思考档位（pool.json `thinking` 分区；行内勾选初值）。
+  const thinkingHost = typeof pool?.settings?.thinking === "object" && pool.settings.thinking !== null
+    ? pool.settings.thinking
+    : {};
+  const [thinkingById, setThinkingById] = useState<Record<string, string[]>>(() => {
+    const out: Record<string, string[]> = {};
+    for (const [k, v] of Object.entries(thinkingHost)) {
+      if (Array.isArray(v)) out[k] = v as string[];
+    }
+    return out;
+  });
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
   const [savedKey, setSavedKey] = useState<string | null>(null);
@@ -299,8 +371,7 @@ export function ModelPicker({ llm, onDone, tt }: {
                 onProtocolChange: (id: string, protocol: string) => {
                   // 协议即改即存（草稿纪律只属于允许清单）：POST 后 onDone()
                   // 的轮询会回显 Host 的值。
-                  void postJsonOrThrow(MODELS_PATH, {
-                    modelProtocols: { ...hostProtocols, [id]: protocol }
+                  void postJsonOrThrow(MODELS_PATH, {                    modelProtocols: { ...hostProtocols, [id]: protocol }
                   }).then(() => onDone?.()).catch(() => undefined);
                 },
                 // One row is toggled against the WHOLE roster, not the
@@ -310,6 +381,37 @@ export function ModelPicker({ llm, onDone, tt }: {
                   touchedRef.current = true;
                   setIds(toggleModelIn(ids, models.map((model) => String(model?.id ?? "")), id));
                   setNotice(null);
+                },
+                // 识图勾选：即改即存到 vision.visionModels（POST /pool {section:vision}）。
+                // 用函数式更新拿最新勾选集：直接读闭包 visionIds 会在连续勾选时
+                // 用旧值覆盖前一个（后勾的丢先勾的）。勾选的模型进图片转述下拉。
+                visionIds,
+                onVisionToggle: (id: string, on: boolean) => {
+                  setVisionIds((current) => {
+                    const next = on
+                      ? [...current, id]
+                      : current.filter((vid) => vid !== id);
+                    void postJsonOrThrow(POOL_PATH, { section: "vision", values: { visionModels: next } })
+                      .then(() => onDone?.())
+                      .catch(() => undefined);
+                    return next;
+                  });
+                },
+                // 每模型可用思考档位：行内勾选存 pool.json `thinking` 分区。
+                // DSH 对话界面的可选思考档位 = 此勾选集（经 adapter 覆盖 reasoning）。
+                thinkingById,
+                onThinkingToggle: (id: string, level: string, onValue: boolean) => {
+                  setThinkingById((current) => {
+                    const list = Array.isArray(current[id]) ? current[id] : [];
+                    const next = onValue
+                      ? (list.includes(level) ? list : [...list, level])
+                      : list.filter((l) => l !== level);
+                    const values = { ...current, [id]: next };
+                    void postJsonOrThrow(POOL_PATH, { section: "thinking", values: { [id]: next } })
+                      .then(() => onDone?.())
+                      .catch(() => undefined);
+                    return values;
+                  });
                 }
               })),
           dirty

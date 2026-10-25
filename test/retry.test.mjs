@@ -297,8 +297,8 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     };
     const roster = rosterWithAvailability(entries, pools);
     const byId = Object.fromEntries(roster.map((r) => [r.id, r]));
-    check("rosterWithAvailability keeps image-generation models flagged, not dropped (panel pickers need them)",
-      ("gen" in byId) && roster.length === 3 && byId.gen.imageGen === true,
+    check("rosterWithAvailability drops image-generation models (chat offer only)",
+      !("gen" in byId) && roster.length === 2,
       JSON.stringify(roster.map((r) => r.id)));
     check("m1 is available (its pool still has credit)",
       byId.m1.available === true && byId.m1.quotaExhausted === false);
@@ -312,23 +312,17 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("an undeclared ceiling projects as 0, not a guessed number",
       byId.m2.maxOutputLength === 0, String(byId.m2.maxOutputLength));
     // The selectable ladder the row quotes must be EXACTLY what pi-ai's
-    // getSupportedThinkingLevels computes over our map (null drops; xhigh/max
-    // opt-in) — that function is the DSH selector's effort list source.
-    check("the row projects the platform-proven thinking levels only",
-      JSON.stringify(byId.m1.thinkingLevels) === JSON.stringify(["off", "high"]),
+    // getSupportedThinkingLevels computes over our map (null drops) — the
+    // DSH selector's effort list source. Since the 2026-10-24 probe (12 levels
+    // all 200) the ladder is full for EVERY chat model: off/none + low + medium
+    // + high + max; xhigh and minimal are excluded by user decision.
+    check("the row projects the full thinking ladder (xhigh/minimal excluded)",
+      JSON.stringify(byId.m1.thinkingLevels) === JSON.stringify(["off", "low", "medium", "high", "max"]),
       JSON.stringify(byId.m1.thinkingLevels));
-    // Extended levels are per-model and gated on the frozen probe table
-    // (`PROBED_EFFORT` in llm-models.ts): `xhigh` only deepseek-v4-flash,
-    // `max` only glm-5.2 — a model the platform never answered 200 for a level
-    // does not get that level offered, even when its id is unknown. The
-    // 2026-09-30 probe round also opened `low`/`medium` on the models it
-    // answered 200 for (v4-flash / glm-5.2 / flash-lite / deepseek-flash /
-    // kimi-k3 per model — see the baseline), so those rows now carry the
-    // full proven ladder; an unknown id still gets only off/high.
-    check("probed models carry their full proven ladder; unknown ids keep only off/high; minimal never offered",
+    check("every model offers the same full ladder (probe table retired)",
       supportedThinkingLevels({ id: "glm-5.2" }).join(",") === "off,low,medium,high,max" &&
-      supportedThinkingLevels({ id: "deepseek-v4-flash" }).join(",") === "off,low,medium,high,xhigh" &&
-      supportedThinkingLevels({ id: "anything-else" }).join(",") === "off,high",
+      supportedThinkingLevels({ id: "deepseek-v4-flash" }).join(",") === "off,low,medium,high,max" &&
+      supportedThinkingLevels({ id: "anything-else" }).join(",") === "off,low,medium,high,max",
       [
         "glm-5.2=" + supportedThinkingLevels({ id: "glm-5.2" }).join(","),
         "v4-flash=" + supportedThinkingLevels({ id: "deepseek-v4-flash" }).join(","),
@@ -343,7 +337,7 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     // A non-array / missing pools value must not throw and must read available.
     const safe = rosterWithAvailability(entries, {});
     check("a missing pools array yields available rows without throwing",
-      safe.length === 3 && safe.every((r) => r.available === true));
+      safe.length === 2 && safe.every((r) => r.available === true));
 
     // Parity: the roster enumerates EVERY chat model AND image model (including
     // quota-exhausted, so the panel can show them greyed and the image picker can
@@ -351,9 +345,9 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     // the exhausted ids — the two must never disagree about which models exist.
     const rosterIds = roster.map((r) => r.id);
     const built = buildDescriptors(entries, { baseUrl: BASE_URL, unavailableModelIds: ["m2"] }).map((d) => d.id);
-    check("roster enumerates every chat + image model (incl. quota-exhausted)",
-      JSON.stringify(rosterIds) === JSON.stringify(["m1", "m2", "gen"]), JSON.stringify(rosterIds));
-    check("the picker offers the chat models minus the quota-exhausted ids (image models never offered as chat)",
+    check("roster enumerates every chat model (incl. quota-exhausted; image models stay out)",
+      JSON.stringify(rosterIds) === JSON.stringify(["m1", "m2"]), JSON.stringify(rosterIds));
+    check("the picker offers the chat models minus the quota-exhausted ids",
       JSON.stringify(built) === JSON.stringify(["m1"]),
       `${JSON.stringify(built)} vs ${JSON.stringify(["m1"])}`);
   } catch (error) {

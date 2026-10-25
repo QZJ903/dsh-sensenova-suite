@@ -45,6 +45,8 @@ export interface VisionSettings {
   model?: string;
   bridgeMode?: string;
   bridgePrompt?: string;
+  /** 用户勾选为「可识图」的模型 id 列表（在接入 API tab 思考档位旁勾选）。 */
+  visionModels?: string[];
 }
 
 /** 工具开关（面板为主设置；配置 text2imgEnabled 等为部署默认）。 */
@@ -79,6 +81,8 @@ export interface PoolStoreRecord {
   text2img: ImageToolSettings;
   img2img: ImageToolSettings;
   vision: VisionSettings;
+  /** 每模型可用思考档位（用户配置；modelId → 档位列表）。空 = 用平台/静态默认。 */
+  thinking: Record<string, string[]>;
 }
 
 /** 空白记录（全部回落配置默认）。 */
@@ -87,7 +91,7 @@ export function emptyPoolRecord(): PoolStoreRecord {
     version: POOL_STORE_VERSION,
     disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {},
     keys: [],
-    toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}
+    toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}, thinking: {}
   };
 }
 
@@ -134,6 +138,9 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     const bridgeMode = strOf(rec.bridgeMode);
     if (bridgeMode === "off" || bridgeMode === "on" || bridgeMode === "auto") out.bridgeMode = bridgeMode;
     const bridgePrompt = strOf(rec.bridgePrompt); if (bridgePrompt !== undefined) out.bridgePrompt = bridgePrompt;
+    if (Array.isArray(rec.visionModels)) {
+      out.visionModels = rec.visionModels.filter((id): id is string => typeof id === "string" && id !== "");
+    }
     return out;
   };
   const readTools = (value: unknown): ToolsEnabled => {
@@ -168,8 +175,22 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     toolsEnabled: readTools(source.toolsEnabled),
     text2img: readImage(source.text2img),
     img2img: readImage(source.img2img),
-    vision: readVision(source.vision)
+    vision: readVision(source.vision),
+    thinking: readThinking(source.thinking)
   };
+}
+
+/** 读取每模型可用思考档位（modelId → string[]；仅保留已知档位）。 */
+function readThinking(value: unknown): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
+  const ALLOWED = ["off", "low", "medium", "high", "xhigh", "max"] as const;
+  for (const [modelId, levels] of Object.entries(value as Record<string, unknown>)) {
+    if (modelId === "" || !Array.isArray(levels)) continue;
+    const clean = levels.filter((l): l is string => typeof l === "string" && (ALLOWED as readonly string[]).includes(l));
+    if (clean.length > 0) out[modelId] = clean;
+  }
+  return out;
 }
 
 /** 一个 key 的运营状态（快照/路由读）。 */
@@ -257,7 +278,7 @@ export function createFilePoolStore(options: StoreOptions = {}) {
             await apply({ ...record, keys });
     },
     async setSection(
-      section: "toolsEnabled" | "text2img" | "img2img" | "vision",
+      section: "toolsEnabled" | "text2img" | "img2img" | "vision" | "thinking",
       values: Record<string, unknown>
     ): Promise<void> {
       const record = await seen();
@@ -270,7 +291,9 @@ export function createFilePoolStore(options: StoreOptions = {}) {
           ? { ...record.text2img, ...values }
           : section === "img2img"
             ? { ...record.img2img, ...values }
-            : { ...record.vision, ...values };
+            : section === "vision"
+              ? { ...record.vision, ...values }
+              : { ...record.thinking, ...values };
       const parsed = parsePoolPayload({
         version: POOL_STORE_VERSION,
         disabledIds: record.disabledIds,
@@ -284,6 +307,7 @@ export function createFilePoolStore(options: StoreOptions = {}) {
         text2img: record.text2img,
         img2img: record.img2img,
         vision: record.vision,
+        thinking: record.thinking,
         [section]: merged
       });
       if (parsed === null) return;

@@ -185,6 +185,12 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // + 配置面 accounts[]（各自 credential-ref，经宿主凭据服务解析；解析失败静默跳过，
   // 缺 key 不拖垮其他账号）。activeAccount 钉选暂由池序首位语义承担（钉选 = 面板只
   // 配一把 key 的特例），完整钉选优先级在面板账号 UI（第 5 步）落位时接线。
+  // 面板添加的池 key 的 credential-ref 名：dsh-credentials 只允许
+  // /^[A-Za-z_][A-Za-z0-9_]*$/（字母开头、仅字母数字下划线）——旧的
+  // `dsh-sensenova-suite/pool-key-<n>` 带 `/` 和 `-`，宿主启动解析凭据文件即抛
+  // TypeError、credentials 插件起不来、DSH 整台崩溃（2026-10-25 实测）。统一为
+  // `dsh_pool_key_<n>`（index.ts 是唯一写注册处，v0.1.0 起用新名）。
+  const poolRef = (id: string): string => `dsh_pool_${id.replace(/^key-/, "key_")}`;
   /** 解析一个 credential-ref 的值（服务可能是异步或同步形状；失败回落 undefined）。 */
   const resolveRefValue = async (credentials: any, ref: string): Promise<string | undefined> => {
     try {
@@ -205,7 +211,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     // 面板「多模态/接入 API」添加的 key（key-<n>）：秘钥在凭据服务 pool-<id> ref。
     const savedPool = await poolStore.read().catch(() => null);
     for (const entry of savedPool?.keys ?? []) {
-      const value = await resolveRefValue(credentials, `dsh-sensenova-suite/pool-${entry.id}`);
+      const value = await resolveRefValue(credentials, poolRef(entry.id));
       if (value !== undefined && !entries.some((item) => item.key === value)) {
         entries.push({ id: entry.id, key: value });
       }
@@ -224,7 +230,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // params 需要同步读，所以本地持一份记录：本路由的每次写后刷新 + 探测时钟兜底刷新
   // （外部进程直改状态文件的可见性延迟 ≤ 一个探测周期，可接受）。
   const poolStore = createFilePoolStore({ profile, logger: ctx.logger });
-  let poolRecord: import("./pool-store.ts").PoolStoreRecord = { version: 1, disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {}, keys: [], toolsEnabled: {}, text2img: {}, img2img: {}, vision: {} };
+  let poolRecord: import("./pool-store.ts").PoolStoreRecord = { version: 1, disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {}, keys: [], toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}, thinking: {} };
   const refreshPoolRecord = async () => {
     poolRecord = await poolStore.read().catch(() => poolRecord);
   };
@@ -260,7 +266,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // 产物带着 .ts 说明符在宿主里找不到模块（2026-10-24 注册失败事故）。
   const loadAdapterModule = deps.loadAdapterModule ?? (async () => {
     const module = await import("./llm-adapter.ts");
-    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, protocolOverrides: () => poolRecord.modelProtocols }) };
+    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, protocolOverrides: () => poolRecord.modelProtocols, thinkingOverrides: () => poolRecord.thinking }) };
   });
   const publisher = createProviderPublisher({
     settings,
@@ -345,6 +351,10 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     id: string; label: string | null; note: string | null;
     phase: "running" | "blocked" | "absent"; disabled: boolean; deleted: boolean;
   }>> => {
+    // 相位必须等池 seed 过才有意义：ensureSeeded 懒加载在第一次 pick/status 时
+    // 才发生，poolKeyRows 若抢在它前面，keyOf 恒 undefined → phaseOf='absent'
+    // （新 key 一直显示「未入池」的根因）。先 await 一次 statusById 触发 seed。
+    const phaseById = new Map((await orchestrator.statusById()).map((row) => [row.id, row.phase]));
     const savedPool = await poolStore.read().catch(() => null);
     const rows: Array<{
       id: string; label: string | null; note: string | null;
@@ -354,20 +364,28 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     if (typeof panelKeyValue === "string" && panelKeyValue !== "") {
       rows.push({
         id: "default", label: maskKey(panelKeyValue), note: null,
-        phase: orchestrator.phaseOf(orchestrator.keyOf("default")),
+        phase: phaseById.get("default") ?? "absent",
         disabled: poolRecord.disabledIds.includes("default"),
         deleted: poolRecord.deletedIds.includes("default")
       });
     }
+    // 已见过的 key 值：default 与新 key 值相同时不重复列（按 key 去重）。
+    const seenKeys = new Set<string>();
+    if (typeof panelKeyValue === "string" && panelKeyValue !== "") seenKeys.add(panelKeyValue);
     for (const entry of savedPool?.keys ?? []) {
-      const value = await resolveRefValue(credentialsService, `dsh-sensenova-suite/pool-${entry.id}`);
+      const value = await resolveRefValue(credentialsService, poolRef(entry.id));
       // name 现在是「备注」；存量旧默认名（Key1/Key2…）不算备注。
       const isLegacyDefault = /^Key\d+$/.test(entry.name);
+      if (typeof value === "string" && value !== "" && seenKeys.has(value)) {
+        // 同一把 key 值已被 default（或前面的 store 条目）列过 → 跳过，避免「显示两遍」。
+        continue;
+      }
+      if (typeof value === "string" && value !== "") seenKeys.add(value);
       rows.push({
         id: entry.id,
         label: typeof value === "string" && value !== "" ? maskKey(value) : entry.id,
         note: entry.name !== "" && !isLegacyDefault ? entry.name : null,
-        phase: orchestrator.phaseOf(orchestrator.keyOf(entry.id)),
+        phase: phaseById.get(entry.id) ?? "absent",
         disabled: poolRecord.disabledIds.includes(entry.id),
         deleted: poolRecord.deletedIds.includes(entry.id)
       });
@@ -400,14 +418,16 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       forgetPanelKey: async () => { await apiKeyStore.forget().catch(() => undefined); },
       addKeySecret: async (id: string, apiKey: string) => {
         const credentials = getService("credentials");
-        const refName = `dsh-sensenova-suite/pool-${id}`;
+        // 凭据 ref 名必须合规（^[A-Za-z_][A-Za-z0-9_]*$）；旧 `…/pool-key-<n>`
+        // 带 `/`/`-`，存进去会让宿主启动解析凭据文件即崩（2026-10-25）。
+        const refName = poolRef(id);
         if (credentials !== null && typeof credentials.set === "function") {
           await credentials.set(refName, apiKey);
         }
       },
       removeKeySecret: async (id: string) => {
         const credentials = getService("credentials");
-        const refName = `dsh-sensenova-suite/pool-${id}`;
+        const refName = poolRef(id);
         if (credentials !== null && typeof credentials.unset === "function") {
           await credentials.unset(refName);
         }
@@ -442,10 +462,13 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
           toolsEnabled: { ...poolRecord.toolsEnabled },
           text2img: { ...poolRecord.text2img },
           img2img: { ...poolRecord.img2img },
-          vision: { ...poolRecord.vision }
+          vision: { ...poolRecord.vision },
+          thinking: { ...poolRecord.thinking }
         }
       };
     },
+    // 每模型可用思考档位（面板行内勾选；snapshot roster 与发布链读取）。
+    thinkingOverrides: () => poolRecord.thinking,
     logger: ctx.logger,
     // The background provider refresher's handle (review #1b): a SLOT like
     // slots — null = nothing armed; `startSideEffects`

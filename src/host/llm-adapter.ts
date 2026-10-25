@@ -29,6 +29,8 @@ export interface PoolFacade {
   orchestrator: KeyOrchestrator;
   /** 每模型协议覆盖（面板"协议"列；闭包读取，保存即生效）。 */
   protocolOverrides: () => Record<string, string>;
+  /** 每模型可用思考档位（面板"思考档位"勾选；pool.json `thinking` 分区）。 */
+  thinkingOverrides: () => Record<string, string[]>;
 }
 
 /**
@@ -128,6 +130,8 @@ export function createAdapterFactory(pool: PoolFacade) {
       catalogFilter: () => ({ enabledIds: enabled, unavailableIds: unavailable }),
       // 每模型协议覆盖（面板"协议"列；每次请求读取）。
       protocolOverrides: () => pool.protocolOverrides(),
+      // 每模型可用思考档位（面板"思考档位"勾选；存 pool.json thinking 分区）。
+      thinkingOverrides: () => pool.thinkingOverrides(),
     });
     // accountCount 的初值只在构造期用一次（上面的 IIFE 每请求重读）。
     void accountCount;

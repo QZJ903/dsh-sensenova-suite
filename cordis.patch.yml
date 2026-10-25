@@ -57,7 +57,8 @@
         # 钉选账号 id（手动优先级）；空 = 纯轮转。
         activeAccount: ""
         # 全局在途上限（per-key 固定 1）；0 = 跟随 key 数，调小 = 温和模式。
-        globalConcurrency: 0
+        # 2026-10-25：默认改为 2。
+        globalConcurrency: 2
         # 模型 → 积分组映射：商汤组（sensenova-*）单独积分池走会话粘性，
         # 其余归 general 走裸轮转；组间不回退。键为精确模型 id。
         modelGroups:

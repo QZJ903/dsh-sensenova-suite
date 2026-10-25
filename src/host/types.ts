@@ -94,6 +94,12 @@ export interface AdapterConfig {
    * wire cannot disagree. Absent/empty = the catalogue is authoritative.
    */
   maxTokensOverrides?: Record<string, number>;
+  /**
+   * `{ "<model id>": ["off","low",...] }` — the user-selected per-model 思考
+   * 档位 (from pool.json `thinking`). `thinkingLevelMapFor` builds the
+   * descriptor's map from it, so the DSH 对话界面的可选思考档位 = 用户勾选集.
+   */
+  thinkingOverrides?: Record<string, string[]>;
 }
 
 /** Options for the JWKS cache / JWE sealer. */
@@ -159,6 +165,8 @@ export interface Wiring {
   resolveApiKey: () => Promise<string>;
   /** Key 池诊断快照（snapshot 路由只读块；测试可省略）。 */
   poolSnapshot?: () => unknown;
+  /** 每模型可用思考档位（pool.json `thinking` 分区；snapshot 路由/发布链读取）。 */
+  thinkingOverrides?: () => Record<string, string[]>;
   /** Key 池管理面（pool 路由；测试可省略）。 */
   poolAdmin?: import("./routes/pool.ts").PoolAdmin;
   /** 池状态刷新（models 路由保存协议后调用；测试可省略）。 */

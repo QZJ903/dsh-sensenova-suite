@@ -132,8 +132,9 @@ export const CONFIG_DEFAULTS = Object.freeze({
   /**
    * 全局在途上限：per-key 固定 1 由适配器闸负责；这里管总量。
    * 0 = 跟随 key 数（默认）；调小 = 温和模式（只激活部分 key）。
+   * 2026-10-25：默认改为 2（用户偏好——默认并发 2 个在途请求）。
    */
-  globalConcurrency: 0,
+  globalConcurrency: 2,
   /**
    * 模型 → 积分组映射（双池）：商汤组（sensenova-*）单独积分池，
    * 走会话粘性；其余归 general，走裸轮转。组间不回退（实态）。

@@ -149,6 +149,13 @@ export interface SensenovaAdapterDeps {
    * 兜底降级仍然生效）。缺省 undefined = 全部 auto。
    */
   protocolOverrides?: () => Record<string, string>;
+  /**
+   * 每模型可用思考档位（dsh-sensenova-suite 扩展点，可选）：从 pool.json
+   * `thinking` 分区读取（{ modelId → ["off","low",...] }）。目录解析出的
+   * reasoning.efforts 会被它覆盖（交并集规则见 parseCatalog 注释）——DSH
+   * 对话界面的思考档位可选集 = 用户勾选集。缺省 undefined = 目录词表。
+   */
+  thinkingOverrides?: () => Record<string, string[]>;
   fetchImpl?: typeof fetch;
   /**
    * 按请求解析 key（dsh-sensenova-suite 扩展点，可选）：与 resolveApiKey 不同，
@@ -335,7 +342,7 @@ function reasoningInfoFrom(raw: Record<string, unknown>, modelId: string): LlmMo
 }
 
 /** 解析 OpenAI 模型目录为目录条目；应用自动过滤与失败缓存。 */
-function parseCatalog(value: unknown, failedModels: ReadonlySet<string>): CatalogEntry[] {
+function parseCatalog(value: unknown, failedModels: ReadonlySet<string>, userThinking?: Record<string, string[]>) {
   if (!isRecord(value) || !Array.isArray(value.data)) {
     throw new LlmError('llm-sensenova: unexpected models response shape', 'PROVIDER_PROTOCOL_ERROR');
   }
@@ -353,7 +360,17 @@ function parseCatalog(value: unknown, failedModels: ReadonlySet<string>): Catalo
     if (failedModels.has(id)) continue;
     const contextWindow = firstContextField(raw);
     const maxOutputTokens = firstMaxOutputField(raw);
-    const reasoning = reasoningInfoFrom(raw, id);
+    let reasoning = reasoningInfoFrom(raw, id);
+    // 3) 用户思考档位覆盖（pool.json `thinking` 分区）：有配置时该模型
+    //    的 reasoning.efforts 改为「用户勾选集」（DSH 对话界面的可选思考档位）。
+    //    目录 defaultEffort 不在用户集时保留原默认（不影响可选集，只影响默认档）。
+    const userList = userThinking?.[id];
+    if (Array.isArray(userList) && userList.length > 0) {
+      const efforts = userList.map((effort) => ({ id: ReasoningEffortId(effort), name: effort }));
+      reasoning = reasoning === undefined
+        ? { efforts }
+        : { ...reasoning, efforts };
+    }
     const supportedSamplingParameters = samplingListField(raw);
     out.push({
       id,
@@ -994,7 +1011,7 @@ export class SensenovaAdapter extends LlmAdapter {
     // 失败缓存只对同一凭据和 API 地址成立；换 key 或切换端点后，旧 404 不应继续隐藏新目录。
     if (invalidateFailedModels) this.failedModels.clear();
     // 以新快照原子替换缓存，避免 listModels 新目录与 resolveModel 旧能力不一致。
-    const models = parseCatalog(parsed, this.failedModels);
+    const models = parseCatalog(parsed, this.failedModels, this.deps.thinkingOverrides?.());
     this.catalogCredential = apiKey;
     this.catalogApiBase = connection.apiBase;
     this.catalogFetchedAt = Date.now();

@@ -78,35 +78,23 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("advertised as a reasoning model", descriptor.reasoning === true);
     check("the thinking map pins picker levels to wire spellings",
       JSON.stringify(descriptor.thinkingLevelMap) === JSON.stringify({
-        off: "none", minimal: null, low: null, medium: null,
-        high: "high", xhigh: null, max: null
+        off: "none", minimal: null, low: "low", medium: "medium",
+        high: "high", xhigh: null, max: "max"
       }), JSON.stringify(descriptor.thinkingLevelMap));
     check("off is the platform's none, not the OpenAI off (which 400s)",
       thinkingLevelMapFor({ id: "any" }).off === "none");
     check("minimal is not offered (unverified on this gateway)",
       thinkingLevelMapFor({ id: "any" }).minimal === null);
-    check("an unprobed model offers no extended level (xhigh closed) and no low/medium",
+    check("xhigh is not offered (user decision: excluded from the picker)",
       thinkingLevelMapFor({ id: "any" }).xhigh === null &&
-      thinkingLevelMapFor({ id: "any" }).low === null &&
-      thinkingLevelMapFor({ id: "any" }).medium === null);
-    check("xhigh is offered only on deepseek-v4-flash (probed 200)",
-      thinkingLevelMapFor({ id: "deepseek-v4-flash" }).xhigh === "xhigh");
-    check("low/medium are offered where the 2026-09-30 probe recorded 200 (v4-flash / glm-5.2 / flash-lite / deepseek-flash-medium / kimi-k3-medium)",
-      thinkingLevelMapFor({ id: "deepseek-v4-flash" }).low === "low" &&
-      thinkingLevelMapFor({ id: "deepseek-v4-flash" }).medium === "medium" &&
-      thinkingLevelMapFor({ id: "glm-5.2" }).low === "low" &&
-      thinkingLevelMapFor({ id: "glm-5.2" }).medium === "medium" &&
-      thinkingLevelMapFor({ id: "sensenova-6.8-flash-lite" }).low === "low" &&
-      thinkingLevelMapFor({ id: "kimi-k3" }).medium === "medium" &&
-      thinkingLevelMapFor({ id: "deepseek-flash" }).medium === "medium" &&
-      // indefinite (429 rhythm answers, not 400) stay closed:
-      thinkingLevelMapFor({ id: "deepseek-v4-pro" }).low === null &&
-      thinkingLevelMapFor({ id: "deepseek-v4-pro" }).medium === null &&
-      thinkingLevelMapFor({ id: "deepseek-flash" }).low === null &&
-      thinkingLevelMapFor({ id: "kimi-k3" }).low === null);
-    check("max is rejected off by default (400 on flash-lite / v4-flash)",
-      thinkingLevelMapFor({ id: "sensenova-6.8-flash-lite" }).max === null);
-    check("glm-5.2 alone offers max (probed 200)",
+        thinkingLevelMapFor({ id: "deepseek-v4-flash" }).xhigh === null);
+    check("all 思考档位 are user-selectable (probe table retired 2026-10-24)",
+      thinkingLevelMapFor({ id: "any" }).low === "low" &&
+      thinkingLevelMapFor({ id: "any" }).medium === "medium" &&
+      thinkingLevelMapFor({ id: "any" }).high === "high" &&
+      thinkingLevelMapFor({ id: "any" }).max === "max");
+    check("max is offered (platform accepts it since the 12-level 2026-10-24 probe)",
+      thinkingLevelMapFor({ id: "sensenova-6.8-flash-lite" }).max === "max" &&
       thinkingLevelMapFor({ id: "glm-5.2" }).max === "max");
     check("cost is zeroed on all four fields", JSON.stringify(descriptor.cost) === JSON.stringify(NO_COST) &&
       descriptor.cost.input === 0 && descriptor.cost.output === 0 &&
@@ -232,10 +220,8 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       built.length === 2 && JSON.stringify(built.map((d) => d.id)) === JSON.stringify(["v-chat", "t-chat"]));
 
     const roster = rosterOf([gen, visionChat, textChat]);
-    check("rosterOf keeps image-generation models flagged, not dropped (panel pickers need them)",
-      JSON.stringify(roster.map((r) => r.id)) === JSON.stringify(["u-gen", "v-chat", "t-chat"]) &&
-        roster.find((r) => r.id === "u-gen")?.imageGen === true &&
-        roster.every((r) => r.imageGen === false || r.id === "u-gen"),
+    check("rosterOf drops image-generation models (chat offer only)",
+      JSON.stringify(roster.map((r) => r.id)) === JSON.stringify(["v-chat", "t-chat"]),
       JSON.stringify(roster));
 
     const summary = summarizeCatalog([gen, visionChat, textChat]);

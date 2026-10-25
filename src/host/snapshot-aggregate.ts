@@ -27,7 +27,7 @@ import { CODE, isAuthFailure } from "./codes.ts";
 import { fetchConsole, fetchModelCatalog } from "./console-client.ts";
 import { MAX_CACHE_AGE_MS } from "./coalesced-fetch.ts";
 import { parsePools, parseTrend, checkShape } from "./parsers.ts";
-import { summarizeCatalog, filterByEnabled, rosterWithAvailability, exhaustedModelIds, drainedPoolsWithoutModels, LLM_PROVIDER_ID, DEFAULT_REASONING_EFFORT } from "./llm-models.ts";
+import { summarizeCatalog, filterByEnabled, rosterWithAvailability, exhaustedModelIds, drainedPoolsWithoutModels, LLM_PROVIDER_ID, DEFAULT_REASONING_EFFORT, identifyVisionModel, isImageGenModel } from "./llm-models.ts";
 import { catalogSignature, syncSignaturesAfterPublish, quotaSignatureOf } from "./provider-publish.ts";
 import type { PublishResult } from "./provider-publish.ts";
 import { str, errMsg } from "./util.ts";
@@ -151,6 +151,7 @@ export async function buildSnapshotBody({
   catalogStore,
   panelSwitch,
   poolSnapshot,
+  thinkingOverrides,
   onShapeDrift
 }: {
   settings: import("./host-config.ts").ResolvedSettings;
@@ -173,6 +174,8 @@ export async function buildSnapshotBody({
   panelSwitch: () => Promise<boolean | null>;
   /** Key 池诊断快照（可选；测试可省略）。key 打码为尾 4 位。 */
   poolSnapshot?: () => unknown;
+  /** 每模型可用思考档位（pool.json `thinking` 分区；面板行内勾选）。可选。 */
+  thinkingOverrides?: Record<string, string[]> | null;
   /**
    * Called when the quota payload is READABLE but a drained pool names no
    * usable models — the one drift that silently disables quota protection
@@ -453,10 +456,30 @@ export async function buildSnapshotBody({
     // the operator's pseudo `×N` under the SAME matcher the trend rows use —
     // the badge and the consumption chart quote one computed fact, and an
     // unmatched model simply gets no badge (never a guessed 1).
-    models: rosterWithAvailability(offered, pools, settings.maxTokensOverrides).map((row) => {
+    models: rosterWithAvailability(offered, pools, settings.maxTokensOverrides, thinkingOverrides).map((row) => {
       const multiplier = matchMultiplier(row.id, settings.trendMultipliers);
       return multiplier === undefined ? row : { ...row, multiplier };
     }),
+    // 全目录行（含出图模型）：供多模态 tab 的出图/识图下拉自选。与 `models`
+    // （对话清单，rosterWithAvailability 已划走图模）分开——图模不是对话
+    // 模型，不该出现在推送清单里，但需要出现在工具的下拉里。
+    allModels: (() => {
+      const rows = [];
+      const seen = new Map();
+      for (const entry of Array.isArray(offered) ? offered : []) {
+        const id = str((entry as { id?: unknown })?.id, "");
+        if (id === "") continue;
+        const row = {
+          id,
+          name: str((entry as { name?: unknown })?.name, id),
+          vision: identifyVisionModel(entry).vision === true,
+          imageGen: isImageGenModel(entry) === true,
+        };
+        if (seen.has(id)) rows[seen.get(id)] = row;
+        else { seen.set(id, rows.length); rows.push(row); }
+      }
+      return rows;
+    })(),
     enabledModelIds: enabledIds,
     // The LAST KNOWN exhausted set, not this poll's reading: when the console
     // could not be reached the panel must keep greying the models it greyed

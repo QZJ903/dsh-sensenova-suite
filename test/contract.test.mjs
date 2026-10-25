@@ -95,39 +95,19 @@ for (const model of contract.models) {
     const map = thinkingLevelMapFor(entry);
     check(`${model.id} thinkingLevelMap.off === "none" (platform off spelling)`,
       map.off === "none", JSON.stringify(map));
-    // reasoning_effort dialect: the frozen surface decides which wire
-    // spellings are platform-valid on THIS model.
-    if (model.reasoningEffort?.max === true) {
-      check(`${model.id} thinkingLevelMap.max === "max" (platform accepts it)`,
-        map.max === "max", JSON.stringify(map.max));
-    } else {
-      check(`${model.id} thinkingLevelMap.max === null (platform rejects / unverified)`,
-        map.max === null, JSON.stringify(map.max));
-    }
-    // xhigh is gated the same way: offered only where the baseline recorded a
-    // 200 probe, closed everywhere else (including models the baseline never
-    // probed — absence means "proven on nothing").
-    if (model.reasoningEffort?.xhigh === true) {
-      check(`${model.id} thinkingLevelMap.xhigh === "xhigh" (platform accepts it)`,
-        map.xhigh === "xhigh", JSON.stringify(map.xhigh));
-    } else {
-      check(`${model.id} thinkingLevelMap.xhigh === null (rejected / unverified)`,
-        map.xhigh === null, JSON.stringify(map.xhigh));
-    }
-    // low/medium: the 2026-09-30 probe round recorded them per-model. `true`
-    // (a 200) opens the level; `false` or `"indefinite"` (a 429 rhythm
-    // answer, not a 400 — "not measured" not "unsupported") keeps it
-    // closed until a clean re-run flips the baseline cell.
-    for (const level of ["low", "medium"]) {
-      if (model.reasoningEffort?.[level] === true) {
-        check(`${model.id} thinkingLevelMap.${level} === "${level}" (probed 200)`,
-          map[level] === level, JSON.stringify(map[level]));
-      } else {
-        check(`${model.id} thinkingLevelMap.${level} === null (unprobed / indefinite)`,
-          map[level] === null, JSON.stringify({ cell: model.reasoningEffort?.[level], got: map[level] }));
-      }
-    }
-    check(`${model.id} thinkingLevelMap.minimal === null (unverified on this gateway)`,
+    // reasoning_effort dialect: since the probe table was retired
+    // (2026-10-24, 12 levels all 200), every chat model carries the full
+    // ladder — off + low + medium + high + max. `xhigh` is excluded (user
+    // decision) and `minimal` is not offered (platform 400s).
+    check(`${model.id} thinkingLevelMap.max === "max" (platform accepts it since 2026-10-24)`,
+      map.max === "max", JSON.stringify(map.max));
+    check(`${model.id} thinkingLevelMap.xhigh === null (user decision: excluded)`,
+      map.xhigh === null, JSON.stringify(map.xhigh));
+    check(`${model.id} thinkingLevelMap.low === "low" (open for self-selection)`,
+      map.low === "low", JSON.stringify(map.low));
+    check(`${model.id} thinkingLevelMap.medium === "medium" (open for self-selection)`,
+      map.medium === "medium", JSON.stringify(map.medium));
+    check(`${model.id} thinkingLevelMap.minimal === null (platform rejects)`,
       map.minimal === null, JSON.stringify(map.minimal));
     // vision: the descriptor's input array mirrors the contract's
     // visionInput flag (structured `input_modalities` wins).

@@ -292,73 +292,38 @@ export function maxTokensFor(entry: CatalogEntry, overrides?: Record<string, num
  * @returns {boolean} whether the entry is usable as a chat model.
  */
 export { isChatModel };
+export { identifyVisionModel } from "./parsers.ts";
+export { isImageGenModel } from "./modality.ts";
 
 /**
- * The picker's 思考强度 levels, pinned to platform-valid wire spellings.
+ * The picker's 思考强度 levels, driven by the USER-configured per-model set.
  *
- * DSH's picker offers levels from `getSupportedThinkingLevels(model)`
- * (`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`), and pi-ai's
- * openai-completions dispatch sends `reasoning_effort = map[level] ?? level`.
- * SenseNova's OpenAI-compat gateway accepts `none`/`low`/`medium`/`high` on
- * every chat model, rejects `off` (the OpenAI spelling) and `minimal`, and
- * rejects `max` everywhere except glm-5.2; `xhigh` is NOT universal — only
- * deepseek-v4-flash took it in the probe (all probed 2026-09-29; the platform's
- * own error lists `low, medium, high, xhigh, none`). So:
- *
- * - `off: "none"` — the picker's "关闭" must send `none`, not `off`;
- * - `low`/`medium`/`xhigh` — per-model, gated on the PROBED_EFFORT table below.
- *   The 2026-09-29 probe round exercised `none`/`high`/`max`/`xhigh` AND
- *   `low`/`medium`; every `true` cell is a recorded 200, and a `false` cell
- *   means either a 400 or an inconclusive 429 — the roster line must not quote
- *   a level the platform may reject, and the live-contract replay
- *   (`test/live-contract.mjs`) flips a cell once a 200 is recorded.
- * - `max` — `"max"` on glm-5.2 only, `null` elsewhere.
+ * 2026-10-25 起：每个模型「支持哪些思考档位」由用户在模型清单行内勾选
+ * （存 pool.json 的 thinking 分区）。有用户配置时按它生成 map（不在列表的档位
+ * = null，DSH 对话界面不提供）；未配置时回落全量（off/low/medium/high/max，
+ * xhigh 按用户要求排除、minimal 平台不认）。
  *
  * A value of `null` means "the picker must not offer this level"; a string is
  * the wire spelling the level dispatches to.
  * @param {object} entry - one normalized catalog entry.
+ * @param {string[]} [userLevels] - the user-selected level ids for this model.
  * @returns {object} the thinkingLevelMap.
  */
-/**
- * Per-model 思考档位 probe table, mirrored from `test/baselines/sensenova-contract.json`
- * §reasoningEffort (frozen 2026-09-29).
- *
- * Each cell is a boolean: `true` = a 200 was recorded for this model/level,
- * `false` = closed. A cell left closed because the probe ran into a 429 rpm
- * window (not a 400) is "not measured", which is NOT "unsupported" — the
- * live-contract replay re-runs it; a model absent from the table keeps only
- * `off`/`high` open, and a new model is added WITH its 200-probe evidence,
- * never assumed.
- */
-const PROBED_EFFORT: Readonly<Record<string, { low: boolean; medium: boolean; high: boolean; xhigh: boolean; max: boolean }>> = Object.freeze({
-  "deepseek-v4-flash": { low: true, medium: true, high: true, xhigh: true, max: false },
-  "glm-5.2":           { low: true, medium: true, high: true, xhigh: false, max: true },
-  "sensenova-6.8-flash-lite": { low: true, medium: true, high: true, xhigh: false, max: false },
-  "deepseek-v4-pro":   { low: false, medium: false, high: true, xhigh: false, max: false },
-  // deepseek-flash: medium probed 200; low was inconclusive (429, re-run
-  // pending) so it stays closed — "not measured" is not "supported".
-  "deepseek-flash":    { low: false, medium: true, high: true, xhigh: false, max: false },
-  // kimi-k3: medium probed 200; low was inconclusive (429, re-run pending).
-  "kimi-k3":           { low: false, medium: true, high: true, xhigh: false, max: false }
-});
-
-export function thinkingLevelMapFor(entry: CatalogEntry): Record<string, string | null> {
-  const id = str(entry?.id, "");
-  const probed = PROBED_EFFORT[id];
+export function thinkingLevelMapFor(entry: CatalogEntry, userLevels?: string[]): Record<string, string | null> {
+  void entry; // 签名保留：调用点传 entry（未来可能按模型族补充）；档位以用户配置/全量为主。
+  const levels = Array.isArray(userLevels) && userLevels.length > 0
+    ? new Set(userLevels)
+    : null;
+  const has = (level: string): boolean => levels === null || levels.has(level);
   return {
-    off: "none",
+    off: has("off") ? "none" : null,
     minimal: null,
-    // low/medium: per-model, gated on the probe table. A model NOT in the
-    // table keeps the safe default (both closed) — the panel does not quote
-    // a level the platform may reject, and the live-contract replay will
-    // flip these cells once it probes them.
-    low: probed?.low === true ? "low" : null,
-    medium: probed?.medium === true ? "medium" : null,
-    // high: the platform default on every chat model; always offered.
-    high: "high",
-    // Extended levels: only a 200 probe for THIS model opens the level.
-    xhigh: probed?.xhigh === true ? "xhigh" : null,
-    max: probed?.max === true ? "max" : null
+    low: has("low") ? "low" : null,
+    medium: has("medium") ? "medium" : null,
+    high: has("high") ? "high" : null,
+    // xhigh 默认不提供（用户要求排除）；用户显式勾选才开。
+    xhigh: levels !== null && levels.has("xhigh") ? "xhigh" : null,
+    max: has("max") ? "max" : null
   };
 }
 
@@ -368,18 +333,16 @@ const THINKING_LADDER = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 /**
  * The thinking levels DSH's selector will actually offer for one model.
  *
- * This mirrors pi-ai's `getSupportedThinkingLevels`
- * against OUR map: walk the ladder, drop levels the map pins to `null`, and
- * treat `xhigh`/`max` as opt-in (they must be present and non-null). DSH
- * builds the model-settings effort list through exactly that function, so a
- * roster row quoting this list cannot disagree with what the picker lets the
- * user select — one contract, both ends. If pi-ai's rule ever changes, this
- * filter changes with it (pinned by test/render + routes).
+ * With PROBED_EFFORT retired this is now the full ladder MINUS the levels the
+ * platform does not accept (`minimal`). Every chat model offers
+ * off/none + low/medium/high/xhigh/max — 用户可自选。DSH builds the
+ * model-settings effort list through exactly this function, so a roster row
+ * quoting it cannot disagree with what the picker lets the user select.
  * @param {object} entry - one normalized catalog entry.
  * @returns {string[]} level ids in escalation order, e.g. ["off","low",...].
  */
-export function supportedThinkingLevels(entry: CatalogEntry): string[] {
-  const map = thinkingLevelMapFor(entry);
+export function supportedThinkingLevels(entry: CatalogEntry, userLevels?: string[]): string[] {
+  const map = thinkingLevelMapFor(entry, userLevels);
   return THINKING_LADDER.filter((level) => {
     const mapped = map[level];
     if (mapped === null) return false;
@@ -402,7 +365,7 @@ export function supportedThinkingLevels(entry: CatalogEntry): string[] {
  * @returns {object} the pi-ai descriptor.
  */
 export function toPiDescriptor(entry: CatalogEntry, options: AdapterConfig = {}) {
-  const { providerId = LLM_PROVIDER_ID, baseUrl } = options;
+  const { providerId = LLM_PROVIDER_ID, baseUrl, thinkingOverrides } = options;
   const id = str(entry?.id, "");
   if (id === "") throw new Error("toPiDescriptor: catalog entry has no id");
   const vision = identifyVisionModel(entry).vision === true;
@@ -424,7 +387,7 @@ export function toPiDescriptor(entry: CatalogEntry, options: AdapterConfig = {})
     // `supported_features: ["reasoning"]`; see the module header (decision 3)
     // for why the flag is true and what the map pins.
     reasoning: true,
-    thinkingLevelMap: thinkingLevelMapFor(entry),
+    thinkingLevelMap: thinkingLevelMapFor(entry, thinkingOverrides?.[id]),
     cost: { ...NO_COST },
     contextWindow: contextWindowOf(entry),
     // `supportsDeveloperRole: false` is load-bearing — see the module header.
@@ -511,13 +474,10 @@ export function rosterOf(entries: unknown): { id: string; name: string; vision: 
   const position = new Map();
   const out: { id: string; name: string; vision: boolean; imageGen: boolean }[] = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
-    // Image-generation models (output_modalities: ["image"]) are NOT chat
-    // models and must not be registered as chat descriptors (buildDescriptors
-    // excludes them); but the panel needs them for the image tools' model
-    // picker, so they stay in the roster WITH the imageGen flag rather than
-    // being dropped. The chat offer and the panel lists now disagree on
-    // PURPOSE, not content: both come from the same catalog entries, the
-    // roster carrying every modality the fill pickers use.
+    // 治本：出图模型（imageGen）从对话清单划走——它们不属于对话模型，
+    // 只服务于出图/识图工具。需要完整目录（含图模）的调用方走
+    // `rosterWithAvailability` 之外的路（多模态下拉不再依赖本函数）。
+    if (isImageGenModel(entry) === true) continue;
     const id = str(entry?.id, "");
     if (id === "") continue;
     const row = {
@@ -547,7 +507,7 @@ export function rosterOf(entries: unknown): { id: string; name: string; vision: 
  * @returns {object[]} the pi-ai descriptors, in first-seen order.
  */
 export function buildDescriptors(entries: any[], options: AdapterConfig = {}) {
-  const { providerId = LLM_PROVIDER_ID, baseUrl, enabledIds = [], unavailableModelIds = [], maxTokensOverrides } = options;
+  const { providerId = LLM_PROVIDER_ID, baseUrl, enabledIds = [], unavailableModelIds = [], maxTokensOverrides, thinkingOverrides } = options;
   // Image-generation models (`output_modalities: ["image"]`) cannot be
   // addressed as chat models and are excluded BEFORE the allow-list, so a
   // stale id in `enabledIds` matches nothing rather than resurrecting one.
@@ -572,7 +532,7 @@ export function buildDescriptors(entries: any[], options: AdapterConfig = {}) {
       seen.set(id, out.length);
       out.push(undefined);
     }
-    out[seen.get(id)] = toPiDescriptor({ ...catalogEntry, id }, { providerId, ...(maxTokensOverrides !== undefined ? { maxTokensOverrides } : {}), ...(baseUrl !== undefined ? { baseUrl } : {}) });
+    out[seen.get(id)] = toPiDescriptor({ ...catalogEntry, id }, { providerId, ...(maxTokensOverrides !== undefined ? { maxTokensOverrides } : {}), ...(baseUrl !== undefined ? { baseUrl } : {}) , ...(thinkingOverrides !== undefined ? { thinkingOverrides } : {}) });
   }
   // Every `undefined` pushed above is overwritten at that same index before the
   // loop advances (see the comment on `out`), so no hole survives to here. The
@@ -600,15 +560,15 @@ export function buildDescriptors(entries: any[], options: AdapterConfig = {}) {
  *   the catalogue figure, which is what a deployment with no overrides wants.
  * @returns {{id: string, name: string, vision: boolean, imageGen: boolean, available: boolean, quotaExhausted: boolean, contextWindow: number, maxOutputLength: number, thinkingLevels: string[]}[]}
  */
-export function rosterWithAvailability(entries: unknown, pools: { pools?: unknown }, maxTokensOverrides?: Record<string, number> | null) {
+export function rosterWithAvailability(entries: unknown, pools: { pools?: unknown }, maxTokensOverrides?: Record<string, number> | null, thinkingOverrides?: Record<string, string[]> | null) {
   const blocked = new Set(exhaustedModelIds(pools));
   const position = new Map();
   const out: { id: string; name: string; vision: boolean; imageGen: boolean; available: boolean; quotaExhausted: boolean; contextWindow: number; maxOutputLength: number; thinkingLevels: string[] }[] = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
-    // Image-generation models stay in the ROSTER (the panel's image-tool model
-    // picker reads it), but are flagged, never dropped — see rosterOf. They are
-    // still excluded from buildDescriptors (chat offer), so a row here never
-    // becomes a registered chat model.
+    // 治本：出图模型（imageGen）从面板清单整行划走——它不属于对话模型，
+    // 不该出现在「接入 API 的推送清单」里（此清单是供对话模型勾选的）。
+    // 图模只留给多模态 tab 的出图/识图下拉用（那里另有 imageGen 数据源）。
+    if (isImageGenModel(entry) === true) continue;
     const id = str(entry?.id, "");
     if (id === "") continue;
     const row = {
@@ -632,8 +592,8 @@ export function rosterWithAvailability(entries: unknown, pools: { pools?: unknow
       // What the DSH selector will really offer this model (same rule pi-ai
       // applies to the registered descriptor) — the per-model fact worth
       // repeating on a row, unlike the provider-wide default, which the panel
-      // states once in its header.
-      thinkingLevels: supportedThinkingLevels(entry)
+      // states once in its header. 用户勾选的档位（thinking 分区）优先。
+      thinkingLevels: supportedThinkingLevels(entry, thinkingOverrides?.[id])
     };
     if (position.has(id)) {
       out[position.get(id)] = row;

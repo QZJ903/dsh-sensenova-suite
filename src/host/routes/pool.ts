@@ -26,7 +26,7 @@ export interface PoolAdmin {
     setGlobalConcurrency(value: number | null): Promise<void>;
     setKeys(keys: Array<{ id: string; name: string }>): Promise<void>;
     setSection(
-      section: "toolsEnabled" | "text2img" | "img2img" | "vision",
+      section: "toolsEnabled" | "text2img" | "img2img" | "vision" | "thinking",
       values: Record<string, unknown>
     ): Promise<void>;
   };
@@ -110,10 +110,10 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings"> & {
         if (body === null) return;
         // 多模态分区保存：{ section, values }（部分键合并）。
         if (typeof body.value.section === "string"
-          && ["toolsEnabled", "text2img", "img2img", "vision"].includes(body.value.section)
+          && ["toolsEnabled", "text2img", "img2img", "vision", "thinking"].includes(body.value.section)
           && typeof body.value.values === "object" && body.value.values !== null) {
           await poolAdmin.store.setSection(
-            body.value.section as "toolsEnabled" | "text2img" | "img2img" | "vision",
+            body.value.section as "toolsEnabled" | "text2img" | "img2img" | "vision" | "thinking",
             body.value.values as Record<string, unknown>
           );
           await poolAdmin.refresh();
@@ -140,7 +140,10 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings"> & {
           // name 字段现在是「备注」（面板填的）；缺省/空白 = 无备注。
           const note = typeof body.value.name === "string" ? body.value.name.trim() : "";
           await poolAdmin.addKeySecret(id, body.value.apiKey.trim());
+          // 新 key 默认启用：restore 把复用的 id 从停用/删除名单一并摘掉
+          // （编号复用会让曾删除的 key-<n> 新增后默认显示「已删除」——2026-10-25）。
           await poolAdmin.store.setKeys([...record.keys, { id, name: note }]);
+          await poolAdmin.store.restore(id);
           await poolAdmin.refresh();
           writeJson(response, 200, { ok: true, id, name: note }, { "cache-control": "no-store" });
           return;

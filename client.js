@@ -146,6 +146,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterError": "保存失败：{error}",
 			"llm.rosterNoMatch": "没有匹配的模型。",
 			"llm.rosterVision": "可看图",
+			"llm.rosterThinking": "思考档位",
 			"llm.rosterExhausted": "额度耗尽",
 			"llm.rosterRateTitle": "积分消耗伪倍率（自定义对比用，非官方）",
 			"llm.metaOutput": "最大输出 {out}",
@@ -315,6 +316,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterError": "Save failed: {error}",
 			"llm.rosterNoMatch": "No model matches.",
 			"llm.rosterVision": "vision",
+			"llm.rosterThinking": "thinking",
 			"llm.rosterExhausted": "quota exhausted",
 			"llm.rosterRateTitle": "Pseudo credit multiplier (custom comparison aid, not official)",
 			"llm.metaOutput": "max output {out}",
@@ -1828,8 +1830,17 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* only") earns no badge, and a figure the catalogue does not declare draws no
 	* segment - the list quotes facts, never guesses.
 	*/
-	function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange }) {
+	function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle }) {
 		const list = Array.isArray(models) ? models : [];
+		const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
+		const THINKING_CHOICES = [
+			"off",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max"
+		];
 		return h("ul", {
 			style: S.modelList,
 			role: "list"
@@ -1843,6 +1854,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				Array.isArray(model?.thinkingLevels) && model.thinkingLevels.length > 0 ? format(tt("llm.metaLevels"), { levels: model.thinkingLevels.map((level) => tt(dictKey("llm.level", level))).join("/") }) : null
 			].filter(Boolean).join(" · ");
 			const rate = typeof model?.multiplier === "number" ? model.multiplier : null;
+			const visionOn = visionSet !== null && visionSet.has(id);
 			return h(ModelRow, {
 				key: id,
 				id,
@@ -1852,10 +1864,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				rateText: rate === null ? null : `×${rate}`,
 				rateTitle: tt("llm.rosterRateTitle"),
 				badges: [
-					model?.vision === true ? h("span", {
-						key: "vision",
-						style: S.modelBadge
-					}, tt("llm.rosterVision")) : null,
 					model?.quotaExhausted === true ? h("span", {
 						key: "exhausted",
 						style: {
@@ -1863,6 +1871,61 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 							color: "var(--dsw-alias-state-error-primary)"
 						}
 					}, tt("llm.rosterExhausted")) : null,
+					visionSet !== null ? h("label", {
+						key: "vision",
+						style: {
+							display: "inline-flex",
+							gap: 4,
+							alignItems: "center",
+							cursor: busy ? "default" : "pointer",
+							marginLeft: 8,
+							fontSize: 11,
+							color: "var(--dsw-alias-label-secondary)"
+						}
+					}, h("input", {
+						type: "checkbox",
+						checked: visionOn,
+						disabled: busy === true,
+						style: S.modelCheck,
+						"aria-label": `${label} 识图`,
+						onChange: onVisionToggle ? () => onVisionToggle(id, !visionOn) : void 0
+					}), tt("llm.rosterVision")) : null,
+					onThinkingToggle !== void 0 ? h("span", {
+						key: "thinking",
+						style: {
+							display: "inline-flex",
+							gap: 2,
+							alignItems: "center",
+							marginLeft: 8,
+							fontSize: 11,
+							color: "var(--dsw-alias-label-secondary)"
+						},
+						title: tt("llm.rosterThinking")
+					}, tt("llm.rosterThinking"), ...THINKING_CHOICES.map((level) => {
+						const picking = Array.isArray(thinkingById?.[id]) && thinkingById[id].includes(level);
+						return h("label", {
+							key: level,
+							style: {
+								display: "inline-flex",
+								gap: 1,
+								alignItems: "center",
+								cursor: busy ? "default" : "pointer",
+								marginLeft: 2,
+								fontSize: 11
+							}
+						}, h("input", {
+							type: "checkbox",
+							checked: picking,
+							disabled: busy === true,
+							style: {
+								...S.modelCheck,
+								width: 11,
+								height: 11
+							},
+							"aria-label": `${label} 思考档位 ${level}`,
+							onChange: () => onThinkingToggle(id, level, !picking)
+						}), tt(dictKey("llm.level", level)));
+					})) : null,
 					onProtocolChange !== void 0 ? h("select", {
 						key: "protocol",
 						style: {
@@ -1896,11 +1959,19 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* never reached the Host keeps showing the edits, and an edit that ends
 	* up identical to the Host's value shows neither button.
 	*/
-	function ModelPicker({ llm, onDone, tt }) {
+	function ModelPicker({ llm, pool, onDone, tt }) {
 		const hostProtocols = llm?.modelProtocols ?? {};
 		const models = Array.isArray(llm?.models) ? llm.models : NO_MODELS;
 		const hostIds = Array.isArray(llm?.enabledModelIds) ? llm.enabledModelIds : NO_IDS;
+		const visionHost = Array.isArray(pool?.settings?.vision?.visionModels) ? pool.settings.vision.visionModels : [];
 		const [ids, setIds] = useState(() => hostIds.slice());
+		const [visionIds, setVisionIds] = useState(() => visionHost.slice());
+		const thinkingHost = typeof pool?.settings?.thinking === "object" && pool.settings.thinking !== null ? pool.settings.thinking : {};
+		const [thinkingById, setThinkingById] = useState(() => {
+			const out = {};
+			for (const [k, v] of Object.entries(thinkingHost)) if (Array.isArray(v)) out[k] = v;
+			return out;
+		});
 		const [busy, setBusy] = useState(false);
 		const [query, setQuery] = useState("");
 		const [savedKey, setSavedKey] = useState(null);
@@ -2004,6 +2075,33 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				touchedRef.current = true;
 				setIds(toggleModelIn(ids, models.map((model) => String(model?.id ?? "")), id));
 				setNotice(null);
+			},
+			visionIds,
+			onVisionToggle: (id, on) => {
+				setVisionIds((current) => {
+					const next = on ? [...current, id] : current.filter((vid) => vid !== id);
+					postJsonOrThrow(POOL_PATH, {
+						section: "vision",
+						values: { visionModels: next }
+					}).then(() => onDone?.()).catch(() => void 0);
+					return next;
+				});
+			},
+			thinkingById,
+			onThinkingToggle: (id, level, onValue) => {
+				setThinkingById((current) => {
+					const list = Array.isArray(current[id]) ? current[id] : [];
+					const next = onValue ? list.includes(level) ? list : [...list, level] : list.filter((l) => l !== level);
+					const values = {
+						...current,
+						[id]: next
+					};
+					postJsonOrThrow(POOL_PATH, {
+						section: "thinking",
+						values: { [id]: next }
+					}).then(() => onDone?.()).catch(() => void 0);
+					return values;
+				});
 			}
 		})), dirty ? h("div", { style: S.rosterFoot }, h("button", {
 			type: "button",
@@ -2197,13 +2295,14 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* panel grew one SectionCard per concern: key, provider+push are
 	* three different functions and no longer share a card.
 	*/
-	function ProviderForm({ llm, onDone, tt }) {
+	function ProviderForm({ llm, pool, onDone, tt }) {
 		return h("div", null, h(ProviderSwitch, {
 			llm,
 			onDone,
 			tt
 		}), h(ModelPicker, {
 			llm,
+			pool,
 			onDone,
 			tt
 		}), h(ProviderRegStatus, {
@@ -2220,7 +2319,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	function PoolManager({ pool, onDone, tt }) {
 		const [busyId, setBusyId] = useState(null);
 		const [error, setError] = useState(null);
-		const savedConcurrency = pool?.globalConcurrency ?? 0;
+		const savedConcurrency = pool?.globalConcurrency ?? 2;
 		const [concurrency, setConcurrency] = useState(null);
 		const concurrencyValue = concurrency ?? savedConcurrency;
 		const concurrencyDirty = concurrency !== null && concurrency !== savedConcurrency;
@@ -2342,10 +2441,12 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			style: S.rosterBulk,
 			disabled: busyId !== null,
 			onClick: () => void setNote(entry.id, noteDraft)
-		}, tt("poolMng.saveName")) : h("button", {
-			type: "button",
-			style: S.rosterBulk,
-			disabled: busyId !== null,
+		}, tt("poolMng.saveName")) : h("span", {
+			style: {
+				...S.muted,
+				fontSize: 12,
+				cursor: "pointer"
+			},
 			onClick: () => {
 				setEditingId(entry.id);
 				setNoteDraft(entry.note ?? "");
@@ -2394,10 +2495,17 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			},
 			value: noteDraft,
 			autoFocus: true,
+			placeholder: tt("poolMng.note"),
 			disabled: busyId !== null,
 			onChange: (event) => setNoteDraft(event.target.value),
+			onBlur: () => {
+				if (editingId === entry.id) setNote(entry.id, noteDraft);
+			},
 			onKeyDown: (event) => {
-				if (event.key === "Enter") setNote(entry.id, noteDraft);
+				if (event.key === "Enter") {
+					event.preventDefault?.();
+					setNote(entry.id, noteDraft);
+				}
 			}
 		}) : null))), error !== null ? h("p", {
 			style: S.formError,
@@ -2879,9 +2987,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		} }, label), children);
 	}
 	function MultimodalTab({ llm, pool, onDone, tt }) {
-		const models = Array.isArray(llm?.models) ? llm.models : [];
+		const models = Array.isArray(llm?.allModels) ? llm.allModels : Array.isArray(llm?.models) ? llm.models : [];
 		const imageModels = models.filter((model) => model?.imageGen === true);
-		const visionModels = models.filter((model) => model?.vision === true);
+		const visionSelected = Array.isArray(pool?.settings?.vision?.visionModels) ? pool.settings.vision.visionModels : [];
+		const visionModels = models.filter((model) => visionSelected.includes(String(model?.id ?? "")));
 		const settings = pool?.settings ?? {
 			toolsEnabled: {},
 			text2img: {},
@@ -3166,6 +3275,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			tt
 		}, h(ProviderForm, {
 			llm: data?.llm ?? null,
+			pool: data?.pool ?? null,
 			onDone: () => void load(),
 			tt
 		})), h(SectionCard, {
