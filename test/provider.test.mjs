@@ -232,8 +232,11 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       built.length === 2 && JSON.stringify(built.map((d) => d.id)) === JSON.stringify(["v-chat", "t-chat"]));
 
     const roster = rosterOf([gen, visionChat, textChat]);
-    check("rosterOf skips image-generation models",
-      JSON.stringify(roster.map((r) => r.id)) === JSON.stringify(["v-chat", "t-chat"]));
+    check("rosterOf keeps image-generation models flagged, not dropped (panel pickers need them)",
+      JSON.stringify(roster.map((r) => r.id)) === JSON.stringify(["u-gen", "v-chat", "t-chat"]) &&
+        roster.find((r) => r.id === "u-gen")?.imageGen === true &&
+        roster.every((r) => r.imageGen === false || r.id === "u-gen"),
+      JSON.stringify(roster));
 
     const summary = summarizeCatalog([gen, visionChat, textChat]);
     check("summarizeCatalog counts only chat models", summary.modelCount === 2, String(summary.modelCount));

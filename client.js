@@ -13,13 +13,12 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 
 //#endregion
 //#region src/client/const.ts
-	var NS, PANEL_ID, SNAPSHOT_PATH, ACCOUNT_PATH, API_KEY_PATH, PROVIDER_PATH, MODELS_PATH, POOL_PATH, SENSENOVA_SIGNUP_URL;
+	var NS, PANEL_ID, SNAPSHOT_PATH, ACCOUNT_PATH, PROVIDER_PATH, MODELS_PATH, POOL_PATH, SENSENOVA_SIGNUP_URL;
 	var init_const = __esmMin((() => {
 		NS = "dsh-sensenova-suite";
 		PANEL_ID = NS;
 		SNAPSHOT_PATH = `/api/${NS}/snapshot`;
 		ACCOUNT_PATH = `/api/${NS}/account`;
-		API_KEY_PATH = `/api/${NS}/api-key`;
 		PROVIDER_PATH = `/api/${NS}/provider`;
 		MODELS_PATH = `/api/${NS}/models`;
 		POOL_PATH = `/api/${NS}/pool`;
@@ -163,15 +162,17 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"tab.api": "接入 API",
 			"tab.multimodal": "多模态",
 			"mm.enabled": "启用工具",
-			"mm.defaultModel": "默认模型",
+			"mm.text2imgTitle": "文生图",
+			"mm.img2imgTitle": "图生图",
+			"mm.defaultModel": "模型",
 			"mm.size": "尺寸",
 			"mm.outputFormat": "输出格式",
 			"mm.responseFormat": "返回方式",
-			"mm.watermark": "水印",
-			"mm.promptExtend": "描述扩写",
-			"mm.outputDir": "落盘目录",
-			"mm.visionTitle": "视觉",
-			"mm.visionTools": "视觉工具",
+			"mm.watermark": "关闭水印",
+			"mm.promptExtend": "描述润色",
+			"mm.outputDir": "保存位置",
+			"mm.outputDirHint": "留空默认不自动保存",
+			"mm.visionTitle": "图片转述",
 			"mm.visionModel": "视觉模型",
 			"mm.bridgeMode": "读图桥",
 			"mm.bridgeModeAuto": "自动（主模型支持图片时不接管）",
@@ -184,11 +185,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.protocol": "协议",
 			"llm.protocolAuto": "自动",
 			"poolMng.concurrent": "并发",
-			"poolMng.add": "添加",
-			"poolMng.addPlaceholder": "粘贴 sk- 开头的 API Key，添加后自动命名 Key<n>",
-			"poolMng.rename": "重命名",
-			"poolMng.saveName": "保存名称",
-			"poolMng.emptyKey": "先粘贴要添加的 API Key",
+			"poolMng.note": "备注",
+			"poolMng.saveName": "保存",
 			"poolMng.routeMissing": "Host 未加载本插件的池路由：正在运行的是旧构建。请完全退出 DSH（含托盘图标）后重新启动。",
 			"poolMng.concurrentHint": "全局在途上限；0 = 跟随 key 数",
 			"poolMng.empty": "池为空：在 cordis.patch.yml 配置 accounts，或保存一把 Key",
@@ -333,15 +331,17 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"tab.api": "API Integration",
 			"tab.multimodal": "Multimodal",
 			"mm.enabled": "Enable tool",
-			"mm.defaultModel": "Default model",
+			"mm.text2imgTitle": "Text to image",
+			"mm.img2imgTitle": "Image to image",
+			"mm.defaultModel": "Model",
 			"mm.size": "Size",
 			"mm.outputFormat": "Output format",
 			"mm.responseFormat": "Response format",
-			"mm.watermark": "Watermark",
-			"mm.promptExtend": "Prompt extend",
-			"mm.outputDir": "Save directory",
-			"mm.visionTitle": "Vision",
-			"mm.visionTools": "Vision tools",
+			"mm.watermark": "Disable watermark",
+			"mm.promptExtend": "Polish prompt",
+			"mm.outputDir": "Save location",
+			"mm.outputDirHint": "leave empty to skip auto-saving",
+			"mm.visionTitle": "Image description",
 			"mm.visionModel": "Vision model",
 			"mm.bridgeMode": "Image bridge",
 			"mm.bridgeModeAuto": "auto (skip when the main model sees images)",
@@ -354,11 +354,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.protocol": "Protocol",
 			"llm.protocolAuto": "auto",
 			"poolMng.concurrent": "Concurrency",
-			"poolMng.add": "Add",
-			"poolMng.addPlaceholder": "paste an sk- API key; it is named Key<n> automatically",
-			"poolMng.rename": "rename",
-			"poolMng.saveName": "save name",
-			"poolMng.emptyKey": "paste the API key to add first",
+			"poolMng.note": "note",
+			"poolMng.saveName": "save",
 			"poolMng.routeMissing": "The Host is not serving this plugin's pool route: an older build is running. Fully quit DSH (including the tray icon) and start it again.",
 			"poolMng.concurrentHint": "global in-flight cap; 0 = follow key count",
 			"poolMng.empty": "Pool is empty: configure accounts in cordis.patch.yml or save a key",
@@ -2067,7 +2064,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		const [formError, setFormError] = useState(null);
 		const [saved, setSaved] = useState(false);
 		const [forgotten, setForgotten] = useState(false);
-		const post = useCallback((payload) => postJson(API_KEY_PATH, payload), []);
+		const post = useCallback((payload) => postJson(POOL_PATH, payload), []);
 		const submit = useCallback(async (event) => {
 			event?.preventDefault?.();
 			if (apiKey.trim() === "") {
@@ -2077,7 +2074,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			setBusy(true);
 			setFormError(null);
 			try {
-				const body = await post({ apiKey });
+				const body = await post({
+					action: "add",
+					apiKey: apiKey.trim()
+				});
 				if (body && body.ok === true) {
 					setApiKey("");
 					setSaved(true);
@@ -2247,33 +2247,17 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				setBusyId(null);
 			}
 		}, [onDone, tt]);
-		/** 添加框的新 key 明文（保存即清）。 */
-		const [newKey, setNewKey] = useState("");
-		/** 行内重命名：编辑中的 id + 草稿。 */
-		const [renamingId, setRenamingId] = useState(null);
-		const [renameDraft, setRenameDraft] = useState("");
-		const addKey = useCallback(async () => {
-			if (newKey.trim() === "") {
-				setError(tt("poolMng.emptyKey"));
-				return;
-			}
-			if (await act({
-				action: "add",
-				apiKey: newKey.trim()
-			}, "add")) setNewKey("");
-		}, [
-			newKey,
-			act,
-			tt
-		]);
-		const rename = useCallback(async (id, name) => {
+		/** 行内改备注：编辑中的 id + 草稿（注释 = 备注字段，可为空）。 */
+		const [editingId, setEditingId] = useState(null);
+		const [noteDraft, setNoteDraft] = useState("");
+		const setNote = useCallback(async (id, name) => {
 			if (await act({
 				action: "rename",
 				id,
 				name
 			}, id)) {
-				setRenamingId(null);
-				setRenameDraft("");
+				setEditingId(null);
+				setNoteDraft("");
 			}
 		}, [act]);
 		const saveConcurrency = useCallback(async () => {
@@ -2301,30 +2285,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			absent: tt("poolMng.phaseAbsent")
 		};
 		return h("div", { style: { marginTop: 10 } }, h("div", { style: {
-			display: "flex",
-			gap: 8,
-			alignItems: "center",
-			marginBottom: 8
-		} }, h("input", {
-			style: {
-				...S.input,
-				flex: 1
-			},
-			type: "password",
-			value: newKey,
-			autoComplete: "off",
-			placeholder: tt("poolMng.addPlaceholder"),
-			disabled: busyId !== null,
-			onChange: (event) => setNewKey(event.target.value)
-		}), h("button", {
-			type: "button",
-			style: {
-				...S.button,
-				flex: "none"
-			},
-			disabled: busyId !== null || newKey.trim() === "",
-			onClick: () => void addKey()
-		}, busyId === "add" ? tt("llm.saving") : tt("poolMng.add"))), h("div", { style: {
 			display: "flex",
 			gap: 8,
 			alignItems: "center",
@@ -2365,38 +2325,32 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			display: "flex",
 			gap: 8,
 			alignItems: "center"
-		} }, renamingId === entry.id ? h("input", {
-			style: {
-				...S.input,
-				flex: "1 1 auto"
-			},
-			value: renameDraft,
-			autoFocus: true,
-			disabled: busyId !== null,
-			onChange: (event) => setRenameDraft(event.target.value),
-			onKeyDown: (event) => {
-				if (event.key === "Enter") rename(entry.id, renameDraft);
-			}
-		}) : h("span", {
+		} }, h("span", {
 			style: {
 				...S.modelName,
-				flex: "1 1 auto"
+				flex: "0 1 auto"
 			},
 			title: entry.id
-		}, entry.label ?? entry.id), h("span", { style: S.modelBadge }, entry.deleted ? tt("poolMng.deleted") : phaseLabel[entry.phase] ?? entry.phase), renamingId === entry.id ? h("button", {
+		}, entry.label ?? entry.id), entry.note !== null && entry.note !== "" ? h("span", { style: {
+			...S.muted,
+			fontSize: 12
+		} }, entry.note) : null, h("span", { style: {
+			...S.modelBadge,
+			marginLeft: "auto"
+		} }, entry.deleted ? tt("poolMng.deleted") : phaseLabel[entry.phase] ?? entry.phase), editingId === entry.id ? h("button", {
 			type: "button",
 			style: S.rosterBulk,
 			disabled: busyId !== null,
-			onClick: () => void rename(entry.id, renameDraft)
+			onClick: () => void setNote(entry.id, noteDraft)
 		}, tt("poolMng.saveName")) : h("button", {
 			type: "button",
 			style: S.rosterBulk,
 			disabled: busyId !== null,
 			onClick: () => {
-				setRenamingId(entry.id);
-				setRenameDraft(entry.label ?? entry.id);
+				setEditingId(entry.id);
+				setNoteDraft(entry.note ?? "");
 			}
-		}, tt("poolMng.rename")), entry.deleted ? h("button", {
+		}, tt("poolMng.note")), entry.deleted ? h("button", {
 			type: "button",
 			style: S.rosterBulk,
 			disabled: busyId !== null,
@@ -2431,7 +2385,21 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				action: "delete",
 				id: entry.id
 			}, entry.id)
-		}, tt("poolMng.delete"))))))), error !== null ? h("p", {
+		}, tt("poolMng.delete")))), editingId === entry.id ? h("input", {
+			style: {
+				...S.input,
+				width: "100%",
+				boxSizing: "border-box",
+				marginTop: 6
+			},
+			value: noteDraft,
+			autoFocus: true,
+			disabled: busyId !== null,
+			onChange: (event) => setNoteDraft(event.target.value),
+			onKeyDown: (event) => {
+				if (event.key === "Enter") setNote(entry.id, noteDraft);
+			}
+		}) : null))), error !== null ? h("p", {
 			style: S.formError,
 			role: "alert"
 		}, error) : null);
@@ -2924,6 +2892,16 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		const [error, setError] = useState(null);
 		/** 文本输入的本地草稿（key = section.key）。 */
 		const [drafts, setDrafts] = useState({});
+		/** 三张参数卡各自可合拢（默认全展开）。 */
+		const [openCards, setOpenCards] = useState({
+			text2img: true,
+			img2img: true,
+			vision: true
+		});
+		const toggleCard = (key) => setOpenCards((current) => ({
+			...current,
+			[key]: current[key] === false
+		}));
 		const saved = (section, key) => {
 			const value = (settings[section] ?? {})[key];
 			return typeof value === "string" ? value : "";
@@ -3025,19 +3003,19 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		/** 出图单工具的参数卡（两工具同构，配置各自独立）。 */
 		const imageCard = (tool, title, modelFallback) => h(SectionCard, {
 			title,
-			open: true,
-			onToggle: () => void 0,
+			open: openCards[tool] !== false,
+			onToggle: () => toggleCard(tool),
 			tt
-		}, switchRow(tool, "enabled", tt("mm.enabled"), false), modelSelect(tool, tt("mm.defaultModel"), imageModels, modelFallback), textRow(tool, "size", tt("mm.size"), "auto / 2K / 4K / 2048x2048"), selectRow(tool, "outputFormat", tt("mm.outputFormat"), IMAGE_FORMATS, "png"), selectRow(tool, "responseFormat", tt("mm.responseFormat"), RESPONSE_FORMATS, "b64_json"), switchRow(tool, "watermark", tt("mm.watermark"), false), switchRow(tool, "promptExtend", tt("mm.promptExtend"), true), textRow(tool, "outputDir", tt("mm.outputDir"), ""));
+		}, switchRow("toolsEnabled", tool, tt("mm.enabled"), false), modelSelect(tool, tt("mm.defaultModel"), imageModels, modelFallback), selectRow(tool, "size", tt("mm.size"), IMAGE_SIZES.map(([value]) => value), "auto", (option) => IMAGE_SIZES.find(([value]) => value === option)?.[1] ?? option), selectRow(tool, "outputFormat", tt("mm.outputFormat"), IMAGE_FORMATS, "png"), selectRow(tool, "responseFormat", tt("mm.responseFormat"), RESPONSE_FORMATS, "b64_json"), switchRow(tool, "promptExtend", tt("mm.promptExtend"), true), switchRow(tool, "watermark", tt("mm.watermark"), true), textRow(tool, "outputDir", tt("mm.outputDir"), tt("mm.outputDirHint")));
 		return h("div", null, error !== null ? h("p", {
 			style: S.formError,
 			role: "alert"
-		}, error) : null, imageCard("text2img", "sn_text2img", "sensenova-u1.5-lite"), h("div", { style: { height: 14 } }), imageCard("img2img", "sn_img2img", "sensenova-u1.5-lite"), h("div", { style: { height: 14 } }), h(SectionCard, {
+		}, error) : null, imageCard("text2img", tt("mm.text2imgTitle"), "sensenova-u1.5-lite"), h("div", { style: { height: 14 } }), imageCard("img2img", tt("mm.img2imgTitle"), "sensenova-u1.5-lite"), h("div", { style: { height: 14 } }), h(SectionCard, {
 			title: tt("mm.visionTitle"),
-			open: true,
-			onToggle: () => void 0,
+			open: openCards.vision !== false,
+			onToggle: () => toggleCard("vision"),
 			tt
-		}, switchRow("toolsEnabled", "visionTools", tt("mm.visionTools"), false), modelSelect("vision", tt("mm.visionModel"), visionModels, "sensenova-6.8-flash-lite"), selectRow("vision", "bridgeMode", tt("mm.bridgeMode"), [
+		}, switchRow("toolsEnabled", "visionTools", tt("mm.enabled"), false), modelSelect("vision", tt("mm.visionModel"), visionModels, "sensenova-6.8-flash-lite"), selectRow("vision", "bridgeMode", tt("mm.bridgeMode"), [
 			"auto",
 			"on",
 			"off"
@@ -3046,7 +3024,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			marginTop: 10
 		} }, tt("mm.hint")));
 	}
-	var IMAGE_FORMATS, RESPONSE_FORMATS;
+	var IMAGE_FORMATS, RESPONSE_FORMATS, IMAGE_SIZES;
 	var init_multimodal_tab = __esmMin((() => {
 		init_const();
 		init_http();
@@ -3060,6 +3038,15 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"webp"
 		];
 		RESPONSE_FORMATS = ["b64_json", "url"];
+		IMAGE_SIZES = [
+			["auto", "auto"],
+			["2048x2048", "2048x2048（1:1 / 2K）"],
+			["2720x1536", "2720x1536（16:9 / 2K）"],
+			["1536x2720", "1536x2720（9:16 / 2K）"],
+			["1664x2496", "1664x2496（2:3 / 2K）"],
+			["2496x1664", "2496x1664（3:2 / 2K）"],
+			["4096x4096", "4096x4096（1:1 / 4K）"]
+		];
 	}));
 
 //#endregion

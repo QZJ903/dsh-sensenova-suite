@@ -297,8 +297,9 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     };
     const roster = rosterWithAvailability(entries, pools);
     const byId = Object.fromEntries(roster.map((r) => [r.id, r]));
-    check("rosterWithAvailability drops image-generation models",
-      !("gen" in byId) && roster.length === 2, JSON.stringify(roster.map((r) => r.id)));
+    check("rosterWithAvailability keeps image-generation models flagged, not dropped (panel pickers need them)",
+      ("gen" in byId) && roster.length === 3 && byId.gen.imageGen === true,
+      JSON.stringify(roster.map((r) => r.id)));
     check("m1 is available (its pool still has credit)",
       byId.m1.available === true && byId.m1.quotaExhausted === false);
     check("m2 is marked quotaExhausted (its pool hit zero)",
@@ -342,19 +343,19 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     // A non-array / missing pools value must not throw and must read available.
     const safe = rosterWithAvailability(entries, {});
     check("a missing pools array yields available rows without throwing",
-      safe.length === 2 && safe.every((r) => r.available === true));
+      safe.length === 3 && safe.every((r) => r.available === true));
 
-    // Parity: the roster enumerates EVERY chat model (including quota-exhausted,
-    // so the panel can show them greyed); the picker (buildDescriptors) offers
-    // that same set MINUS the exhausted ids — the two must never disagree about
-    // which models exist.
+    // Parity: the roster enumerates EVERY chat model AND image model (including
+    // quota-exhausted, so the panel can show them greyed and the image picker can
+    // list them); the picker (buildDescriptors) offers that same chat set MINUS
+    // the exhausted ids — the two must never disagree about which models exist.
     const rosterIds = roster.map((r) => r.id);
     const built = buildDescriptors(entries, { baseUrl: BASE_URL, unavailableModelIds: ["m2"] }).map((d) => d.id);
-    check("roster enumerates every chat model (incl. quota-exhausted)",
-      JSON.stringify(rosterIds) === JSON.stringify(["m1", "m2"]), JSON.stringify(rosterIds));
-    check("the picker offers roster minus the quota-exhausted ids",
-      JSON.stringify(built) === JSON.stringify(rosterIds.filter((id) => !byId[id].quotaExhausted)),
-      `${JSON.stringify(built)} vs ${JSON.stringify(rosterIds.filter((id) => !byId[id].quotaExhausted))}`);
+    check("roster enumerates every chat + image model (incl. quota-exhausted)",
+      JSON.stringify(rosterIds) === JSON.stringify(["m1", "m2", "gen"]), JSON.stringify(rosterIds));
+    check("the picker offers the chat models minus the quota-exhausted ids (image models never offered as chat)",
+      JSON.stringify(built) === JSON.stringify(["m1"]),
+      `${JSON.stringify(built)} vs ${JSON.stringify(["m1"])}`);
   } catch (error) {
     fail("rosterWithAvailability", error);
   }

@@ -34,9 +34,6 @@ export const MAX_ACCOUNT_BODY_BYTES = 4096;
 /** Ceiling on the curated allow-list: a catalogue this large is a posting accident. */
 export const MAX_ENABLED_MODEL_IDS = 500;
 
-/** Ceiling on a Raccoon action body: the login POST only needs the scan code. */
-export const MAX_RACCOON_BODY_BYTES = 2048;
-
 /**
  * Read a small JSON request body, refusing anything oversized.
  *
@@ -154,29 +151,4 @@ export function withOrigin(handler: (request: any, response: any) => Promise<voi
     }
     return handler(request, response);
   };
-}
-
-/**
- * Whether a request opted into the Raccoon 401-triage diagnostics (`?debug=1`).
- *
- * A retired scaffold: the 401 root-cause fix (Bearer dual-shape + pre-read
- * renewal gate + `/refresh`) has landed and no client renders the triage
- * fields, so an ordinary poll must not carry them. A query flag keeps the
- * capability without a config field (a patch change needs a restart) and
- * without widening every response.
- *
- * Only `1` / `true` opt in: `?debug=0` must stay quiet, and a malformed URL is
- * treated as "no".
- * @param {object} request - the incoming HTTP request.
- * @returns {boolean} whether the diagnostics were requested.
- */
-export function wantsDiagnostics(request: any) {
-  const url = typeof request?.url === "string" ? request.url : "";
-  if (url === "") return false;
-  try {
-    const flag = new URL(url, "http://localhost").searchParams.get("debug");
-    return flag === "1" || flag === "true";
-  } catch {
-    return false;
-  }
 }

@@ -28,8 +28,6 @@
  * @module dsh-sensenova-suite/provider-store
  */
 import { obj } from "./util.ts";
-import { name } from "./host-config.ts";
-import { profileStateDir } from "./state-store.ts";
 import { createSwitchStore, normalizeSwitchEnabled } from "./switch-store.ts";
 import type { StoreOptions } from "./types.ts";
 
@@ -46,18 +44,6 @@ export const PROVIDER_VERSION = 1;
  */
 export const KNOWN_PROVIDER_VERSIONS: readonly number[] = [1];
 
-/**
- * The directory this plugin's state lives in — per-profile when the Host names
- * one, shared otherwise (PITFALLS §23). Unlike the THROTTLE, which is
- * deliberately shared across profiles, this answers "does THIS profile want the
- * provider registered" and must not be overwritten by the other profile's Host.
- * @param {string|null} [profile] - the profile name; `null` means shared.
- * @returns {string} the directory.
- */
-export function providerDir(profile: string | null) {
-  return profileStateDir(name, profile);
-}
-
 // The on/off normaliser is shared (`switch-store.ts`); re-export under this
 // store's historical name — `doctor.ts` and the suite import it from here.
 export { normalizeSwitchEnabled as normalizeEnabled };
@@ -66,7 +52,10 @@ export { normalizeSwitchEnabled as normalizeEnabled };
  * The file-backed provider switch.
  * @param {object} [options]
  * @param {string} [options.dir] - override the state directory (tests).
- * @param {string|null} [options.profile] - the profile name; see {@link providerDir}.
+ * @param {string|null} [options.profile] - the profile name. This file lives
+ *   under the profile partition: createSwitchStore's stateDir is
+ *   `profileStateDir(name, profile)` (PITFALLS §23). `null` degrades to today's
+ *   shared directory.
  * @param {number} [options.ttlMs] - how long a parsed switch may be reused
  *   before disk is consulted again.
  * @returns {object} the store.

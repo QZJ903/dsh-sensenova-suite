@@ -20,7 +20,7 @@ import { str } from "./util.ts";
  * Where login traces are written. `$DSH_HOME/logs/` keeps them next to the
  * other Host logs; `DSH_HOME` defaults to `~/.dsh`.
  */
-export function traceDir() {
+function traceDir() {
   const home = str(process.env.DSH_HOME, join(homedir(), ".dsh"));
   return join(home, "logs");
 }

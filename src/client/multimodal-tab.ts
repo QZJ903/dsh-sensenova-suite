@@ -27,6 +27,16 @@ function Field({ label, children }: { label: string; children: unknown }): unkno
 
 const IMAGE_FORMATS = ["png", "jpeg", "webp"];
 const RESPONSE_FORMATS = ["b64_json", "url"];
+/** 官方建议尺寸（值 = 直通商汤 body.size；auto 让平台自选）。 */
+const IMAGE_SIZES = [
+  ["auto", "auto"],
+  ["2048x2048", "2048x2048（1:1 / 2K）"],
+  ["2720x1536", "2720x1536（16:9 / 2K）"],
+  ["1536x2720", "1536x2720（9:16 / 2K）"],
+  ["1664x2496", "1664x2496（2:3 / 2K）"],
+  ["2496x1664", "2496x1664（3:2 / 2K）"],
+  ["4096x4096", "4096x4096（1:1 / 4K）"],
+] as const;
 
 export function MultimodalTab({ llm, pool, onDone, tt }: {
   llm?: LlmData | null;
@@ -42,6 +52,9 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   const [error, setError] = useState<string | null>(null);
   /** 文本输入的本地草稿（key = section.key）。 */
   const [drafts, setDrafts] = useState<Record<string, string>>({});
+  /** 三张参数卡各自可合拢（默认全展开）。 */
+  const [openCards, setOpenCards] = useState<Record<string, boolean>>({ text2img: true, img2img: true, vision: true });
+  const toggleCard = (key: string) => setOpenCards((current) => ({ ...current, [key]: current[key] === false }));
 
   const saved = (section: string, key: string): string => {
     const bag = (settings as Record<string, Record<string, unknown>>)[section] ?? {};
@@ -152,29 +165,37 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   /** 出图单工具的参数卡（两工具同构，配置各自独立）。 */
   const imageCard = (tool: "text2img" | "img2img", title: string, modelFallback: string) => h(
     SectionCard,
-    { title, open: true, onToggle: () => undefined, tt },
-    switchRow(tool, "enabled", tt("mm.enabled"), false),
+    { title, open: openCards[tool] !== false, onToggle: () => toggleCard(tool), tt },
+    // 开关写进 toolsEnabled 分区（宿主注册 gating 只认 toolsEnabled.text2img /
+    // toolsEnabled.img2img）。写进 text2img.enabled 会被 readImage 白名单丢弃，
+    // 工具永不注册 —— 2026-10-25 修的「按了开启没反应」根因。
+    switchRow("toolsEnabled", tool, tt("mm.enabled"), false),
     modelSelect(tool, tt("mm.defaultModel"), imageModels, modelFallback),
-    textRow(tool, "size", tt("mm.size"), "auto / 2K / 4K / 2048x2048"),
+    selectRow(tool, "size", tt("mm.size"), IMAGE_SIZES.map(([value]) => value), "auto",
+      (option) => IMAGE_SIZES.find(([value]) => value === option)?.[1] ?? option),
     selectRow(tool, "outputFormat", tt("mm.outputFormat"), IMAGE_FORMATS, "png"),
     selectRow(tool, "responseFormat", tt("mm.responseFormat"), RESPONSE_FORMATS, "b64_json"),
-    switchRow(tool, "watermark", tt("mm.watermark"), false),
+    // 描述润色（默认开）在关闭水印（默认开）之前；两者默认都开，
+    // 水印开关语义是「关闭水印」——开=不加官方水印，关=加。与宿主默认一致
+    // （imageOptions: watermark ?? true / promptExtend ?? true）。
     switchRow(tool, "promptExtend", tt("mm.promptExtend"), true),
-    textRow(tool, "outputDir", tt("mm.outputDir"), "")
+    switchRow(tool, "watermark", tt("mm.watermark"), true),
+    // 提示放进输入框 placeholder（留空不自动保存）。
+    textRow(tool, "outputDir", tt("mm.outputDir"), tt("mm.outputDirHint"))
   );
 
   return h(
     "div",
     null,
     error !== null ? h("p", { style: S.formError, role: "alert" }, error) : null,
-    imageCard("text2img", "sn_text2img", "sensenova-u1.5-lite"),
+    imageCard("text2img", tt("mm.text2imgTitle"), "sensenova-u1.5-lite"),
     h("div", { style: { height: 14 } }),
-    imageCard("img2img", "sn_img2img", "sensenova-u1.5-lite"),
+    imageCard("img2img", tt("mm.img2imgTitle"), "sensenova-u1.5-lite"),
     h("div", { style: { height: 14 } }),
     h(
       SectionCard,
-      { title: tt("mm.visionTitle"), open: true, onToggle: () => undefined, tt },
-      switchRow("toolsEnabled", "visionTools", tt("mm.visionTools"), false),
+      { title: tt("mm.visionTitle"), open: openCards.vision !== false, onToggle: () => toggleCard("vision"), tt },
+      switchRow("toolsEnabled", "visionTools", tt("mm.enabled"), false),
       modelSelect("vision", tt("mm.visionModel"), visionModels, "sensenova-6.8-flash-lite"),
       selectRow("vision", "bridgeMode", tt("mm.bridgeMode"), ["auto", "on", "off"], "auto",
         (option) => tt(option === "auto" ? "mm.bridgeModeAuto" : option === "on" ? "mm.bridgeModeOn" : "mm.bridgeModeOff")),

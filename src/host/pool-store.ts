@@ -25,7 +25,7 @@ export const POOL_STORE_VERSION = 1;
 export const KNOWN_POOL_STORE_VERSIONS: readonly number[] = [1];
 
 /** 池状态文件所在目录（按 profile 分段，见 PITFALLS §23）。 */
-export function poolStoreDir(profile: string | null) {
+function poolStoreDir(profile: string | null) {
   return profileStateDir(name, profile);
 }
 
@@ -54,9 +54,10 @@ export interface ToolsEnabled {
   visionTools?: boolean;
 }
 
-/** 一把面板添加的 key：id 稳定（key-<n>），name 可重命名（默认 Key<n>）。 */
+/** 一把面板添加的 key：id 稳定（key-<n>），name 现在是「备注」字段（面板填的，可为空）。 */
 export interface PoolKeyEntry {
   id: string;
+  /** 备注：显示在脱敏名后；空 = 无备注。 */
   name: string;
 }
 
@@ -151,8 +152,9 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
           const rec = entry as Record<string, unknown>;
           if (typeof rec !== "object" || rec === null) return null;
           const id = typeof rec.id === "string" && rec.id !== "" ? rec.id : "";
-          const keyName = typeof rec.name === "string" && rec.name.trim() !== "" ? rec.name.trim() : "";
-          return id !== "" && keyName !== "" ? { id, name: keyName } : null;
+          // name = 备注，允许空字符串（无备注）。
+          const note = typeof rec.name === "string" ? rec.name.trim() : "";
+          return id !== "" ? { id, name: note } : null;
         })
         .filter((entry): entry is PoolKeyEntry => entry !== null)
     : [];
@@ -259,6 +261,16 @@ export function createFilePoolStore(options: StoreOptions = {}) {
       values: Record<string, unknown>
     ): Promise<void> {
       const record = await seen();
+      // 合并进目标分区，而不是整体替换：`[section]: values` 会把该分区原有的
+      // 其它键一起抹掉 —— 例如 toolsEnabled 只有 text2img 时，再开 img2img 就
+      // 把 text2img 的 true 冲掉（三个工具永远只能开一个的根因，2026-10-25）。
+      const merged = section === "toolsEnabled"
+        ? { ...record.toolsEnabled, ...values }
+        : section === "text2img"
+          ? { ...record.text2img, ...values }
+          : section === "img2img"
+            ? { ...record.img2img, ...values }
+            : { ...record.vision, ...values };
       const parsed = parsePoolPayload({
         version: POOL_STORE_VERSION,
         disabledIds: record.disabledIds,
@@ -272,7 +284,7 @@ export function createFilePoolStore(options: StoreOptions = {}) {
         text2img: record.text2img,
         img2img: record.img2img,
         vision: record.vision,
-        [section]: values
+        [section]: merged
       });
       if (parsed === null) return;
       await apply(parsed);
@@ -286,11 +298,6 @@ export function createFilePoolStore(options: StoreOptions = {}) {
             await apply({ ...record, modelProtocols: protocols });
     }
   };
-}
-
-/** 从原始载荷宽容读取（index.ts 的编排层用）。 */
-export function poolRecordOf(store: { read(): Promise<PoolStoreRecord> }): Promise<PoolStoreRecord> {
-  return store.read();
 }
 
 /** 给快照/路由的形状化读取（obj 兜底，避免调用方判空）。 */

@@ -360,20 +360,21 @@ export function optional<T, F = null>(value: T | Promise<T> | null | undefined, 
 }
 
 /**
- * Omit the fields of `fields` that are `null` or `undefined`, keeping the
- * rest as a fresh object. Collapses the `(x !== null ? { x } : {})` response
- * builders: `...pickDefined({ x })` reads as omit-when-absent in one token.
- * A guard that omits an empty string or requires a specific type is a
- * DIFFERENT policy and keeps its own `typeof` / non-empty test — not this helper.
- * @param {T} fields - the candidate field map.
- * @returns a new object holding only the defined fields.
+ * Mask a SenseNova API key for the pool list: the first 5 chars (the `sk-`
+ * prefix plus 2) are kept, then a separator of black dots, then the last 3.
+ *
+ * `sk-123456789abc` → `sk-12......abc`. Short keys (the platform guarantees at
+ * least the prefix + a few chars) still render as `sk-xx......xxx`; a key that
+ * is not even 8 chars long falls back to the whole key (there is nothing safe
+ * to reveal). The dots are literal U+2022 bullets so the display reads like a
+ * password field, not like part of the key.
+ * @param {string} key - the API key (sk-…).
+ * @returns {string} the masked display form.
  */
-export function pickDefined<T extends Record<string, unknown>>(fields: T): Partial<{ [K in keyof T]: Exclude<T[K], null | undefined> }> {
-  const out: Partial<T> = {};
-  for (const [key, value] of Object.entries(fields)) {
-    if (value !== null && value !== undefined) (out as Record<string, unknown>)[key] = value;
-  }
-  return out as Partial<{ [K in keyof T]: Exclude<T[K], null | undefined> }>;
+export function maskKey(key: string): string {
+  const k = typeof key === "string" ? key : "";
+  if (k.length <= 8) return k;
+  return `${k.slice(0, 5)}${"·".repeat(6)}${k.slice(-3)}`;
 }
 
 /**

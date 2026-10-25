@@ -60,21 +60,21 @@ export function buildVisionTools(deps: ToolsetDeps) {
   const describeTool = (name: "sn_describe_image" | "sn_describe_images", multi: boolean) => defineTool({
     name,
     description: (multi
-      ? "批量描述/理解多张图片(调用商汤 SenseNova 视觉模型,按 sensenova-6.8-flash-lite → deepseek-flash → kimi-k3 故障转移,首个成功即返回)。images 为图片数组(本地绝对路径、http(s) URL 或 base64);返回 JSON 文本(metadata.attempts 记录每轮尝试)。"
-      : "描述/理解一张图片(调用商汤 SenseNova 视觉模型,按 sensenova-6.8-flash-lite → deepseek-flash → kimi-k3 故障转移,首个成功即返回)。image 为本地图片绝对路径、http(s) URL 或 base64;返回 JSON 文本(ok/task_type/tool_used/confidence/result/metadata.attempts);多图用 describe_images。")
+      ? "批量描述/理解多张图片(调用商汤 SenseNova 视觉模型,模型由配置 visionModel 决定,默认 sensenova-6.8-flash-lite;支持通过 model 参数指定其他模型)。images 为图片数组(本地绝对路径、http(s) URL 或 base64);返回 JSON 文本(metadata.attempts 记录每轮尝试)。"
+      : "描述/理解一张图片(调用商汤 SenseNova 视觉模型,模型由配置 visionModel 决定,默认 sensenova-6.8-flash-lite;支持通过 model 参数指定其他模型)。image 为本地图片绝对路径、http(s) URL 或 base64;返回 JSON 文本(ok/task_type/tool_used/confidence/result/metadata.attempts);多图用 describe_images。")
       + "api key 由套件的 key 池解析(与 LLM 通道共用账号池)。",
     parameters: multi
       ? {
           images: { type: "array", required: true, items: { type: "string" }, description: "图片数组(本地绝对路径 / http(s) URL / data: URL / 裸 base64)。" },
           prompt: { type: "string", description: "识别提示,默认 \"Describe these images in detail.\"。" },
-          model: { type: "string", description: "模型链(逗号分隔),默认用配置;可传 \"kimi-k3\" 强制单模型。" },
+          model: { type: "string", description: "视觉模型 id,默认用配置 visionModel(默认 sensenova-6.8-flash-lite)。" },
           base_url: { type: "string", description: "chat-completions base URL,默认用配置。" },
           image_mode: { type: "string", description: "图片传输模式,image_url(默认)或 image_base64(遗留)。" },
         }
       : {
           image: { type: "string", required: true, description: "本地图片绝对路径 / http(s) URL / data: URL / 裸 base64 字符串。" },
           prompt: { type: "string", description: "识别提示,默认 \"Describe this image in detail.\"。" },
-          model: { type: "string", description: "模型链(逗号分隔),默认用配置;可传 \"kimi-k3\" 强制单模型。" },
+          model: { type: "string", description: "视觉模型 id,默认用配置 visionModel(默认 sensenova-6.8-flash-lite)。" },
           base_url: { type: "string", description: "chat-completions base URL,默认用配置。" },
           image_mode: { type: "string", description: "图片传输模式,image_url(默认)或 image_base64(遗留)。" },
         },

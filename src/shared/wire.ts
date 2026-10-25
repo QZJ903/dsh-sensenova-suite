@@ -180,6 +180,8 @@ export interface PoolKeyData {
   id: string;
   /** 账号标签（accounts 的 label；面板 key 为 null）。 */
   label: string | null;
+  /** 用户备注（面板「备注」字段；无则为 null）。显示在脱敏名后。 */
+  note: string | null;
   phase: "running" | "blocked" | "absent";
   disabled: boolean;
   deleted: boolean;

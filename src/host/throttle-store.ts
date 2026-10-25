@@ -68,7 +68,7 @@ export const KNOWN_THROTTLE_VERSIONS: readonly number[] = [THROTTLE_FILE_VERSION
  * consistent" with the other three.
  * @returns {string} the directory.
  */
-export function throttleDir() {
+function throttleDir() {
   return pluginStateDir(name);
 }
 

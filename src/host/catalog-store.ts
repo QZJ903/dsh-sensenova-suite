@@ -80,7 +80,7 @@ export function normalizeEnabledIds(raw: unknown): string[] {
  * @param {string|null} [profile] - the profile name; `null` means shared.
  * @returns {string} the directory.
  */
-export function catalogDir(profile: string | null) {
+function catalogDir(profile: string | null) {
   return profileStateDir(name, profile);
 }
 

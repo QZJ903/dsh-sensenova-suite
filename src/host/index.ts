@@ -55,7 +55,7 @@ import {
   inject,
   name
 } from "./host-config.ts";
-import { str, errMsg } from "./util.ts";
+import { str, errMsg, maskKey } from "./util.ts";
 import type { HostDeps } from "./types.ts";
 
 /**
@@ -218,6 +218,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     }
     return entries;
   };
+  // The credentials service, read once for maskKey display (and pool refs).
+  const credentialsService = getService("credentials");
   // 池运营状态存储（面板管理面：停用/恢复/删除、全局并发、模型协议）。
   // params 需要同步读，所以本地持一份记录：本路由的每次写后刷新 + 探测时钟兜底刷新
   // （外部进程直改状态文件的可见性延迟 ≤ 一个探测周期，可接受）。
@@ -336,24 +338,35 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   /**
    * 管理面 key 行（面板默认 key 在前，随后 store 清单）——GET /pool 与快照的
    * pool 块共用：列的是「配置了什么」，不是「凭据解析成功了什么」。
+   * 显示名 = 主 key 的脱敏（maskKey），无需单独 label 字段；
+   * store 清单的 name 字段现在是「备注」（面板填的、展示在脱敏名后）。
    */
   const poolKeyRows = async (): Promise<Array<{
-    id: string; label: string | null; phase: "running" | "blocked" | "absent"; disabled: boolean; deleted: boolean;
+    id: string; label: string | null; note: string | null;
+    phase: "running" | "blocked" | "absent"; disabled: boolean; deleted: boolean;
   }>> => {
     const savedPool = await poolStore.read().catch(() => null);
-    const rows: Array<{ id: string; label: string | null; phase: "running" | "blocked" | "absent"; disabled: boolean; deleted: boolean }> = [];
+    const rows: Array<{
+      id: string; label: string | null; note: string | null;
+      phase: "running" | "blocked" | "absent"; disabled: boolean; deleted: boolean;
+    }> = [];
     const panelKeyValue = (await apiKeyStore.resolve().catch(() => ({ value: "" }))).value;
     if (typeof panelKeyValue === "string" && panelKeyValue !== "") {
       rows.push({
-        id: "default", label: "Key1",
+        id: "default", label: maskKey(panelKeyValue), note: null,
         phase: orchestrator.phaseOf(orchestrator.keyOf("default")),
         disabled: poolRecord.disabledIds.includes("default"),
         deleted: poolRecord.deletedIds.includes("default")
       });
     }
     for (const entry of savedPool?.keys ?? []) {
+      const value = await resolveRefValue(credentialsService, `dsh-sensenova-suite/pool-${entry.id}`);
+      // name 现在是「备注」；存量旧默认名（Key1/Key2…）不算备注。
+      const isLegacyDefault = /^Key\d+$/.test(entry.name);
       rows.push({
-        id: entry.id, label: entry.name,
+        id: entry.id,
+        label: typeof value === "string" && value !== "" ? maskKey(value) : entry.id,
+        note: entry.name !== "" && !isLegacyDefault ? entry.name : null,
         phase: orchestrator.phaseOf(orchestrator.keyOf(entry.id)),
         disabled: poolRecord.disabledIds.includes(entry.id),
         deleted: poolRecord.deletedIds.includes(entry.id)
@@ -501,7 +514,11 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
               return {
                 apiBase: settings.apiBase,
                 defaultModel: saved?.model ?? model,
-                watermark: saved?.watermark ?? false,
+                // 面板开关语义是「关闭水印」：ON（默认）= 去水印。商汤的
+                // watermark 字段是「是否添加官方 Logo」（true = 加），所以这里
+                // 必须反转面板值——面板 ON → 商汤 false。两者默认一致：
+                // 未保存时面板显示开（去水印），这里也去水印。
+                watermark: !(saved?.watermark ?? true),
                 defaultSize: saved?.size ?? "",
                 outputFormat: saved?.outputFormat ?? "png",
                 responseFormat: saved?.responseFormat ?? "b64_json",

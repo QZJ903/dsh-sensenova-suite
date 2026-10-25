@@ -87,9 +87,12 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings"> & {
             });
           }
           for (const entry of record.keys) {
+            // name 字段现在是「备注」。存量数据里旧的默认名（Key1/Key2…）
+            // 不算备注：匹配 ^Key\d+$ 的旧默认名显示为空备注。
+            const isLegacyDefault = /^Key\d+$/.test(entry.name);
             keys.push({
               id: entry.id,
-              label: entry.name,
+              label: isLegacyDefault ? "" : entry.name,
               phase: poolAdmin.phaseOf(entry.id),
               disabled: record.disabledIds.includes(entry.id),
               deleted: record.deletedIds.includes(entry.id)
@@ -124,7 +127,7 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings"> & {
             { "cache-control": "no-store" });
           return;
         }
-        // 添加面板 key：秘钥入凭据服务，清单追加（自动命名 Key<n>）。
+        // 添加面板 key：秘钥入凭据服务，清单追加（name = 备注，可为空）。
         if (body.value.action === "add" && typeof body.value.apiKey === "string" && body.value.apiKey.trim() !== "") {
           const record = await poolAdmin.store.read();
           // 编号把面板默认 key 计为 1（有 default 时从 2 起）。
@@ -134,25 +137,20 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings"> & {
           usedNumbers.push((await poolAdmin.hasPanelKey()) ? 1 : 0);
           const next = Math.max(...usedNumbers, 0) + 1;
           const id = `key-${next}`;
-          const keyName = typeof body.value.name === "string" && body.value.name.trim() !== ""
-            ? body.value.name.trim()
-            : `Key${next}`;
+          // name 字段现在是「备注」（面板填的）；缺省/空白 = 无备注。
+          const note = typeof body.value.name === "string" ? body.value.name.trim() : "";
           await poolAdmin.addKeySecret(id, body.value.apiKey.trim());
-          await poolAdmin.store.setKeys([...record.keys, { id, name: keyName }]);
+          await poolAdmin.store.setKeys([...record.keys, { id, name: note }]);
           await poolAdmin.refresh();
-          writeJson(response, 200, { ok: true, id, name: keyName }, { "cache-control": "no-store" });
+          writeJson(response, 200, { ok: true, id, name: note }, { "cache-control": "no-store" });
           return;
         }
-        // 重命名。
+        // 改备注（原「重命名」语义保留为 update：整行 name 覆盖；备注可为空）。
         if (body.value.action === "rename" && typeof body.value.id === "string" && body.value.id !== "") {
-          const keyName = typeof body.value.name === "string" && body.value.name.trim() !== "" ? body.value.name.trim() : "";
-          if (keyName === "") {
-            writeJson(response, 400, { ok: false, error: "name must be a non-empty string" }, { "cache-control": "no-store" });
-            return;
-          }
+          const note = typeof body.value.name === "string" ? body.value.name.trim() : "";
           const record = await poolAdmin.store.read();
           await poolAdmin.store.setKeys(record.keys.map((entry) =>
-            entry.id === body.value.id ? { ...entry, name: keyName } : entry));
+            entry.id === body.value.id ? { ...entry, name: note } : entry));
           await poolAdmin.refresh();
           writeJson(response, 200, { ok: true }, { "cache-control": "no-store" });
           return;

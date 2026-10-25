@@ -7,7 +7,7 @@
  * is NEVER populated from the snapshot — the Host only reports whether one
  * exists.
  */
-import { API_KEY_PATH, POOL_PATH, SENSENOVA_SIGNUP_URL } from "./const.ts";
+import { POOL_PATH, SENSENOVA_SIGNUP_URL } from "./const.ts";
 import { postJson, postJsonOrThrow } from "./http.ts";
 import { h, useCallback, useState } from "./runtime.ts";
 import type { Tt } from "./runtime.ts";
@@ -29,7 +29,8 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
   const [saved, setSaved] = useState(false);
   const [forgotten, setForgotten] = useState(false);
 
-  const post = useCallback((payload: Record<string, unknown>) => postJson(API_KEY_PATH, payload), []);
+  // 上面的表单现在直接进 key 池（POST /pool {action:add}）——唯一入口。
+  const post = useCallback((payload: Record<string, unknown>) => postJson(POOL_PATH, payload), []);
 
   const submit = useCallback(async (event?: { preventDefault?: () => void }) => {
     event?.preventDefault?.();
@@ -42,7 +43,8 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
     setBusy(true);
     setFormError(null);
     try {
-      const body = await post({ apiKey });
+      // 进池（自动编号 key-<n>，名字 = 备注留空）；key 必然参与轮转。
+      const body = await post({ action: "add", apiKey: apiKey.trim() });
       if (body && body.ok === true) {
         setApiKey("");
         setSaved(true);
@@ -217,21 +219,13 @@ export function PoolManager({ pool, onDone, tt }: {
     }
   }, [onDone, tt]);
 
-  /** 添加框的新 key 明文（保存即清）。 */
-  const [newKey, setNewKey] = useState("");
-  /** 行内重命名：编辑中的 id + 草稿。 */
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameDraft, setRenameDraft] = useState("");
+  /** 行内改备注：编辑中的 id + 草稿（注释 = 备注字段，可为空）。 */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [noteDraft, setNoteDraft] = useState("");
 
-  const addKey = useCallback(async () => {
-    if (newKey.trim() === "") { setError(tt("poolMng.emptyKey")); return; }
-    const ok = await act({ action: "add", apiKey: newKey.trim() }, "add");
-    if (ok) setNewKey("");
-  }, [newKey, act, tt]);
-
-  const rename = useCallback(async (id: string, name: string) => {
+  const setNote = useCallback(async (id: string, name: string) => {
     const ok = await act({ action: "rename", id, name }, id);
-    if (ok) { setRenamingId(null); setRenameDraft(""); }
+    if (ok) { setEditingId(null); setNoteDraft(""); }
   }, [act]);
 
   const saveConcurrency = useCallback(async () => {
@@ -259,25 +253,6 @@ export function PoolManager({ pool, onDone, tt }: {
   return h(
     "div",
     { style: { marginTop: 10 } },
-    // 添加 Key：明文输入 + 按钮；保存后按 Key<n> 自动命名（可重命名）。
-    h(
-      "div",
-      { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } },
-      h("input", {
-        style: { ...S.input, flex: 1 },
-        type: "password",
-        value: newKey,
-        autoComplete: "off",
-        placeholder: tt("poolMng.addPlaceholder"),
-        disabled: busyId !== null,
-        onChange: (event: { target: { value: string } }) => setNewKey(event.target.value)
-      }),
-      h("button", {
-        type: "button", style: { ...S.button, flex: "none" },
-        disabled: busyId !== null || newKey.trim() === "",
-        onClick: () => void addKey()
-      }, busyId === "add" ? tt("llm.saving") : tt("poolMng.add"))
-    ),
     // 并发：全局在途上限（0 = 跟随 key 数）。
     h(
       "div",
@@ -307,28 +282,23 @@ export function PoolManager({ pool, onDone, tt }: {
             h(
               "div",
               { style: { display: "flex", gap: 8, alignItems: "center" } },
-              renamingId === entry.id
-                ? h("input", {
-                    style: { ...S.input, flex: "1 1 auto" },
-                    value: renameDraft,
-                    autoFocus: true,
-                    disabled: busyId !== null,
-                    onChange: (event: { target: { value: string } }) => setRenameDraft(event.target.value),
-                    onKeyDown: (event: { key: string }) => { if (event.key === "Enter") void rename(entry.id, renameDraft); }
-                  })
-                : h("span", { style: { ...S.modelName, flex: "1 1 auto" }, title: entry.id },
-                    entry.label ?? entry.id),
-              h("span", { style: S.modelBadge },
+              // 显示：脱敏名（无框大字）+ 备注（无框小字，紧跟 key 名之后）
+              h("span", { style: { ...S.modelName, flex: "0 1 auto" }, title: entry.id },
+                entry.label ?? entry.id),
+              entry.note !== null && entry.note !== ""
+                ? h("span", { style: { ...S.muted, fontSize: 12 } }, entry.note)
+                : null,
+              h("span", { style: { ...S.modelBadge, marginLeft: "auto" } },
                 entry.deleted ? tt("poolMng.deleted") : phaseLabel[entry.phase] ?? entry.phase),
-              renamingId === entry.id
+              editingId === entry.id
                 ? h("button", {
                     type: "button", style: S.rosterBulk, disabled: busyId !== null,
-                    onClick: () => void rename(entry.id, renameDraft)
+                    onClick: () => void setNote(entry.id, noteDraft)
                   }, tt("poolMng.saveName"))
                 : h("button", {
                     type: "button", style: S.rosterBulk, disabled: busyId !== null,
-                    onClick: () => { setRenamingId(entry.id); setRenameDraft(entry.label ?? entry.id); }
-                  }, tt("poolMng.rename")),
+                    onClick: () => { setEditingId(entry.id); setNoteDraft(entry.note ?? ""); }
+                  }, tt("poolMng.note")),
               entry.deleted
                 ? h("button", {
                     type: "button", style: S.rosterBulk, disabled: busyId !== null,
@@ -351,7 +321,18 @@ export function PoolManager({ pool, onDone, tt }: {
                       onClick: () => void act({ action: "delete", id: entry.id }, entry.id)
                     }, tt("poolMng.delete"))
                   )
-            )
+            ),
+            // 编辑备注行：编辑态输入框显示在 key 行下方。
+            editingId === entry.id
+              ? h("input", {
+                  style: { ...S.input, width: "100%", boxSizing: "border-box", marginTop: 6 },
+                  value: noteDraft,
+                  autoFocus: true,
+                  disabled: busyId !== null,
+                  onChange: (event: { target: { value: string } }) => setNoteDraft(event.target.value),
+                  onKeyDown: (event: { key: string }) => { if (event.key === "Enter") void setNote(entry.id, noteDraft); }
+                })
+              : null
           ))
         ),
     error !== null ? h("p", { style: S.formError, role: "alert" }, error) : null

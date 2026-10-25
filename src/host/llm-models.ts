@@ -505,16 +505,19 @@ export function isModelEnabled(enabledIds: string[] | undefined, id: string): bo
  * offer would disagree about which models exist, and a ticked model could
  * become an unregistered one.
  * @param {object[]} entries - the normalized catalog entries.
- * @returns {{id: string, name: string, vision: boolean}[]}
+ * @returns {{id: string, name: string, vision: boolean, imageGen: boolean}[]}
  */
-export function rosterOf(entries: unknown): { id: string; name: string; vision: boolean }[] {
+export function rosterOf(entries: unknown): { id: string; name: string; vision: boolean; imageGen: boolean }[] {
   const position = new Map();
-  const out: { id: string; name: string; vision: boolean }[] = [];
+  const out: { id: string; name: string; vision: boolean; imageGen: boolean }[] = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
-    // Image-generation models are not chat models and are not offered (see
-    // `isChatModel`): the roster and the registered offer must agree about
-    // which models exist, or a ticked model could become an unregistered one.
-    if (!isChatModel(entry)) continue;
+    // Image-generation models (output_modalities: ["image"]) are NOT chat
+    // models and must not be registered as chat descriptors (buildDescriptors
+    // excludes them); but the panel needs them for the image tools' model
+    // picker, so they stay in the roster WITH the imageGen flag rather than
+    // being dropped. The chat offer and the panel lists now disagree on
+    // PURPOSE, not content: both come from the same catalog entries, the
+    // roster carrying every modality the fill pickers use.
     const id = str(entry?.id, "");
     if (id === "") continue;
     const row = {
@@ -595,20 +598,24 @@ export function buildDescriptors(entries: any[], options: AdapterConfig = {}) {
  *   a descriptor build gets. Positionally third and optional, so a caller written
  *   before the field existed keeps compiling; omitting it makes every row quote
  *   the catalogue figure, which is what a deployment with no overrides wants.
- * @returns {{id: string, name: string, vision: boolean, available: boolean, quotaExhausted: boolean, contextWindow: number, maxOutputLength: number, thinkingLevels: string[]}[]}
+ * @returns {{id: string, name: string, vision: boolean, imageGen: boolean, available: boolean, quotaExhausted: boolean, contextWindow: number, maxOutputLength: number, thinkingLevels: string[]}[]}
  */
 export function rosterWithAvailability(entries: unknown, pools: { pools?: unknown }, maxTokensOverrides?: Record<string, number> | null) {
   const blocked = new Set(exhaustedModelIds(pools));
   const position = new Map();
-  const out: { id: string; name: string; vision: boolean; available: boolean; quotaExhausted: boolean; contextWindow: number; maxOutputLength: number; thinkingLevels: string[] }[] = [];
+  const out: { id: string; name: string; vision: boolean; imageGen: boolean; available: boolean; quotaExhausted: boolean; contextWindow: number; maxOutputLength: number; thinkingLevels: string[] }[] = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
-    if (!isChatModel(entry)) continue;
+    // Image-generation models stay in the ROSTER (the panel's image-tool model
+    // picker reads it), but are flagged, never dropped — see rosterOf. They are
+    // still excluded from buildDescriptors (chat offer), so a row here never
+    // becomes a registered chat model.
     const id = str(entry?.id, "");
     if (id === "") continue;
     const row = {
       id,
-      name: str(entry.name, id),
+      name: str(entry?.name, id),
       vision: identifyVisionModel(entry).vision === true,
+      imageGen: isImageGenModel(entry) === true,
       available: !blocked.has(id),
       quotaExhausted: blocked.has(id),
       // The window the descriptor itself will use: a declared `context_length`

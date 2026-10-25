@@ -933,19 +933,16 @@ const FROZEN_DOCS = new Set(["ROADMAP.md", "QODER-GAP.md", "TOKEN-STORE-SPLIT.md
     note(`CONFIG_DEFAULTS.auth 留空哨兵：${sentinels}/${UNSET.length} 键仍为 ""/0（SETUP 的 auth 列因此等于 AUTH_DEFAULTS 生效值）`);
   }
 
-  // --- C) 路由 body 上限：文档里的 4 KB / 2 KB ↔ routes/http.ts ---
+  // --- C) 路由 body 上限：文档里的 4 KB ↔ routes/http.ts ---
   const httpSrc = readSrc("src/host/routes/http.ts");
   const ACC = constNumber(httpSrc, "MAX_ACCOUNT_BODY_BYTES");
-  const RAC = constNumber(httpSrc, "MAX_RACCOON_BODY_BYTES");
-  if (!ACC || !RAC || ACC % 1024 || RAC % 1024) {
-    bad("docs.test.mjs 检查 17：routes/http.ts 里取不到 KB 整数倍的 MAX_ACCOUNT_BODY_BYTES / MAX_RACCOON_BODY_BYTES——文档用 KB 表述，常量改动时必须同步这里");
+  if (!ACC || ACC % 1024) {
+    bad("docs.test.mjs 检查 17：routes/http.ts 里取不到 KB 整数倍的 MAX_ACCOUNT_BODY_BYTES——文档用 KB 表述，常量改动时必须同步这里");
   } else {
     // 每条 = 定位行（必须唯一命中，否则锚点失效）+ 该行里取数的正则 + 期望 KB + 人事描述。
     const BODY = [
       ["docs/API.md", /Token Plan 路由的请求体上限/, /请求体上限 \*\*(\d+) KB\*\*/, ACC / 1024, "Token Plan 路由 body 上限"],
-      ["docs/API.md", /第 7 节）的 POST 上限/, /自己的 \*\*(\d+) KB\*\*/, RAC / 1024, "小浣熊 POST body 上限"],
       ["docs/API.md", /JSON 数组、超/, /超 (\d+) KB/, ACC / 1024, "account 非法 body 分支的阈值"],
-      ["docs/API.md", /按 body 的 `action` 分发/, /请求体上限 \*\*(\d+) KB\*\*/, RAC / 1024, "小浣熊路由 body 上限"],
       ["docs/DSH-PLUGIN.md", /POST 校验 body ≤/, /≤ (\d+)KB/, ACC / 1024, "DSH-PLUGIN 里的 account body 上限"]
     ];
     let hit = 0;
@@ -964,7 +961,7 @@ const FROZEN_DOCS = new Set(["ROADMAP.md", "QODER-GAP.md", "TOKEN-STORE-SPLIT.md
       hit++;
       if (Number(m[1]) !== want) bad(`${file}:${at[0] + 1} ${label} 写的是 ${m[1]} KB，而 routes/http.ts 的常量 = ${want * 1024} 字节（${want} KB）`);
     }
-    note(`路由 body 上限副本：${hit}/${BODY.length} 处定位成功并等于源码常量（${ACC / 1024} KB / ${RAC / 1024} KB）`);
+    note(`路由 body 上限副本：${hit}/${BODY.length} 处定位成功并等于源码常量（${ACC / 1024} KB）`);
   }
 
   // --- D) client 面板的回退字面量 ↔ CONFIG_DEFAULTS ---
