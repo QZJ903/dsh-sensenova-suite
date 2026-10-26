@@ -136,13 +136,19 @@
         #
         # Precedence: this map > the catalog's `max_output_length` >
         # undeclared (the harness then applies its own `defaultMaxTokens ??
-        # 32768`, so declaring nothing is NOT "no ceiling"). `{}` keeps the
-        # platform authoritative. The panel's「最大输出」badge quotes the SAME
-        # resolution, so the number you read is the number the request sends.
+        # 32768`, so declaring nothing is NOT "no ceiling"). Defaults pin the
+        # DOCUMENTED ceilings where the fetched catalogue understates a model
+        # (sensenova-docs-full.md, 2026-10-26): deepseek-flash max_tokens
+        # [1, 393216]，kimi-k3 max_completion_tokens 默认 128K。目录探测比文档
+        # 滞后（探测返回 65536），以文档为准。The panel's「最大输出」badge quotes
+        # the SAME resolution, so the number you read is the number the request
+        # sends.
         # Applies to the directly-registered provider only; the Raccoon hosted
         # route builds its own descriptors.
-        # maxTokensOverrides: { "deepseek-v4-flash": 131072 }
-        maxTokensOverrides: {}
+        # 覆盖示例：maxTokensOverrides: { "deepseek-v4-flash": 131072 }
+        maxTokensOverrides:
+          deepseek-flash: 393216
+          kimi-k3: 131072
         # ------------------------------------------------------------------
         # the Host exposes a tools service, the agent gains a
         # `sensenova_draw_image` tool that POSTs to

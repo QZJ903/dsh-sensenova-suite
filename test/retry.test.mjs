@@ -313,13 +313,12 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       byId.m2.maxOutputLength === 0, String(byId.m2.maxOutputLength));
     // The selectable ladder the row quotes must be EXACTLY what pi-ai's
     // getSupportedThinkingLevels computes over our map (null drops) — the
-    // DSH selector's effort list source. Since the 2026-10-24 probe (12 levels
-    // all 200) the ladder is full for EVERY chat model: off/none + low + medium
-    // + high + max; xhigh and minimal are excluded by user decision.
-    check("the row projects the full thinking ladder (xhigh/minimal excluded)",
+    // DSH selector's effort list source. 2026-10-26: 只含 off/low/medium/high/max
+    // （xhigh/minimal 彻底移除）。
+    check("the row projects the full thinking ladder (xhigh/minimal removed)",
       JSON.stringify(byId.m1.thinkingLevels) === JSON.stringify(["off", "low", "medium", "high", "max"]),
       JSON.stringify(byId.m1.thinkingLevels));
-    check("every model offers the same full ladder (probe table retired)",
+    check("every model offers the same full ladder (2026-10-26)",
       supportedThinkingLevels({ id: "glm-5.2" }).join(",") === "off,low,medium,high,max" &&
       supportedThinkingLevels({ id: "deepseek-v4-flash" }).join(",") === "off,low,medium,high,max" &&
       supportedThinkingLevels({ id: "anything-else" }).join(",") === "off,low,medium,high,max",

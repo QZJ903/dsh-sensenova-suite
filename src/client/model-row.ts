@@ -50,9 +50,12 @@ import { S } from "./styles.ts";
  *   draws no line rather than an empty one.
  * @param {(id: string) => void} [props.onToggle] - absent (render suite), the
  *   checkbox is display-only.
+ * @param {unknown} [props.children] - optional content below the parameter
+ *   line; the row itself stays a bare two-line block unless a caller has
+ *   something extra to say (the thinking dropdown panel).
  * @returns {unknown} the `<li>` for this row.
  */
-export function ModelRow({ id, label, on, busy, rateText, rateTitle, badges, meta, onToggle }: {
+export function ModelRow({ id, label, on, busy, rateText, rateTitle, badges, meta, onToggle, children }: {
   id: string;
   label: string;
   on: boolean;
@@ -62,6 +65,7 @@ export function ModelRow({ id, label, on, busy, rateText, rateTitle, badges, met
   badges?: unknown[];
   meta?: string | null;
   onToggle?: (id: string) => void;
+  children?: unknown;
 }): unknown {
   const badgeList = Array.isArray(badges) ? badges.filter((badge) => badge !== null && badge !== undefined) : [];
   // No explicit spacer before the badges: `modelRowHead` is a flex row and the
@@ -111,6 +115,7 @@ export function ModelRow({ id, label, on, busy, rateText, rateTitle, badges, met
     // from "we do not know".
     meta === null || meta === undefined || meta === ""
       ? null
-      : h("div", { style: S.modelMeta }, meta)
+      : h("div", { style: S.modelMeta }, meta),
+    children
   );
 }

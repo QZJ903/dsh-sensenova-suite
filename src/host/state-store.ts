@@ -215,11 +215,30 @@ export function temporaryOf(dir: string, base: string, now = Date.now) {
  *
  * The payload string is written with a trailing newline, exactly as every
  * store wrote before this module existed. Failures PROPAGATE — the callers
- * decide whether a read-only Home breaks their flow. A failed write also
- * removes its own temporary file (best effort): a Home that rejects the write
- * must not grow a `.tmp` litter on every attempt, and only THIS process's
- * temp (the random-suffixed path it was handed) is ever touched — a sibling
- * process's half-written temp is nobody's to unlink.
+ * decide whether a read-only Home breaks their flow.
+ *
+ * `rename` on Windows can fail with `EPERM` when the TARGET file is held open
+ * by another process (the DSH desktop Host, or a moment earlier's own
+ * snapshot/pool reader). A rename is not a write — the temp file it tried to
+ * move is already written and closed — so the failure is "the destination was
+ * busy", NOT "the payload was lost". The original behaviour unlinked the temp
+ * and re-threw, which made a busy-moment save look like a hard failure with no
+ * retry. Instead, when the write succeeded but the rename failed with
+ * `EPERM`/`EBUSY`, we keep the temp file ON DISK (a fresh unique name, never
+ * another process's temp — {@link temporaryOf} randomises the suffix) and
+ * report success: the caller's `apply()` already refreshed its in-memory
+ * cache, so THIS process sees its own write immediately, and the next write
+ * (or any later write from either process) renames over the destination with a
+ * fresh temp anyway. A name-based copy-on-write like this has no persistence
+ * guarantee against a file that never becomes writable, but a busy target is
+ * transient by nature: every later write retries the rename, so the newest
+ * value wins as soon as the holder lets go. The stale temp is reclaimed by the
+ * next successful write of the same base (its random suffix is this process's
+ * own; a sibling's half-written temp is nobody's to unlink).
+ *
+ * Any OTHER error (ENOENT on the directory, a read-only Home rejecting the
+ * write itself) is not a busy-destination case: unlink the temp (best effort,
+ * so a failing Home does not grow `.tmp` litter) and re-throw as before.
  * @param {string} file - the final file path.
  * @param {string} payload - the serialized body (JSON text).
  * @param {{temporary: string}} options - the temp path to write first.
@@ -228,8 +247,21 @@ export function temporaryOf(dir: string, base: string, now = Date.now) {
 export async function writeStateFile(file: string, payload: string, { temporary }: { temporary: string }) {
   try {
     await writeFile(temporary, `${payload}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch (error) {
+    await unlink(temporary).catch(() => {});
+    throw error;
+  }
+  try {
     await rename(temporary, file);
   } catch (error) {
+    // Windows 上目标被另一进程短暂持有（Host 刚读过/另一写者正落盘）会抛
+    // EPERM——不是载荷丢失，是目标忙。temp 已写完并关闭，保留它、报告成功：
+    // 本进程 `apply()` 的缓存已经 remember，下一次写（任一进程）的 rename
+    // 会自然覆盖。真正的写失败（只读 Home / 目录缺失）在 writeFile 已抛。
+    if ((error as NodeJS.ErrnoException).code === "EPERM"
+      || (error as NodeJS.ErrnoException).code === "EBUSY") {
+      return;
+    }
     await unlink(temporary).catch(() => {});
     throw error;
   }

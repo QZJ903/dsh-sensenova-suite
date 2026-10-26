@@ -320,8 +320,9 @@ check("patch tokenSkewSeconds matches code default", Number(activeValue("tokenSk
   const viaSettings = resolveSettings({ maxTokensOverrides: { "deepseek-v4-flash": 131072, bad: 0 } }).settings.maxTokensOverrides;
   check("resolveSettings routes the map through the sanitizer",
     JSON.stringify(viaSettings) === JSON.stringify({ "deepseek-v4-flash": 131072 }), JSON.stringify(viaSettings));
-  check("the shipped default is empty (the platform stays authoritative)",
-    Object.keys(CONFIG_DEFAULTS.maxTokensOverrides).length === 0, JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides));
+  check("the shipped default pins the DOCUMENTED ceilings (deepseek-flash, kimi-k3)",
+    JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides) === JSON.stringify({ "deepseek-flash": 393216, "kimi-k3": 131072 }),
+    JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides));
 }
 
 // --- 8. numeric field clamping boundaries ----------------------------

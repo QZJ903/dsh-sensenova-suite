@@ -474,8 +474,8 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
     richText.includes("1M 上下文") && !richText.includes("1049k"), richText);
   check("the platform-declared output ceiling lands in the parameter line",
     richText.includes("最大输出 64K"), richText);
-  check("the row quotes THIS model's selectable levels, localized like the picker",
-    richText.includes("思考 关闭/低/中/高/极高"), richText);
+  check("the row no longer quotes a thinking meta line (it moved into the dropdown panel)",
+    !richText.includes("思考 关闭") && !richText.includes(zh["llm.metaLevels"]), richText);
   check("the provider-wide default never repeats per row (it lives in the header)",
     !richText.includes("默认思考强度") && !richText.includes(zh["llm.rosterThinkingDefault"]), richText);
   check("the pseudo multiplier labels the row ×N", richText.includes("×10"), richText);
@@ -483,6 +483,57 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
     richText.includes(zh["llm.rosterExhausted"]), richText);
   check("a row without declared figures draws no parameter line",
     texts(allOn).every((line) => !line.includes("上下文")), texts(allOn).join("\n"));
+
+  // 思考档位化为「下拉（多选面板）」：点击 chip 展开该模型行的面板（六档复选
+  // + 右侧「可看图」+ 独立一行协议）。已勾选的档位以复选状态呈现；未展开则
+  // 面板与「可看图」都不出现在行内。列表只引用目录声明的元信息行的逆命题——这一举动。
+  {
+    const thinkingTree = treeOf(render.ModelRoster, {
+      models: rich, enabledIds: [], tt: ttZh,
+      thinkingById: { "deepseek-v4-flash": ["off", "medium"] },
+      onThinkingToggle: () => {},
+      visionIds: [], onVisionToggle: () => {},
+      openThinkingId: "deepseek-v4-flash", onThinkingOpen: () => {}
+    });
+    const thinkingTexts = texts(thinkingTree).join("\n");
+    const levelBoxes = findAll(thinkingTree, (p) => p.type === "checkbox")
+      .filter((el) => (el.props["aria-label"] ?? "").includes("档位"));
+    check("opening the thinking panel shows its title and the five labelled choices",
+      thinkingTexts.includes(zh["llm.rosterThinking"])
+        && ["关闭", "低", "中", "高", "最高"].every((word) => thinkingTexts.includes(word))
+        && !thinkingTexts.includes("极高"),
+      thinkingTexts);
+    check("the thinking panel quotes only the user's ticked levels as checked",
+      JSON.stringify(levelBoxes.map((el) => el.props.checked)) === JSON.stringify([true, false, true, false, false]),
+      JSON.stringify(levelBoxes.map((el) => [el.props["aria-label"], el.props.checked])));
+    check("the vision checkbox sits ON the thinking row, right-aligned",
+      (() => {
+        const lines = texts(thinkingTree);
+        const v = lines.lastIndexOf(zh["llm.rosterVision"]);
+        const t = lines.lastIndexOf(zh["llm.rosterThinking"]);
+        // 视觉应出现在面板弹出后（在标题行之后），且含「识图」的 checkbox 用了 marginLeft:auto 右对齐
+        const visionLabel = findAll(thinkingTree, (p) => p.type === "label")
+          .find((el) => texts(el).some((l) => l === zh["llm.rosterVision"]));
+        return v !== -1 && t !== -1 && v > t
+          && visionLabel?.props?.style?.marginLeft === "auto";
+      })(), texts(thinkingTree).join("\n"));
+    check("the protocol control lives INSIDE the open panel on its own line",
+      (() => {
+        const anyProtocol = findAll(thinkingTree, (p) => p.type === "select" && (p.props["aria-label"] ?? "").includes("协议"));
+        return anyProtocol.length === 1;
+      })(), texts(thinkingTree).join("\n"));
+    const unopened = treeOf(render.ModelRoster, {
+      models: rich, enabledIds: [], tt: ttZh,
+      thinkingById: { "deepseek-v4-flash": ["off"] },
+      onThinkingToggle: () => {},
+      visionIds: ["deepseek-v4-flash"], onVisionToggle: () => {},
+      onThinkingOpen: () => {}
+    });
+    check("a closed thinking panel draws no row-body controls for it",
+      texts(unopened).filter((line) => line === zh["llm.rosterVision"]).length === 0
+        && texts(unopened).filter((line) => line === zh["llm.rosterThinking"]).length === 0,
+      texts(unopened).join("\n"));
+  }
   const tokenSize = surface.helpers.tokenSize;
   check("tokenSize keeps decimal and binary figures at home",
     tokenSize(1048576) === "1M" && tokenSize(262144) === "256K" &&

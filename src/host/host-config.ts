@@ -100,15 +100,19 @@ export const CONFIG_DEFAULTS = Object.freeze({
    * that reverts is worse than one that was never raised.
    *
    * Precedence: this map > the catalogue's `max_output_length` > undeclared
-   * (the harness then applies `defaultMaxTokens ?? 32768`). Empty by default,
-   * so the platform stays authoritative until the operator says otherwise.
+   * (the harness then applies `defaultMaxTokens ?? 32768`). Defaults pin the
+   * DOCUMENTED ceilings where the fetched catalogue understates a model
+   * (sensenova-docs-full.md, 2026-10-26): `deepseek-flash` max_tokens
+   * [1, 393216]，`kimi-k3` max_completion_tokens 默认 128K。目录探测比文档
+   * 滞后（探测返回 65536），以文档为准。
    * Read by `llm-models.maxTokensFor`, which BOTH the descriptor build and the
    * panel roster call — the value sent and the value displayed are one order.
    * Scope: the DIRECTLY-REGISTERED provider (`registerProvider`) and the panel
    * roster that mirrors it. The Raccoon hosted route builds its descriptors in
    * `the removed module` and is deliberately unaffected.
    */
-  maxTokensOverrides: {},
+  // 单行值：docs.test 按行解析 CONFIG_DEFAULTS，多行对象会让它 JSON.parse 失败。
+  maxTokensOverrides: { "deepseek-flash": 393216, "kimi-k3": 131072 },
   /**
    * Background freshness for the registered provider (2026-10 review #1b).
    * The panel polls only while it is open, but a registered provider is a

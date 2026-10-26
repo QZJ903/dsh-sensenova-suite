@@ -132,7 +132,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.switchBusy": "切换中…",
 			"llm.switchError": "切换失败：{error}",
 			"llm.roster": "推送到 DSH 的模型",
-			"llm.rosterHint": "勾选决定哪些模型推送进 DSH 模型列表；目录新增的模型默认不推送。",
+			"llm.rosterHint": "勾选 / 选择只改本地草稿：需要按「保存」才会推到 DSH；「撤销」回到上次保存值。目录新增的模型默认不推送。",
 			"llm.rosterEmpty": "还没有可推送的模型——先在「API Key」卡片保存一次 Key 再回来。",
 			"llm.rosterSearchPlaceholder": "搜索模型名或 ID",
 			"llm.rosterCount": "已勾选 {selected} / 共 {total}",
@@ -146,11 +146,11 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterError": "保存失败：{error}",
 			"llm.rosterNoMatch": "没有匹配的模型。",
 			"llm.rosterVision": "可看图",
-			"llm.rosterThinking": "思考档位",
+			"llm.rosterThinking": "模型设置",
+			"llm.rosterThinkingLevels": "思考档位",
 			"llm.rosterExhausted": "额度耗尽",
 			"llm.rosterRateTitle": "积分消耗伪倍率（自定义对比用，非官方）",
 			"llm.metaOutput": "最大输出 {out}",
-			"llm.metaLevels": "思考 {levels}",
 			"llm.rosterThinkingDefault": "思考强度默认 {level}",
 			"llm.level.off": "关闭",
 			"llm.level.minimal": "微量",
@@ -302,7 +302,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.switchBusy": "Switching…",
 			"llm.switchError": "Switch failed: {error}",
 			"llm.roster": "Models pushed to DSH",
-			"llm.rosterHint": "Ticking decides which models are pushed into DSH's model list; models the catalogue gains later are not pushed by default.",
+			"llm.rosterHint": "Ticking or picking edits a local draft only: nothing reaches DSH until you hit Save; Discard returns to the last saved values. Models the catalogue gains later are not pushed by default.",
 			"llm.rosterEmpty": "No models to push yet — save a key in the API key card first.",
 			"llm.rosterSearchPlaceholder": "Search a model name or id",
 			"llm.rosterCount": "{selected} ticked / {total} total",
@@ -316,11 +316,11 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterError": "Save failed: {error}",
 			"llm.rosterNoMatch": "No model matches.",
 			"llm.rosterVision": "vision",
-			"llm.rosterThinking": "thinking",
+			"llm.rosterThinking": "model settings",
+			"llm.rosterThinkingLevels": "thinking levels",
 			"llm.rosterExhausted": "quota exhausted",
 			"llm.rosterRateTitle": "Pseudo credit multiplier (custom comparison aid, not official)",
 			"llm.metaOutput": "max output {out}",
-			"llm.metaLevels": "thinking {levels}",
 			"llm.rosterThinkingDefault": "thinking default {level}",
 			"llm.level.off": "off",
 			"llm.level.minimal": "minimal",
@@ -1702,9 +1702,12 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	*   draws no line rather than an empty one.
 	* @param {(id: string) => void} [props.onToggle] - absent (render suite), the
 	*   checkbox is display-only.
+	* @param {unknown} [props.children] - optional content below the parameter
+	*   line; the row itself stays a bare two-line block unless a caller has
+	*   something extra to say (the thinking dropdown panel).
 	* @returns {unknown} the `<li>` for this row.
 	*/
-	function ModelRow({ id, label, on, busy, rateText, rateTitle, badges, meta, onToggle }) {
+	function ModelRow({ id, label, on, busy, rateText, rateTitle, badges, meta, onToggle, children }) {
 		const badgeList = Array.isArray(badges) ? badges.filter((badge) => badge !== null && badge !== void 0) : [];
 		return h("li", { style: {
 			...S.modelRow,
@@ -1728,7 +1731,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		}, label), rateText === null || rateText === void 0 ? null : h("span", {
 			style: S.modelRate,
 			title: rateTitle
-		}, rateText)), ...badgeList), meta === null || meta === void 0 || meta === "" ? null : h("div", { style: S.modelMeta }, meta));
+		}, rateText)), ...badgeList), meta === null || meta === void 0 || meta === "" ? null : h("div", { style: S.modelMeta }, meta), children);
 	}
 	var init_model_row = __esmMin((() => {
 		init_runtime();
@@ -1830,7 +1833,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* only") earns no badge, and a figure the catalogue does not declare draws no
 	* segment - the list quotes facts, never guesses.
 	*/
-	function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle }) {
+	function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }) {
 		const list = Array.isArray(models) ? models : [];
 		const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
 		const THINKING_CHOICES = [
@@ -1838,7 +1841,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"low",
 			"medium",
 			"high",
-			"xhigh",
 			"max"
 		];
 		return h("ul", {
@@ -1848,11 +1850,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			const id = String(model?.id ?? "");
 			const label = String(model?.name ?? id);
 			const on = modelIsOn(enabledIds, id);
-			const meta = [
-				typeof model?.contextWindow === "number" && model.contextWindow > 0 ? format(tt("llm.contextBadge"), { ctx: tokenSize(model.contextWindow) }) : null,
-				typeof model?.maxOutputLength === "number" && model.maxOutputLength > 0 ? format(tt("llm.metaOutput"), { out: tokenSize(model.maxOutputLength) }) : null,
-				Array.isArray(model?.thinkingLevels) && model.thinkingLevels.length > 0 ? format(tt("llm.metaLevels"), { levels: model.thinkingLevels.map((level) => tt(dictKey("llm.level", level))).join("/") }) : null
-			].filter(Boolean).join(" · ");
+			const meta = [typeof model?.contextWindow === "number" && model.contextWindow > 0 ? format(tt("llm.contextBadge"), { ctx: tokenSize(model.contextWindow) }) : null, typeof model?.maxOutputLength === "number" && model.maxOutputLength > 0 ? format(tt("llm.metaOutput"), { out: tokenSize(model.maxOutputLength) }) : null].filter(Boolean).join(" · ");
 			const rate = typeof model?.multiplier === "number" ? model.multiplier : null;
 			const visionOn = visionSet !== null && visionSet.has(id);
 			return h(ModelRow, {
@@ -1863,86 +1861,119 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				busy,
 				rateText: rate === null ? null : `×${rate}`,
 				rateTitle: tt("llm.rosterRateTitle"),
-				badges: [
-					model?.quotaExhausted === true ? h("span", {
-						key: "exhausted",
-						style: {
-							...S.modelBadge,
-							color: "var(--dsw-alias-state-error-primary)"
-						}
-					}, tt("llm.rosterExhausted")) : null,
-					visionSet !== null ? h("label", {
-						key: "vision",
+				badges: [model?.quotaExhausted === true ? h("span", {
+					key: "exhausted",
+					style: {
+						...S.modelBadge,
+						color: "var(--dsw-alias-state-error-primary)"
+					}
+				}, tt("llm.rosterExhausted")) : null, onThinkingOpen !== void 0 && onThinkingToggle !== void 0 ? h("button", {
+					key: "thinking",
+					type: "button",
+					style: {
+						...S.modelBadge,
+						cursor: busy ? "default" : "pointer",
+						border: "none",
+						fontFamily: "inherit",
+						marginLeft: 8
+					},
+					disabled: busy === true,
+					"aria-expanded": openThinkingId === id,
+					title: tt("llm.rosterThinking"),
+					onClick: () => onThinkingOpen(openThinkingId === id ? null : id)
+				}, tt("llm.rosterThinking"), openThinkingId === id ? " ▾" : " ▸") : null],
+				meta,
+				onToggle,
+				children: openThinkingId === id ? h("div", {
+					key: "thinking-panel",
+					style: {
+						marginTop: 8,
+						padding: "8px 10px",
+						borderRadius: 8,
+						border: "1px solid var(--dsw-alias-border-l2)",
+						background: "var(--dsw-alias-bg-layer-2)",
+						display: "flex",
+						flexDirection: "column",
+						gap: 6
+					}
+				}, h("div", { style: {
+					fontSize: 11,
+					fontWeight: 600,
+					color: "var(--dsw-alias-label-secondary)"
+				} }, tt("llm.rosterThinking")), h("div", { style: {
+					display: "flex",
+					flexWrap: "wrap",
+					gap: "2px 10px",
+					alignItems: "center",
+					justifyContent: "space-between"
+				} }, h("span", { style: {
+					display: "flex",
+					flexWrap: "wrap",
+					gap: "2px 10px",
+					alignItems: "center"
+				} }, h("span", { style: {
+					fontSize: 12,
+					color: "var(--dsw-alias-label-secondary)"
+				} }, tt("llm.rosterThinkingLevels") + "："), ...THINKING_CHOICES.map((level) => {
+					const picking = Array.isArray(thinkingById?.[id]) && thinkingById[id].includes(level);
+					return h("label", {
+						key: level,
 						style: {
 							display: "inline-flex",
 							gap: 4,
 							alignItems: "center",
 							cursor: busy ? "default" : "pointer",
-							marginLeft: 8,
-							fontSize: 11,
-							color: "var(--dsw-alias-label-secondary)"
+							fontSize: 12
 						}
 					}, h("input", {
 						type: "checkbox",
-						checked: visionOn,
+						checked: picking,
 						disabled: busy === true,
 						style: S.modelCheck,
-						"aria-label": `${label} 识图`,
-						onChange: onVisionToggle ? () => onVisionToggle(id, !visionOn) : void 0
-					}), tt("llm.rosterVision")) : null,
-					onThinkingToggle !== void 0 ? h("span", {
-						key: "thinking",
-						style: {
-							display: "inline-flex",
-							gap: 2,
-							alignItems: "center",
-							marginLeft: 8,
-							fontSize: 11,
-							color: "var(--dsw-alias-label-secondary)"
-						},
-						title: tt("llm.rosterThinking")
-					}, tt("llm.rosterThinking"), ...THINKING_CHOICES.map((level) => {
-						const picking = Array.isArray(thinkingById?.[id]) && thinkingById[id].includes(level);
-						return h("label", {
-							key: level,
-							style: {
-								display: "inline-flex",
-								gap: 1,
-								alignItems: "center",
-								cursor: busy ? "default" : "pointer",
-								marginLeft: 2,
-								fontSize: 11
-							}
-						}, h("input", {
-							type: "checkbox",
-							checked: picking,
-							disabled: busy === true,
-							style: {
-								...S.modelCheck,
-								width: 11,
-								height: 11
-							},
-							"aria-label": `${label} 思考档位 ${level}`,
-							onChange: () => onThinkingToggle(id, level, !picking)
-						}), tt(dictKey("llm.level", level)));
-					})) : null,
-					onProtocolChange !== void 0 ? h("select", {
-						key: "protocol",
-						style: {
-							...S.modelBadge,
-							cursor: "pointer"
-						},
-						value: String(modelProtocols?.[id] ?? "auto"),
-						disabled: busy === true,
-						"aria-label": tt("llm.protocol"),
-						onChange: (event) => onProtocolChange(id, event.target.value)
-					}, PROTOCOLS.map((option) => h("option", {
-						key: option,
-						value: option
-					}, option === "auto" ? tt("llm.protocolAuto") : option))) : null
-				],
-				meta,
-				onToggle
+						"aria-label": `${label} 档位 ${level}`,
+						onChange: () => {
+							if (onThinkingToggle) onThinkingToggle(id, level, !picking);
+						}
+					}), tt(dictKey("llm.level", level)));
+				})), visionSet !== null ? h("label", { style: {
+					display: "inline-flex",
+					gap: 4,
+					alignItems: "center",
+					cursor: busy ? "default" : "pointer",
+					fontSize: 12,
+					marginLeft: "auto"
+				} }, h("input", {
+					type: "checkbox",
+					checked: visionOn,
+					disabled: busy === true,
+					style: S.modelCheck,
+					"aria-label": `${label} 识图`,
+					onChange: onVisionToggle ? () => onVisionToggle(id, !visionOn) : void 0
+				}), tt("llm.rosterVision")) : null), h("div", { style: {
+					borderTop: "1px solid var(--dsw-alias-border-l1)",
+					margin: "2px 0"
+				} }), onProtocolChange !== void 0 ? h("label", { style: {
+					display: "flex",
+					gap: 8,
+					alignItems: "center",
+					fontSize: 12,
+					cursor: busy ? "default" : "pointer"
+				} }, h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, tt("llm.protocol")), h("select", {
+					style: {
+						...S.input,
+						width: "auto",
+						height: 26,
+						fontSize: 12,
+						padding: "0 6px"
+					},
+					value: String(modelProtocols?.[id] ?? "auto"),
+					disabled: busy === true,
+					"aria-label": `${label} 协议`,
+					onChange: (event) => onProtocolChange(id, event.target.value)
+				}, PROTOCOLS.map((option) => h("option", {
+					key: option,
+					value: option
+				}, option === "auto" ? tt("llm.protocolAuto") : option)))) : null) : null
 			});
 		}));
 	}
@@ -1965,36 +1996,77 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		const hostIds = Array.isArray(llm?.enabledModelIds) ? llm.enabledModelIds : NO_IDS;
 		const visionHost = Array.isArray(pool?.settings?.vision?.visionModels) ? pool.settings.vision.visionModels : [];
 		const [ids, setIds] = useState(() => hostIds.slice());
-		const [visionIds, setVisionIds] = useState(() => visionHost.slice());
 		const thinkingHost = typeof pool?.settings?.thinking === "object" && pool.settings.thinking !== null ? pool.settings.thinking : {};
-		const [thinkingById, setThinkingById] = useState(() => {
-			const out = {};
-			for (const [k, v] of Object.entries(thinkingHost)) if (Array.isArray(v)) out[k] = v;
-			return out;
-		});
 		const [busy, setBusy] = useState(false);
 		const [query, setQuery] = useState("");
-		const [savedKey, setSavedKey] = useState(null);
+		const [justSaved, setJustSaved] = useState(false);
 		const [notice, setNotice] = useState(null);
+		const [openThinkingId, setOpenThinkingId] = useState(null);
+		const [draftProtocols, setDraftProtocols] = useState({});
+		const [draftThinking, setDraftThinking] = useState({});
+		const [draftVision, setDraftVision] = useState({});
 		const touchedRef = useRef(false);
 		const hostKey = useMemo(() => JSON.stringify(hostIds), [hostIds]);
 		const dirty = useMemo(() => JSON.stringify(ids), [ids]) !== hostKey;
-		const justSaved = savedKey !== null && savedKey === hostKey;
+		const effectiveProtocols = {
+			...hostProtocols,
+			...draftProtocols
+		};
+		const effectiveThinking = {
+			...thinkingHost,
+			...draftThinking
+		};
+		const effectiveVision = (() => {
+			const out = new Set(visionHost);
+			for (const [id, on] of Object.entries(draftVision)) if (on) out.add(id);
+			else out.delete(id);
+			return [...out];
+		})();
+		const protocolsDirty = JSON.stringify(effectiveProtocols) !== JSON.stringify(hostProtocols);
+		const thinkingDirty = JSON.stringify(effectiveThinking) !== JSON.stringify(thinkingHost);
+		const visionDirty = JSON.stringify(effectiveVision.sort()) !== JSON.stringify([...visionHost].sort());
+		const anyDirty = dirty || protocolsDirty || thinkingDirty || visionDirty;
 		useEffect(() => {
 			if (!touchedRef.current) setIds(hostIds);
 		}, [hostKey]);
 		useEffect(() => {
-			if (dirty === true) setSavedKey(null);
+			if (dirty === true) setJustSaved(false);
 		}, [dirty]);
 		const save = useCallback(async () => {
 			if (busy) return;
 			setBusy(true);
 			setNotice(null);
-			const posted = JSON.stringify(ids);
 			try {
-				await postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids });
-				touchedRef.current = false;
-				setSavedKey(posted);
+				const visionNext = [.../* @__PURE__ */ new Set([...visionHost.filter((id) => !(id in draftVision)), ...Object.keys(draftVision).filter((id) => draftVision[id] === true)])];
+				const thinkingNext = Object.fromEntries(Object.entries({
+					...thinkingHost,
+					...draftThinking
+				}).filter(([, levels]) => Array.isArray(levels) && levels.length > 0));
+				const protocolsNext = {
+					...hostProtocols,
+					...draftProtocols
+				};
+				const posts = [];
+				if (dirty) posts.push(postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids }).then(() => {
+					touchedRef.current = false;
+				}));
+				if (visionDirty) posts.push(postJsonOrThrow(POOL_PATH, {
+					section: "vision",
+					values: { visionModels: visionNext }
+				}).then(() => {
+					setDraftVision({});
+				}));
+				if (thinkingDirty) posts.push(postJsonOrThrow(POOL_PATH, {
+					section: "thinking",
+					values: thinkingNext
+				}).then(() => {
+					setDraftThinking({});
+				}));
+				if (protocolsDirty) posts.push(postJsonOrThrow(MODELS_PATH, { modelProtocols: protocolsNext }).then(() => {
+					setDraftProtocols({});
+				}));
+				await Promise.all(posts);
+				setJustSaved(true);
 				onDone?.();
 			} catch (error) {
 				setNotice(format(tt("llm.rosterError"), { error: errorText(error) }));
@@ -2004,6 +2076,15 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		}, [
 			busy,
 			ids,
+			dirty,
+			visionDirty,
+			thinkingDirty,
+			protocolsDirty,
+			visionHost,
+			hostProtocols,
+			draftVision,
+			draftThinking,
+			thinkingHost,
 			onDone,
 			tt
 		]);
@@ -2064,46 +2145,54 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			enabledIds: ids,
 			busy,
 			tt,
-			modelProtocols: hostProtocols,
+			openThinkingId,
+			onThinkingOpen: (id) => setOpenThinkingId(id),
+			modelProtocols: {
+				...hostProtocols,
+				...draftProtocols
+			},
 			onProtocolChange: (id, protocol) => {
-				postJsonOrThrow(MODELS_PATH, { modelProtocols: {
-					...hostProtocols,
+				setDraftProtocols((current) => ({
+					...current,
 					[id]: protocol
-				} }).then(() => onDone?.()).catch(() => void 0);
+				}));
+				setNotice(null);
 			},
 			onToggle: (id) => {
 				touchedRef.current = true;
 				setIds(toggleModelIn(ids, models.map((model) => String(model?.id ?? "")), id));
 				setNotice(null);
 			},
-			visionIds,
+			visionIds: (() => {
+				const out = new Set(visionHost);
+				for (const [id, on] of Object.entries(draftVision)) if (on) out.add(id);
+				else out.delete(id);
+				return [...out];
+			})(),
 			onVisionToggle: (id, on) => {
-				setVisionIds((current) => {
-					const next = on ? [...current, id] : current.filter((vid) => vid !== id);
-					postJsonOrThrow(POOL_PATH, {
-						section: "vision",
-						values: { visionModels: next }
-					}).then(() => onDone?.()).catch(() => void 0);
-					return next;
-				});
+				setDraftVision((current) => ({
+					...current,
+					[id]: on
+				}));
+				setNotice(null);
 			},
-			thinkingById,
+			thinkingById: (() => {
+				const out = { ...thinkingHost };
+				for (const [id, levels] of Object.entries(draftThinking)) out[id] = levels;
+				return out;
+			})(),
 			onThinkingToggle: (id, level, onValue) => {
-				setThinkingById((current) => {
-					const list = Array.isArray(current[id]) ? current[id] : [];
+				setDraftThinking((current) => {
+					const list = (current[id] ?? thinkingHost[id] ?? []).slice();
 					const next = onValue ? list.includes(level) ? list : [...list, level] : list.filter((l) => l !== level);
-					const values = {
+					return {
 						...current,
 						[id]: next
 					};
-					postJsonOrThrow(POOL_PATH, {
-						section: "thinking",
-						values: { [id]: next }
-					}).then(() => onDone?.()).catch(() => void 0);
-					return values;
 				});
+				setNotice(null);
 			}
-		})), dirty ? h("div", { style: S.rosterFoot }, h("button", {
+		})), anyDirty ? h("div", { style: S.rosterFoot }, h("button", {
 			type: "button",
 			style: S.primary,
 			disabled: busy === true,
@@ -2115,6 +2204,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			onClick: () => {
 				touchedRef.current = false;
 				setIds(hostIds);
+				setDraftProtocols({});
+				setDraftThinking({});
+				setDraftVision({});
 				setNotice(null);
 			}
 		}, tt("llm.rosterDiscard")), h("span", { style: {
@@ -3892,7 +3984,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-10-24T17:05";
+		const CLIENT_BUILD = "2026-10-27T00:20";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			console.info(`[dsh-sensenova-suite] client build ${CLIENT_BUILD}`);

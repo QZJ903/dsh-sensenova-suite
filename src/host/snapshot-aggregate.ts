@@ -35,6 +35,15 @@ import { resolveSwitchEnabled, switchSource } from "./switch-precedence.ts";
 import type { SnapshotData } from "../shared/wire.ts";
 
 /**
+ * 官方图模 id 固定兜底：`sensenova-u1.5-fast` 是商汤 U1.5 加速版图模
+ * （见 docs/sensenova-api-reference/4、SenseNova U1.5 Fast.md），但当前
+ * `/v1/models` 探测清单不列它（目录只返回 u1.5-lite）。出图工具要能用
+ * fast，所以把它作为已知图模兜底进 `allModels`；目录将来探测到它时，
+ * `allModels` 的去重逻辑会跳过这段兜底（seen 已含）。
+ */
+const KNOWN_IMAGE_FAST = "sensenova-u1.5-fast";
+
+/**
  * The operator's pseudo multiplier that names one model id, or undefined.
  *
  * Matching is a case-insensitive SUBSTRING of the model id, first configured
@@ -463,6 +472,10 @@ export async function buildSnapshotBody({
     // 全目录行（含出图模型）：供多模态 tab 的出图/识图下拉自选。与 `models`
     // （对话清单，rosterWithAvailability 已划走图模）分开——图模不是对话
     // 模型，不该出现在推送清单里，但需要出现在工具的下拉里。
+    // 图模清单 = 探测结果（`output_modalities` 含 image 的行）∪ 固定兜底：
+    // `sensenova-u1.5-fast` 是官方图模（见 docs/sensenova-api-reference U1.5
+    // Fast），但不在 /v1/models 探测清单里——目录探测不到它，而工具要能用。
+    // 手动兜底让 fast 始终可选；目录将来若探测到它，seen 去重不会重复列。
     allModels: (() => {
       const rows = [];
       const seen = new Map();
@@ -477,6 +490,11 @@ export async function buildSnapshotBody({
         };
         if (seen.has(id)) rows[seen.get(id)] = row;
         else { seen.set(id, rows.length); rows.push(row); }
+      }
+      // 固定兜底：u1.5-fast（官方图模，探测目录没有，手动补进图模清单）。
+      if (!seen.has(KNOWN_IMAGE_FAST)) {
+        seen.set(KNOWN_IMAGE_FAST, rows.length);
+        rows.push({ id: KNOWN_IMAGE_FAST, name: KNOWN_IMAGE_FAST, vision: false, imageGen: true });
       }
       return rows;
     })(),

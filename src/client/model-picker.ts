@@ -47,7 +47,7 @@ const NO_IDS: string[] = [];
  * only") earns no badge, and a figure the catalogue does not declare draws no
  * segment - the list quotes facts, never guesses.
  */
-export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle }: {
+export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }: {
   models: ModelData[];
   enabledIds: unknown;
   busy: boolean | undefined;
@@ -56,18 +56,22 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
   /** 每模型协议覆盖（缺省 = auto）；面板"协议"列的数据源。 */
   modelProtocols?: Record<string, string>;
   onProtocolChange?: (id: string, protocol: string) => void;
-  /** 用户勾选的「可识图」模型 id 集合；缺省 = 空（不显示识图勾选）。 */
+  /** 用户勾选的「可识图」模型 id 集合（含草稿）；缺省 = 空（不显示识图勾选）。 */
   visionIds?: string[];
-  /** 勾选/取消某模型的识图能力（存 vision.visionModels）。 */
+  /** 勾选/取消某模型的识图能力（写本地草稿；保存时 POST vision.visionModels）。 */
   onVisionToggle?: (id: string, on: boolean) => void;
-  /** 每模型可用思考档位（{ modelId → level[] }；用户勾选）。 */
+  /** 每模型可用思考档位（{ modelId → level[] }；用户勾选，含草稿）。 */
   thinkingById?: Record<string, string[]>;
-  /** 切换某模型的一个思考档位（存 thinking 分区）。 */
+  /** 切换某模型的一个思考档位（写本地草稿；保存时 POST thinking 分区）。 */
   onThinkingToggle?: (id: string, level: string, on: boolean) => void;
+  /** 当前展开思考面板的模型 id（一次只开一个）；null = 全收起。 */
+  openThinkingId?: string | null;
+  /** 点击思考 chip 切换该模型的面板（id 或关闭）。 */
+  onThinkingOpen?: (id: string | null) => void;
 }): unknown {
   const list = Array.isArray(models) ? models : [];
   const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
-  const THINKING_CHOICES = ["off", "low", "medium", "high", "xhigh", "max"];
+  const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
   return h(
     "ul",
     { style: S.modelList, role: "list" },
@@ -81,15 +85,9 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
       const out = typeof model?.maxOutputLength === "number" && model.maxOutputLength > 0
         ? format(tt("llm.metaOutput"), { out: tokenSize(model.maxOutputLength) })
         : null;
-      // The selectable ladder, projected Host-side with pi-ai's own filter over
-      // the descriptor map - so this list IS what the DSH selector offers.
-      // Localized per level (关闭/低/中/高/极高/最高), joined compactly.
-      const levels = Array.isArray(model?.thinkingLevels) && model.thinkingLevels.length > 0
-        ? format(tt("llm.metaLevels"), {
-          levels: model.thinkingLevels.map((level) => tt(dictKey("llm.level", level))).join("/")
-        })
-        : null;
-      const meta = [ctx, out, levels].filter(Boolean).join(" · ");
+      // 思考档位的元信息行已被「下拉面板」取代（面板内列出勾选内容）；
+      // 参数行只保留目录声明的窗口/输出上限（见 §G4 的 pin）。
+      const meta = [ctx, out].filter(Boolean).join(" · ");
       const rate = typeof model?.multiplier === "number" ? model.multiplier : null;
       const visionOn = visionSet !== null && visionSet.has(id);
       return h(ModelRow, {
@@ -112,66 +110,107 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
           model?.quotaExhausted === true
             ? h("span", { key: "exhausted", style: { ...S.modelBadge, color: "var(--dsw-alias-state-error-primary)" } }, tt("llm.rosterExhausted"))
             : null,
-          // 识图勾选（思考档位旁，同列）：用户认定该模型可看图。勾选的进
-          // 图片转述下拉（vision.visionModels）。目录声明不再作数——用户说了算。
-          visionSet !== null
-            ? h("label", {
-                key: "vision",
-                style: { display: "inline-flex", gap: 4, alignItems: "center", cursor: busy ? "default" : "pointer", marginLeft: 8, fontSize: 11, color: "var(--dsw-alias-label-secondary)" },
-              },
-              h("input", {
-                type: "checkbox",
-                checked: visionOn,
-                disabled: busy === true,
-                style: S.modelCheck,
-                "aria-label": `${label} 识图`,
-                onChange: onVisionToggle
-                  ? () => onVisionToggle(id, !visionOn)
-                  : undefined
-              }),
-              tt("llm.rosterVision"))
-            : null,
-          // 思考档位（用户可配置该模型支持哪些档位）：小复选框簇，紧贴识图后。
-          // 勾选存 pool.json `thinking` 分区；DSH 对话界面的可选档位 = 此勾选集。
-          onThinkingToggle !== undefined
-            ? h("span", {
+          // 思考档位（用户可配置该模型支持哪些档位）：一个紧凑 chip，点击展开
+          // 多选面板（六档复选 + 底部「可看图」）。勾选存 pool.json `thinking`
+          // 分区；DSH 对话界面的可选档位 = 此勾选集。面板只开当前模型这一个。
+          onThinkingOpen !== undefined && onThinkingToggle !== undefined
+            ? h("button", {
                 key: "thinking",
-                style: { display: "inline-flex", gap: 2, alignItems: "center", marginLeft: 8, fontSize: 11, color: "var(--dsw-alias-label-secondary)" },
+                type: "button",
+                style: {
+                  ...S.modelBadge,
+                  cursor: busy ? "default" : "pointer",
+                  border: "none",
+                  fontFamily: "inherit",
+                  marginLeft: 8,
+                },
+                disabled: busy === true,
+                "aria-expanded": openThinkingId === id,
                 title: tt("llm.rosterThinking"),
+                onClick: () => onThinkingOpen(openThinkingId === id ? null : id)
               },
               tt("llm.rosterThinking"),
+              openThinkingId === id ? " ▾" : " ▸")
+            : null
+        ],
+        meta,
+        onToggle,
+        // 思考面板（展开时）：六档复选 + 右侧「可看图」+ 底部分隔线 + 协议行。
+        // 面板归属当前模型（row 内），收起则什么都不画。所有控件都只改草稿
+        // （保存按钮统一落库，2026-10-26 用户拍板）。
+        children: openThinkingId === id
+          ? h("div", {
+              key: "thinking-panel",
+              style: {
+                marginTop: 8,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid var(--dsw-alias-border-l2)",
+                background: "var(--dsw-alias-bg-layer-2)",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+              }
+            },
+            h("div", { style: { fontSize: 11, fontWeight: 600, color: "var(--dsw-alias-label-secondary)" } }, tt("llm.rosterThinking")),
+            // 档位复选 + 「可看图」同一行：档位在左、可看图右对齐（不与最高贴太近，
+            // 用户 2026-10-26 拍板：可看图提上来但靠右）。档位前缀「思考档位：」
+            // 让勾选内容自解释（后面只跟关闭/低/中/高…）。
+            h("div", {
+              style: { display: "flex", flexWrap: "wrap", gap: "2px 10px", alignItems: "center", justifyContent: "space-between" }
+            },
+            h("span", { style: { display: "flex", flexWrap: "wrap", gap: "2px 10px", alignItems: "center" } },
+              h("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" } }, tt("llm.rosterThinkingLevels") + "："),
               ...THINKING_CHOICES.map((level) => {
                 const picking = Array.isArray(thinkingById?.[id]) && (thinkingById[id] as string[]).includes(level);
                 return h("label", {
                   key: level,
-                  style: { display: "inline-flex", gap: 1, alignItems: "center", cursor: busy ? "default" : "pointer", marginLeft: 2, fontSize: 11 },
+                  style: { display: "inline-flex", gap: 4, alignItems: "center", cursor: busy ? "default" : "pointer", fontSize: 12 },
                 },
                 h("input", {
                   type: "checkbox",
                   checked: picking,
                   disabled: busy === true,
-                  style: { ...S.modelCheck, width: 11, height: 11 },
-                  "aria-label": `${label} 思考档位 ${level}`,
-                  onChange: () => onThinkingToggle(id, level, !picking)
+                  style: S.modelCheck,
+                  "aria-label": `${label} 档位 ${level}`,
+                  onChange: () => { if (onThinkingToggle) onThinkingToggle(id, level, !picking); }
                 }),
                 tt(dictKey("llm.level", level)));
-              }))
-            : null,
-          // 协议列（右对齐）：该模型的起始协议；auto = 决策表（默认）。
-          onProtocolChange !== undefined
-            ? h("select", {
-                key: "protocol",
-                style: { ...S.modelBadge, cursor: "pointer" },
-                value: String(modelProtocols?.[id] ?? "auto"),
-                disabled: busy === true,
-                "aria-label": tt("llm.protocol"),
-                onChange: (event: { target: { value: string } }) => onProtocolChange(id, event.target.value)
-              }, PROTOCOLS.map((option) => h("option", { key: option, value: option },
-                option === "auto" ? tt("llm.protocolAuto") : option)))
-            : null
-        ],
-        meta,
-        onToggle
+              })),
+            visionSet !== null
+              ? h("label", {
+                  style: { display: "inline-flex", gap: 4, alignItems: "center", cursor: busy ? "default" : "pointer", fontSize: 12, marginLeft: "auto" },
+                },
+                h("input", {
+                  type: "checkbox",
+                  checked: visionOn,
+                  disabled: busy === true,
+                  style: S.modelCheck,
+                  "aria-label": `${label} 识图`,
+                  onChange: onVisionToggle
+                    ? () => onVisionToggle(id, !visionOn)
+                    : undefined
+                }),
+                tt("llm.rosterVision"))
+              : null),
+            // 分隔线：档位行与协议行之间。
+            h("div", { style: { borderTop: "1px solid var(--dsw-alias-border-l1)", margin: "2px 0" } }),
+            // 协议并入面板：一行 label + 下拉（auto/三协议），与档位同属「保存才生效」。
+            onProtocolChange !== undefined
+              ? h("label", {
+                  style: { display: "flex", gap: 8, alignItems: "center", fontSize: 12, cursor: busy ? "default" : "pointer" },
+                },
+                h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, tt("llm.protocol")),
+                h("select", {
+                  style: { ...S.input, width: "auto", height: 26, fontSize: 12, padding: "0 6px" },
+                  value: String(modelProtocols?.[id] ?? "auto"),
+                  disabled: busy === true,
+                  "aria-label": `${label} 协议`,
+                  onChange: (event: { target: { value: string } }) => onProtocolChange(id, event.target.value)
+                }, PROTOCOLS.map((option) => h("option", { key: option, value: option },
+                  option === "auto" ? tt("llm.protocolAuto") : option))))
+              : null)
+          : null
       });
     })
   );
@@ -204,22 +243,27 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
     ? (pool.settings.vision.visionModels as string[])
     : [];
   const [ids, setIds] = useState<string[]>(() => hostIds.slice());
-  const [visionIds, setVisionIds] = useState<string[]>(() => visionHost.slice());
-  // 每模型可用思考档位（pool.json `thinking` 分区；行内勾选初值）。
+  // 思考/看图/协议的「本地显示」永远 = 宿主快照 + 草稿，不设宿主镜像 state：
+  // 快照轮询可能晚到（面板先挂载、宿主值后到），镜像 state 锁在 mount 时的旧值
+  // 会让面板显示与宿主脱节，勾选后还把宿主已存的配置整段冲掉（2026-10-26 复现）。
+  // 每次 render 都从最新 props 现算生效值，天然跟随宿主。
+  // 每模型可用思考档位（pool.json `thinking` 分区；面板勾选初值=宿主值）。
   const thinkingHost = typeof pool?.settings?.thinking === "object" && pool.settings.thinking !== null
     ? pool.settings.thinking
     : {};
-  const [thinkingById, setThinkingById] = useState<Record<string, string[]>>(() => {
-    const out: Record<string, string[]> = {};
-    for (const [k, v] of Object.entries(thinkingHost)) {
-      if (Array.isArray(v)) out[k] = v as string[];
-    }
-    return out;
-  });
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
-  const [savedKey, setSavedKey] = useState<string | null>(null);
+  // 保存成功一次后的「已保存」回显 key（仅用于展示成功行，不参与 dirty 判据）。
+  const [justSaved, setJustSaved] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // 当前展开思考面板的模型（一次只开一个；null = 全收起）。
+  const [openThinkingId, setOpenThinkingId] = useState<string | null>(null);
+  // 协议草稿（模型 → 协议；即改即存已废，改的是草稿，按保存才落库）。
+  const [draftProtocols, setDraftProtocols] = useState<Record<string, string>>({});
+  // 思考面板草稿（模型 → 档位集；与 vision 草稿一起按保存才落库）。
+  const [draftThinking, setDraftThinking] = useState<Record<string, string[]>>({});
+  // 可看图草稿（模型 → 是否勾选；与思考草稿一起按保存才落库）。
+  const [draftVision, setDraftVision] = useState<Record<string, boolean>>({});
   // Whether the USER has edited the draft since the last Host sync. The
   // auto-sync must not clobber an in-flight edit; an untouched picker must
   // FOLLOW the Host. The old guard compared the CURRENT ids against the NEW
@@ -234,7 +278,24 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   const hostKey = useMemo(() => JSON.stringify(hostIds), [hostIds]);
   const idsKey = useMemo(() => JSON.stringify(ids), [ids]);
   const dirty = idsKey !== hostKey;
-  const justSaved = savedKey !== null && savedKey === hostKey;
+  // 思考/看图/协议三段用「草稿合入宿主后的**生效值**」判脏（0.1.2 起）：
+  // 生效值 ≠ 宿主值才算未保存；草稿为空（未编辑过）时生效值恒等于宿主值 → 干净。
+  // 直接比较草稿与宿主是错的：宿主已有配置（如 0.1.1 即改即存时代留下的 thinking）
+  // 而草稿为空时会被误判为已修改，保存脚常驻、点了又没效果。
+  const effectiveProtocols = { ...hostProtocols, ...draftProtocols };
+  const effectiveThinking = { ...thinkingHost, ...draftThinking };
+  const effectiveVision = (() => {
+    const out = new Set(visionHost);
+    for (const [id, on] of Object.entries(draftVision)) {
+      if (on) out.add(id);
+      else out.delete(id);
+    }
+    return [...out];
+  })();
+  const protocolsDirty = JSON.stringify(effectiveProtocols) !== JSON.stringify(hostProtocols);
+  const thinkingDirty = JSON.stringify(effectiveThinking) !== JSON.stringify(thinkingHost);
+  const visionDirty = JSON.stringify(effectiveVision.sort()) !== JSON.stringify([...visionHost].sort());
+  const anyDirty = dirty || protocolsDirty || thinkingDirty || visionDirty;
 
   // Follow the Host while the picker is untouched, so a catalogue refresh
   // reaches the list and a save from another client clears the draft.
@@ -255,28 +316,58 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   // own write — that echo is exactly when the notice is supposed to show;
   // clearing it on every hostKey change made the success line unreachable.
   useEffect(() => {
-    if (dirty === true) setSavedKey(null);
+    if (dirty === true) setJustSaved(false);
   }, [dirty]);
 
   const save = useCallback(async () => {
     if (busy) return;
     setBusy(true);
     setNotice(null);
-    const posted = JSON.stringify(ids);
     try {
-      await postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids });
-      // The user's intent is now on the Host: the picker may follow the Host
-      // again from here on. Matches hostKey as soon as the poll after onDone()
-      // echoes it.
-      touchedRef.current = false;
-      setSavedKey(posted);
+      // 保存 = 四个草稿一次落库（用户 2026-10-26 拍板：思考/看图/协议都走
+      // 「草稿 + 保存按钮」）。仍有变化的段各自 POST，未变化的段不发。
+      // 每个 POST 都是整段覆盖（vision 提交合并后的完整数组、thinking 提交
+      // 合并后的完整 map），段落内部不做 diff——勾选多次最终只落一次。
+      const visionNext = [...new Set<string>([
+        ...visionHost.filter((id) => !(id in draftVision)),
+        ...Object.keys(draftVision).filter((id) => draftVision[id] === true)
+      ])];
+      const thinkingNext = Object.fromEntries(
+        Object.entries({ ...thinkingHost, ...draftThinking }).filter(([, levels]) => Array.isArray(levels) && levels.length > 0)
+      );
+      const protocolsNext = { ...hostProtocols, ...draftProtocols };
+      const posts: Promise<unknown>[] = [];
+      if (dirty) {
+        posts.push(postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids }).then(() => { touchedRef.current = false; }));
+      }
+      if (visionDirty) {
+        posts.push(postJsonOrThrow(POOL_PATH, { section: "vision", values: { visionModels: visionNext } })
+          .then(() => {
+            // 无本地镜像 state：清掉草稿即可，显示从最新快照现算。
+            setDraftVision({});
+          }));
+      }
+      if (thinkingDirty) {
+        posts.push(postJsonOrThrow(POOL_PATH, { section: "thinking", values: thinkingNext })
+          .then(() => {
+            setDraftThinking({});
+          }));
+      }
+      if (protocolsDirty) {
+        posts.push(postJsonOrThrow(MODELS_PATH, { modelProtocols: protocolsNext })
+          .then(() => { setDraftProtocols({}); }));
+      }
+      await Promise.all(posts);
+      setJustSaved(true);
       onDone?.();
     } catch (error) {
       setNotice(format(tt("llm.rosterError"), { error: errorText(error) }));
     } finally {
       setBusy(false);
     }
-  }, [busy, ids, onDone, tt]);
+    // 闭包依赖：载荷按当前草稿/宿主构造，任一组变化都得出新闭包。
+    // （本仓无 eslint；panel.test F6 纪律——将来启用 lint 需补 exhaustive-deps。）
+  }, [busy, ids, dirty, visionDirty, thinkingDirty, protocolsDirty, visionHost, hostProtocols, draftVision, draftThinking, thinkingHost, onDone, tt]);
 
   const needle = query.trim().toLowerCase();
   // `models` holds its identity between renders - it comes straight off the
@@ -367,12 +458,13 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
                 enabledIds: ids,
                 busy,
                 tt,
-                modelProtocols: hostProtocols,
+                openThinkingId,
+                onThinkingOpen: (id: string | null) => setOpenThinkingId(id),
+                modelProtocols: { ...hostProtocols, ...draftProtocols },
                 onProtocolChange: (id: string, protocol: string) => {
-                  // 协议即改即存（草稿纪律只属于允许清单）：POST 后 onDone()
-                  // 的轮询会回显 Host 的值。
-                  void postJsonOrThrow(MODELS_PATH, {                    modelProtocols: { ...hostProtocols, [id]: protocol }
-                  }).then(() => onDone?.()).catch(() => undefined);
+                  // 协议草稿（保存时与其它草稿一起落库；不再即改即存）。
+                  setDraftProtocols((current) => ({ ...current, [id]: protocol }));
+                  setNotice(null);
                 },
                 // One row is toggled against the WHOLE roster, not the
                 // filtered view, so an edit survives a later change of the
@@ -382,39 +474,40 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
                   setIds(toggleModelIn(ids, models.map((model) => String(model?.id ?? "")), id));
                   setNotice(null);
                 },
-                // 识图勾选：即改即存到 vision.visionModels（POST /pool {section:vision}）。
-                // 用函数式更新拿最新勾选集：直接读闭包 visionIds 会在连续勾选时
-                // 用旧值覆盖前一个（后勾的丢先勾的）。勾选的模型进图片转述下拉。
-                visionIds,
+                // 可看图在思考面板最底部；改的是草稿（draftVision），保存才 POST
+                // 到 vision.visionModels。显示 = 宿主快照 + 草稿合并（勾选的立即
+                // 反映到复选框，未保存前不落库）。
+                visionIds: (() => {
+                  const out = new Set(visionHost);
+                  for (const [id, on] of Object.entries(draftVision)) {
+                    if (on) out.add(id);
+                    else out.delete(id);
+                  }
+                  return [...out];
+                })(),
                 onVisionToggle: (id: string, on: boolean) => {
-                  setVisionIds((current) => {
-                    const next = on
-                      ? [...current, id]
-                      : current.filter((vid) => vid !== id);
-                    void postJsonOrThrow(POOL_PATH, { section: "vision", values: { visionModels: next } })
-                      .then(() => onDone?.())
-                      .catch(() => undefined);
-                    return next;
-                  });
+                  setDraftVision((current) => ({ ...current, [id]: on }));
+                  setNotice(null);
                 },
-                // 每模型可用思考档位：行内勾选存 pool.json `thinking` 分区。
-                // DSH 对话界面的可选思考档位 = 此勾选集（经 adapter 覆盖 reasoning）。
-                thinkingById,
+                // 思考档位：面板内勾选写 draftThinking 草稿，保存时才落库
+                // （DSH 对话界面的可选档位 = 保存后的勾选集，经 adapter 覆盖）。
+                thinkingById: (() => {
+                  const out = { ...thinkingHost };
+                  for (const [id, levels] of Object.entries(draftThinking)) out[id] = levels;
+                  return out;
+                })(),
                 onThinkingToggle: (id: string, level: string, onValue: boolean) => {
-                  setThinkingById((current) => {
-                    const list = Array.isArray(current[id]) ? current[id] : [];
+                  setDraftThinking((current) => {
+                    const list = (current[id] ?? thinkingHost[id] ?? []).slice();
                     const next = onValue
                       ? (list.includes(level) ? list : [...list, level])
                       : list.filter((l) => l !== level);
-                    const values = { ...current, [id]: next };
-                    void postJsonOrThrow(POOL_PATH, { section: "thinking", values: { [id]: next } })
-                      .then(() => onDone?.())
-                      .catch(() => undefined);
-                    return values;
+                    return { ...current, [id]: next };
                   });
+                  setNotice(null);
                 }
               })),
-          dirty
+          anyDirty
             ? h(
                 "div",
                 { style: S.rosterFoot },
@@ -433,6 +526,9 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
                     // picker may follow the Host again from here on.
                     touchedRef.current = false;
                     setIds(hostIds);
+                    setDraftProtocols({});
+                    setDraftThinking({});
+                    setDraftVision({});
                     setNotice(null);
                   }
                 }, tt("llm.rosterDiscard")),

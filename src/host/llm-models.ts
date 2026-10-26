@@ -298,10 +298,10 @@ export { isImageGenModel } from "./modality.ts";
 /**
  * The picker's 思考强度 levels, driven by the USER-configured per-model set.
  *
- * 2026-10-25 起：每个模型「支持哪些思考档位」由用户在模型清单行内勾选
- * （存 pool.json 的 thinking 分区）。有用户配置时按它生成 map（不在列表的档位
- * = null，DSH 对话界面不提供）；未配置时回落全量（off/low/medium/high/max，
- * xhigh 按用户要求排除、minimal 平台不认）。
+ * 2026-10-26 起：可勾选档位只含 `off`/`low`/`medium`/`high`/`max`（用户 2026-10-26
+ * 拍板：默认档位只考虑原生档位，xhigh/minimal 彻底不要）。有用户配置时按它生成
+ * map（不在列表的档位 = null，DSH 对话界面不提供）；未配置时回落默认档位集
+ * （off/low/medium/high/max）。
  *
  * A value of `null` means "the picker must not offer this level"; a string is
  * the wire spelling the level dispatches to.
@@ -310,45 +310,36 @@ export { isImageGenModel } from "./modality.ts";
  * @returns {object} the thinkingLevelMap.
  */
 export function thinkingLevelMapFor(entry: CatalogEntry, userLevels?: string[]): Record<string, string | null> {
-  void entry; // 签名保留：调用点传 entry（未来可能按模型族补充）；档位以用户配置/全量为主。
+  void entry; // 签名保留：调用点传 entry；档位以用户配置/默认档位集为主。
   const levels = Array.isArray(userLevels) && userLevels.length > 0
     ? new Set(userLevels)
     : null;
   const has = (level: string): boolean => levels === null || levels.has(level);
   return {
     off: has("off") ? "none" : null,
-    minimal: null,
     low: has("low") ? "low" : null,
     medium: has("medium") ? "medium" : null,
     high: has("high") ? "high" : null,
-    // xhigh 默认不提供（用户要求排除）；用户显式勾选才开。
-    xhigh: levels !== null && levels.has("xhigh") ? "xhigh" : null,
     max: has("max") ? "max" : null
   };
 }
 
 /** pi-ai's escalation ladder (`EXTENDED_THINKING_LEVELS`). */
-const THINKING_LADDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const THINKING_LADDER = ["off", "low", "medium", "high", "max"];
 
 /**
  * The thinking levels DSH's selector will actually offer for one model.
  *
- * With PROBED_EFFORT retired this is now the full ladder MINUS the levels the
- * platform does not accept (`minimal`). Every chat model offers
- * off/none + low/medium/high/xhigh/max — 用户可自选。DSH builds the
- * model-settings effort list through exactly this function, so a roster row
- * quoting it cannot disagree with what the picker lets the user select.
+ * 2026-10-26：只含 off/low/medium/high/max（xhigh/minimal 彻底移除——默认档位
+ * 只按原生档位）。DSH builds the model-settings effort list through exactly
+ * this function, so a roster row quoting it cannot disagree with what the
+ * picker lets the user select.
  * @param {object} entry - one normalized catalog entry.
  * @returns {string[]} level ids in escalation order, e.g. ["off","low",...].
  */
 export function supportedThinkingLevels(entry: CatalogEntry, userLevels?: string[]): string[] {
   const map = thinkingLevelMapFor(entry, userLevels);
-  return THINKING_LADDER.filter((level) => {
-    const mapped = map[level];
-    if (mapped === null) return false;
-    if (level === "xhigh" || level === "max") return mapped !== undefined;
-    return true;
-  });
+  return THINKING_LADDER.filter((level) => map[level] !== null);
 }
 
 /**

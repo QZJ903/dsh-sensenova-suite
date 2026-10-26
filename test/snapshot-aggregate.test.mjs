@@ -572,5 +572,64 @@ function harness({ stateOverrides = {}, published = [], publishResult = { ok: tr
     quotaWrites.length === 1, JSON.stringify(quotaWrites));
 }
 
+// --- K. allModels: 图模清单 = 探测到的纯图模 + fast 兜底 -------------------
+// 2026-10-26：出图下拉的图模清单来自 `allModels`（探测目录 `output_modalities`
+// 恰好只有 ["image"] 的行）+ 固定兜底 `sensenova-u1.5-fast`（官方图模但不在
+// /v1/models 探测清单里，手动补进；目录将来探测到它时 seen 去重不重复列）。
+// 多模态对话模型（输出 text + 输入 image，如 flash-lite）不算图模——它不能调
+// 出图接口，只归识图侧。
+{
+  const K = harness({ apiKey: "sk-test" });
+  const net = stubFetch({
+    "pool-usage": HEALTHY_POOL,
+    "credit-usage-trend": TREND_OK,
+    "/v1/models": {
+      data: [
+        { id: "sensenova-u1.5-lite", name: "u1.5-lite", output_modalities: ["image"] },
+        { id: "sensenova-6.8-flash-lite", name: "flash-lite", output_modalities: ["text"], input_modalities: ["text", "image"] },
+        { id: "deepseek-v4-flash", name: "ds", output_modalities: ["text"] }
+      ]
+    }
+  });
+  let body;
+  try {
+    body = await buildSnapshotBody(K.params);
+  } finally {
+    net.restore();
+  }
+  const all = body.llm.allModels;
+  const imageGenIds = all.filter((m) => m.imageGen === true).map((m) => m.id);
+  check("K1 allModels 图模 = 探测到的纯图模 + fast 兜底",
+    JSON.stringify(imageGenIds) === JSON.stringify(["sensenova-u1.5-lite", "sensenova-u1.5-fast"]),
+    JSON.stringify(imageGenIds));
+  check("K2 多模态对话模型（输出 text）不算图模",
+    !imageGenIds.includes("sensenova-6.8-flash-lite"),
+    JSON.stringify(imageGenIds));
+  check("K3 flash-lite 仍是 allModels 行（vision=true），只是不进出图清单",
+    all.some((m) => m.id === "sensenova-6.8-flash-lite" && m.vision === true && m.imageGen === false),
+    JSON.stringify(all.map((m) => ({ id: m.id, vision: m.vision, imageGen: m.imageGen }))));
+  // fast 已在目录里（探测到了）→ seen 去重，不重复列。
+  const K2 = harness({ apiKey: "sk-test" });
+  const net2 = stubFetch({
+    "pool-usage": HEALTHY_POOL,
+    "credit-usage-trend": TREND_OK,
+    "/v1/models": {
+      data: [
+        { id: "sensenova-u1.5-fast", name: "u1.5-fast", output_modalities: ["image"] }
+      ]
+    }
+  });
+  let body2;
+  try {
+    body2 = await buildSnapshotBody(K2.params);
+  } finally {
+    net2.restore();
+  }
+  const fastIds = body2.llm.allModels.filter((m) => m.imageGen === true).map((m) => m.id);
+  check("K4 目录已含 fast 时兜底不重复（seen 去重）",
+    JSON.stringify(fastIds) === JSON.stringify(["sensenova-u1.5-fast"]),
+    JSON.stringify(fastIds));
+}
+
 // --- report ----------------------------------------------------------------
 finishVerbose({ suite: "snapshot-aggregate.test.mjs" });

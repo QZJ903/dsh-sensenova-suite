@@ -65,13 +65,22 @@ export function isChatModel(entry: { output_modalities?: unknown }) {
 /**
  * Whether one catalog entry is an image-GENERATION model.
  *
- * STRICT direction of the same judgment: only an EXPLICIT "image" declaration
- * counts. A missing field means "unknown", and unknown must not be offered as
- * a draw model — unlike the chat direction (permissive), a wrong draw guess
- * sends the agent's request to a model that cannot answer.
+ * STRICT direction: a model is a draw model only when its OUTPUT modalities are
+ * exactly `["image"]` — the model answers by producing an image and nothing
+ * else. Anything broader (`["text","image"]`, or a missing field) is NOT a
+ * draw model: a wrong draw guess sends the agent's request to a model that
+ * cannot answer on `/v1/images/*`.
+ *
+ * This is deliberately stricter than the old "contains image" probe: a
+ * multi-modal CHAT model like `sensenova-6.8-flash-lite` declares
+ * `output_modalities: ["text"]` (its image input goes in `input_modalities`,
+ * judged separately by {@link identifyVisionModel}), so it must never appear
+ * in the image-GENERATION dropdown — those lists answer `/v1/images/*`, which
+ * only the pure-output-image family (`sensenova-u1.5-*`) serves.
  * @param {object} entry - one normalized catalog entry.
  * @returns {boolean}
  */
 export function isImageGenModel(entry: { output_modalities?: unknown }) {
-  return outputModalityOf(entry) === "declared-image";
+  const out = entry?.output_modalities;
+  return Array.isArray(out) && out.length === 1 && out[0] === "image";
 }

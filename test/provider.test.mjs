@@ -78,17 +78,17 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("advertised as a reasoning model", descriptor.reasoning === true);
     check("the thinking map pins picker levels to wire spellings",
       JSON.stringify(descriptor.thinkingLevelMap) === JSON.stringify({
-        off: "none", minimal: null, low: "low", medium: "medium",
-        high: "high", xhigh: null, max: "max"
+        off: "none", low: "low", medium: "medium",
+        high: "high", max: "max"
       }), JSON.stringify(descriptor.thinkingLevelMap));
     check("off is the platform's none, not the OpenAI off (which 400s)",
       thinkingLevelMapFor({ id: "any" }).off === "none");
-    check("minimal is not offered (unverified on this gateway)",
-      thinkingLevelMapFor({ id: "any" }).minimal === null);
-    check("xhigh is not offered (user decision: excluded from the picker)",
-      thinkingLevelMapFor({ id: "any" }).xhigh === null &&
-        thinkingLevelMapFor({ id: "deepseek-v4-flash" }).xhigh === null);
-    check("all 思考档位 are user-selectable (probe table retired 2026-10-24)",
+    check("minimal is not offered (2026-10-26: 默认档位只按原生档位)",
+      thinkingLevelMapFor({ id: "any" }).minimal === undefined);
+    check("xhigh is not offered (2026-10-26: xhigh 彻底移除)",
+      thinkingLevelMapFor({ id: "any" }).xhigh === undefined &&
+        thinkingLevelMapFor({ id: "deepseek-v4-flash" }).xhigh === undefined);
+    check("all 思考档位 are user-selectable (2026-10-26: off/low/medium/high/max)",
       thinkingLevelMapFor({ id: "any" }).low === "low" &&
       thinkingLevelMapFor({ id: "any" }).medium === "medium" &&
       thinkingLevelMapFor({ id: "any" }).high === "high" &&
@@ -201,6 +201,16 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("an image-output model is not a chat model", isChatModel(gen) === false);
     check("a vision chat model is a chat model", isChatModel(visionChat) === true);
     check("a text-only model is a chat model", isChatModel(textChat) === true);
+    // 2026-10-26：isImageGenModel 收紧为「output_modalities 恰好只有 ['image']」
+    // ——多模态对话模型（输出 text、输入含 image）不进出图清单，只有纯出图的
+    // u1.5 系才算图模。
+    check("a pure output-image model IS an image-gen model",
+      isImageGenModel(gen) === true);
+    check("a multi-modal CHAT model (output text, input image) is NOT an image-gen model",
+      isImageGenModel(visionChat) === false);
+    check("a text-only model is NOT an image-gen model",
+      isImageGenModel(textChat) === false);
+    check("a declared-image entry (only image) is not chat", isChatModel(gen) === false);
     check("a missing output_modalities stays chat (permissive)", isChatModel({ id: "x" }) === true);
     check("a non-array output_modalities stays chat", isChatModel({ id: "y", output_modalities: "text" }) === true);
     // The modality contradiction the single judgment kills (P1-3, 2026-10-02):
@@ -212,6 +222,8 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       isChatModel({ id: "z" }) === true && isImageGenModel({ id: "z" }) === false);
     check("an image-output model is draw but NOT chat (complementary)",
       isImageGenModel(gen) === true && isChatModel(gen) === false);
+    check("a multi-modal chat model is NEITHER draw-only NOR contradictory",
+      isImageGenModel(visionChat) === false && isChatModel(visionChat) === true);
     check("a text-output model is neither draw-only nor contradictory",
       isImageGenModel(textChat) === false && isChatModel(textChat) === true);
 

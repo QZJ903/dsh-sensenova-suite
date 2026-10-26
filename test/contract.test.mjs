@@ -95,20 +95,18 @@ for (const model of contract.models) {
     const map = thinkingLevelMapFor(entry);
     check(`${model.id} thinkingLevelMap.off === "none" (platform off spelling)`,
       map.off === "none", JSON.stringify(map));
-    // reasoning_effort dialect: since the probe table was retired
-    // (2026-10-24, 12 levels all 200), every chat model carries the full
-    // ladder — off + low + medium + high + max. `xhigh` is excluded (user
-    // decision) and `minimal` is not offered (platform 400s).
+    // reasoning_effort dialect: 2026-10-26 用户拍板——只含 off + low + medium +
+    // high + max；xhigh/minimal 彻底移除（默认档位只按原生档位）。
     check(`${model.id} thinkingLevelMap.max === "max" (platform accepts it since 2026-10-24)`,
       map.max === "max", JSON.stringify(map.max));
-    check(`${model.id} thinkingLevelMap.xhigh === null (user decision: excluded)`,
-      map.xhigh === null, JSON.stringify(map.xhigh));
+    check(`${model.id} thinkingLevelMap.xhigh is undefined (2026-10-26: removed)`,
+      map.xhigh === undefined, JSON.stringify(map.xhigh));
     check(`${model.id} thinkingLevelMap.low === "low" (open for self-selection)`,
       map.low === "low", JSON.stringify(map.low));
     check(`${model.id} thinkingLevelMap.medium === "medium" (open for self-selection)`,
       map.medium === "medium", JSON.stringify(map.medium));
-    check(`${model.id} thinkingLevelMap.minimal === null (platform rejects)`,
-      map.minimal === null, JSON.stringify(map.minimal));
+    check(`${model.id} thinkingLevelMap.minimal is undefined (2026-10-26: removed)`,
+      map.minimal === undefined, JSON.stringify(map.minimal));
     // vision: the descriptor's input array mirrors the contract's
     // visionInput flag (structured `input_modalities` wins).
     const expectedInput = model.visionInput ? ["text", "image"] : ["text"];
