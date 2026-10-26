@@ -147,26 +147,47 @@ export class KeyOrchestrator {
 
   /** 确保池里至少 seed 过一次（凭据服务的懒解析在 resolveKeys 里）。 */
   private async ensureSeeded(): Promise<void> {
-    if (this.seeded) return;
-    if (this.resolvingKeys === undefined) {
-      this.resolvingKeys = (async () => {
-        try {
-          const entries = await this.opts.resolveKeys();
-          this.idToKey.clear();
-          const keys: string[] = [];
-          for (const entry of entries) {
-            if (entry.key === "" || this.idToKey.has(entry.id)) continue;
-            this.idToKey.set(entry.id, entry.key);
-            keys.push(entry.key);
-          }
-          this.pool.seed(keys);
-          this.seeded = true;
-        } finally {
-          this.resolvingKeys = undefined;
+    if (!this.seeded) await this.resolveInto();
+  }
+
+  /** 面板改凭据后重解析（加 key / 换面板 key / 清面板 key；路由侧调用）。
+   * 语义 = 重启后的首次 seed：新增 key 入池，值变了的旧 key 摘出，存量 key 的
+   * 相位与计数原样保留（pool.seed 幂等，只追加新 key）。被 401 移除的 key 会
+   * 随重启语义复活，下一次请求再次 401 再移除——与既有重启行为一致。 */
+  async refreshKeys(): Promise<void> {
+    await this.resolveInto();
+  }
+
+  /** 解析凭据并把结果同步进池（首种与重种共用一条路；并发调用合并为一次解析）。
+   * 解析失败不置 seeded（失败绝不装成功），下次 pick/status/refreshKeys 会再试；
+   * 失败时旧 idToKey 原样保留（新映射在本地建好再原子换入）。 */
+  private async resolveInto(): Promise<void> {
+    if (this.resolvingKeys !== undefined) return this.resolvingKeys;
+    this.resolvingKeys = (async () => {
+      try {
+        const entries = await this.opts.resolveKeys();
+        const next = new Map<string, string>();
+        const keys: string[] = [];
+        for (const entry of entries) {
+          if (entry.key === "" || next.has(entry.id)) continue;
+          next.set(entry.id, entry.key);
+          keys.push(entry.key);
         }
-      })();
-    }
-    await this.resolvingKeys;
+        // 旧映射里值已不在新解析结果的 key 先摘出池：删除/停用路径通常已
+        // remove 过，这里是「换面板 key」这类 id 不变值变号的唯一清理点。
+        const nextKeys = new Set(next.values());
+        for (const key of this.idToKey.values()) {
+          if (!nextKeys.has(key)) this.pool.remove(key);
+        }
+        this.idToKey.clear();
+        for (const [id, key] of next) this.idToKey.set(id, key);
+        this.pool.seed(keys);
+        this.seeded = true;
+      } finally {
+        this.resolvingKeys = undefined;
+      }
+    })();
+    return this.resolvingKeys;
   }
 
   /** id → key（未知名返回 undefined）。 */

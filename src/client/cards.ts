@@ -125,23 +125,13 @@ export function QuotaCard({ label, window, tt }: { label: string; window: QuotaW
 
 /**
  * One pool card. The open state is intentionally tiny: name, type chip,
- * spendable grant balance, and the twin quota sub-cards. Everything
- * explanatory (grant expiry, the model coverage lists) folds into one
- * `<details>` row so the deck stays scannable on wide screens.
- *
- * `catalogAvailable` (the snapshot's own flag) says whether the Host actually
- * reached `GET /v1/models` this poll. Without a catalog the split cannot be
- * made: `callableModels` IS the plan's claim list and `lockedModels` is empty
- * by construction — so the fold must label the list as UNVERIFIED coverage,
- * not claim every model is callable. `undefined` (an old caller that never
- * passes the prop) keeps the verified wording, matching the Host that always
- * states the flag.
+ * spendable grant balance (hover = the nearest expiring grant), and the twin
+ * quota sub-cards. The former 模型与返赠详情 fold (callable/locked coverage
+ * lists, uncounted models, the grant-expiry line) was removed 2026-10-27:
+ * every callable model is configurable in the 接入 API tab, the composer pill
+ * footnote still carries the grant expiry, and the lists read as noise.
  */
-export function PoolCard({ pool, tt, catalogAvailable }: { pool: PoolData; tt: Tt; catalogAvailable?: boolean }): unknown {
-  const callable = pool.callableModels || pool.modelIds || [];
-  const locked = pool.lockedModels || [];
-  const unverified = catalogAvailable === false;
-  const hasDetails = pool.nearestGrantExpiry || callable.length > 0 || locked.length > 0;
+export function PoolCard({ pool, tt }: { pool: PoolData; tt: Tt }): unknown {
   return h(
     "div",
     { style: S.card },
@@ -154,8 +144,17 @@ export function PoolCard({ pool, tt, catalogAvailable }: { pool: PoolData; tt: T
       // Spendable grant money belongs up with the headline, not buried.
       // `grantBalance` is optional on the wire; `?? 0` keeps the `> 0` guard
       // reading exactly as the old implicit `undefined > 0 === false` did.
+      // The tooltip answers the question the headline raises against the
+      // 最近返赠到期 footnote (556.81 vs 553.92 — total vs nearest grant):
+      // it says how much expires NEXT and when; without expiry data it falls
+      // back to the plain balance wording (2026-10-27).
       (pool.grantBalance ?? 0) > 0
-        ? h("span", { style: S.grantChip, title: format(tt("pool.grant"), { balance: count(pool.grantBalance) }) }, format(tt("pool.grant"), { balance: count(pool.grantBalance) }))
+        ? h("span", {
+            style: S.grantChip,
+            title: pool.nearestGrantExpiry !== null && (pool.nearestGrantExpiringBalance ?? 0) > 0
+              ? format(tt("pool.grantNearest"), { balance: count(pool.nearestGrantExpiringBalance), time: clockLong(pool.nearestGrantExpiry) })
+              : format(tt("pool.grant"), { balance: count(pool.grantBalance) })
+          }, format(tt("pool.grant"), { balance: count(pool.grantBalance) }))
         : null
     ),
     h(
@@ -163,36 +162,7 @@ export function PoolCard({ pool, tt, catalogAvailable }: { pool: PoolData; tt: T
       { style: S.quotas },
       h(QuotaCard, { label: tt("pool.window5h"), window: pool.window5h, tt }),
       h(QuotaCard, { label: tt("pool.window7d"), window: pool.window7d, tt })
-    ),
-    hasDetails
-      ? h(
-          "details",
-          { style: S.details },
-          h("summary", { style: S.detailsSummary }, tt("pool.details")),
-          h(
-            "div",
-            { style: S.detailsBody },
-            pool.nearestGrantExpiry
-              ? h("div", { style: S.grant }, format(tt("pool.grantExpiry"), { time: clockLong(pool.nearestGrantExpiry), balance: count(pool.nearestGrantExpiringBalance) }))
-              : null,
-            callable.length > 0
-              ? h(
-                  "div",
-                  { style: S.models },
-                  h("span", { style: { ...S.muted, fontSize: 12, marginRight: 2 } }, `${unverified ? tt("pool.coverageUnverified") : tt("pool.callable")}:`),
-                  callable.map((model) => h("span", { key: model, style: S.modelTag }, model))
-                )
-              : null,
-            locked.length > 0
-              ? h(
-                  "div",
-                  { style: { ...S.models, ...S.muted }, title: locked.join(", ") },
-                  h("span", { style: { fontSize: 12, marginRight: 2 } }, format(tt("pool.locked"), { count: locked.length }))
-                )
-              : null
-          )
-        )
-      : null
+    )
   );
 }
 

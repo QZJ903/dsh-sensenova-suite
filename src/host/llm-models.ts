@@ -46,6 +46,21 @@ import { identifyVisionModel } from "./parsers.ts";
 import { isChatModel, isImageGenModel } from "./modality.ts";
 import type { AdapterConfig } from "./types.ts";
 
+/** Known-uncallable model ids: the catalog still lists them, but every call
+ * fails, so every offer-shaped exit (the picker's `parseCatalog`, this
+ * module's `buildDescriptors`, the panel's snapshot projections) drops them,
+ * while the catalog store and the contract baseline keep the platform mirror.
+ * Static on purpose: the adapter's failure cache only learns from 404
+ * model-not-found — a 403 never self-hides, so without this set the model
+ * would be offered forever.
+ * - `sensenova-6.7-flash-lite`：路由已下线，调用 404（原 adapter 本地清单，2026-10-27 上移至此共用）。
+ * - `deepseek-v4.1-flash`：该 Key 套餐未开通，调用一律 403（docs/SENSENOVA-API.md「需开通」行，
+ *   2026-09-30 起实测；官方文档的 DeepSeek V4.1 Flash 是 `deepseek-flash`，此 id 为目录冗余行，删除不损失能力）。 */
+export const KNOWN_UNROUTABLE_MODELS: ReadonlySet<string> = new Set([
+  "sensenova-6.7-flash-lite",
+  "deepseek-v4.1-flash",
+]);
+
 /** One normalized catalog entry (kept whole by `console-client.ts`). */
 export interface CatalogEntry {
   id?: unknown;
@@ -503,7 +518,11 @@ export function buildDescriptors(entries: any[], options: AdapterConfig = {}) {
   // addressed as chat models and are excluded BEFORE the allow-list, so a
   // stale id in `enabledIds` matches nothing rather than resurrecting one.
   const blocked = new Set(Array.isArray(unavailableModelIds) ? unavailableModelIds : []);
-  const filtered = filterByEnabled(entries, enabledIds).filter(isChatModel);
+  const filtered = filterByEnabled(entries, enabledIds).filter(isChatModel)
+    // Known-uncallable ids never become descriptors — same set the picker's
+    // `parseCatalog` drops (a 403 plan restriction never self-hides via the
+    // failure cache, so the exclusion must travel with every projection).
+    .filter((entry) => !KNOWN_UNROUTABLE_MODELS.has(str((entry as { id?: unknown })?.id, "")));
   const seen = new Map();
   // `undefined` slots exist briefly: a first sighting reserves the position
   // (push), the descriptor lands at that index below — the hole is always

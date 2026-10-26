@@ -27,7 +27,7 @@ import { CODE, isAuthFailure } from "./codes.ts";
 import { fetchConsole, fetchModelCatalog } from "./console-client.ts";
 import { MAX_CACHE_AGE_MS } from "./coalesced-fetch.ts";
 import { parsePools, parseTrend, checkShape } from "./parsers.ts";
-import { summarizeCatalog, filterByEnabled, rosterWithAvailability, exhaustedModelIds, drainedPoolsWithoutModels, LLM_PROVIDER_ID, DEFAULT_REASONING_EFFORT, identifyVisionModel, isImageGenModel } from "./llm-models.ts";
+import { summarizeCatalog, filterByEnabled, rosterWithAvailability, exhaustedModelIds, drainedPoolsWithoutModels, LLM_PROVIDER_ID, DEFAULT_REASONING_EFFORT, identifyVisionModel, isImageGenModel, KNOWN_UNROUTABLE_MODELS } from "./llm-models.ts";
 import { catalogSignature, syncSignaturesAfterPublish, quotaSignatureOf } from "./provider-publish.ts";
 import type { PublishResult } from "./provider-publish.ts";
 import { str, errMsg } from "./util.ts";
@@ -388,6 +388,14 @@ export async function buildSnapshotBody({
     }
     offered = catalog;
   }
+  // Known-uncallable ids (`KNOWN_UNROUTABLE_MODELS`) are subtracted once, here,
+  // so none of the panel's projections — roster, allModels, model/vision
+  // counts — ever list them. The catalog store and the contract baseline keep
+  // the platform mirror; this is a display-exit policy, the SAME set the
+  // picker's `parseCatalog` drops. (deepseek-v4.1-flash: the key's plan never
+  // activated it, every call 403s, and the failure cache only learns 404s —
+  // without this subtraction it would be offered forever.)
+  offered = offered.filter((entry: unknown) => !KNOWN_UNROUTABLE_MODELS.has(str((entry as { id?: unknown })?.id, "")));
   // Quota state can flip (a pool hits zero, or its window resets) without the
   // catalogue changing. When it does, rebuild the registration so the picker
   // drops/restores the affected models — `PiAiAdapter` memoizes the profiles

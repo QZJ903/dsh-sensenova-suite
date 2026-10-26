@@ -38,6 +38,7 @@ import type {
 import { parseRetryAfterMs, classify429Body, classify429Full, QUOTA_RATE_RETRY_FLOOR_MS, TPM_PROBE_BACKOFF_STEPS_MS } from './rate-classify.ts';
 import { retryableCodes } from './llm-retry.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
+import { KNOWN_UNROUTABLE_MODELS } from './llm-models.ts';
 
 /**
  * SenseNova 目录通常不披露上下文字段，这里用 131072 作为合理默认
@@ -71,8 +72,6 @@ const QUOTA_RETRY_AFTER_CEILING_MS = 60_000;
 export const CONNECT_TIMEOUT_MS = 45_000;
 /** SSE 流空闲看门狗（毫秒）：距上一事件 ≥ 该值无任何 chunk/事件即按停摆结束。2026-09-04 实测：思考期渠道有空事件/心跳自然重置计时（design D4/D6）。 */
 export const STREAM_IDLE_TIMEOUT_MS = 60_000;
-/** 已知不可路由的模型 id 清单（已下线路由，调用返回 404）。 */
-const KNOWN_UNROUTABLE_MODELS: ReadonlySet<string> = new Set(['sensenova-6.7-flash-lite']);
 /** 明确的模型不可用错误码（不在默认可重试集合内，故不触发 provider 重试）。 */
 const MODEL_NOT_FOUND_CODE = 'MODEL_NOT_FOUND';
 /** 模型 id → 标准显示名的显式品牌映射。 */
@@ -320,15 +319,41 @@ function samplingListField(raw: Record<string, unknown>): readonly string[] | un
 /** 目录未返回 supported_sampling_parameters 时的静态兜底已迁入 src/wire/facts.ts
  * （静态档案 samplingParameters 字段；kimi-k3 依文档 :2455-2457 补 seed/parallel_tool_calls）。 */
 
+/** 思考档位规范升序：对话界面下拉「从上到下递增」的唯一依据（2026-10-27 用户拍板）。
+ * off（用户勾选集拼法，pool.json thinking）与 none（平台目录拼法）同处最低档；
+ * minimal 在 low 之下、xhigh 在 high 之上（glm 原生词表）。表外档位排末尾、保持
+ * 相对顺序（稳定排序），不猜强度。 */
+const EFFORT_RANK: Readonly<Record<string, number>> = {
+  off: 0,
+  none: 1,
+  minimal: 2,
+  low: 3,
+  medium: 4,
+  high: 5,
+  xhigh: 6,
+  max: 7,
+};
+
+/** 把档位 id 列表排成升序并转成 reasoning.efforts 的行。reasoningInfoFrom（目录
+ * 词表/静态表）与 parseCatalog（用户勾选覆盖）两条路共用——平台目录按强度降序
+ * 罗列、勾选集按保存顺序，都不再原样透传到对话下拉。 */
+function effortsAscending(efforts: readonly string[]) {
+  return efforts
+    .map((effort, index) => ({ effort, index, rank: EFFORT_RANK[effort] ?? Number.MAX_SAFE_INTEGER }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map(({ effort }) => ({ id: ReasoningEffortId(effort), name: effort }));
+}
+
 /** 解析目录条目的 reasoning 词表；目录词表优先，静态表仅补全已知且有支持标记的模型。
  * defaultEffort：目录声明的默认档优先；目录未带（或命中静态表）时回退静态表默认档
- * （align-request-fields-with-docs 1.2：命中静态表即声明 defaultEffort）。 */
+ * （align-request-fields-with-docs 1.2：命中静态表即声明 defaultEffort）。
+ * 词表一律排成升序（effortsAscending）——对话下拉从上到下递增，不透传目录原序。 */
 function reasoningInfoFrom(raw: Record<string, unknown>, modelId: string): LlmModelReasoningInfo | undefined {
   const efforts = effortListField(raw) ?? nestedEffortListField(raw);
   const knownFacts = staticFacts(modelId);
   const selectedEfforts = efforts ?? (knownFacts !== undefined && hasReasoningSupport(raw) ? knownFacts.efforts : undefined);
   if (selectedEfforts === undefined || selectedEfforts.length === 0) return undefined;
-  const infos = selectedEfforts.map((effort) => ({ id: ReasoningEffortId(effort), name: effort }));
+  const infos = effortsAscending(selectedEfforts);
   const declaredDefault = efforts !== undefined ? defaultEffortField(raw) : undefined;
   const fallbackDefault = knownFacts?.defaultEffort ?? undefined;
   const defaultEffort = declaredDefault ?? fallbackDefault;
@@ -366,7 +391,7 @@ function parseCatalog(value: unknown, failedModels: ReadonlySet<string>, userThi
     //    目录 defaultEffort 不在用户集时保留原默认（不影响可选集，只影响默认档）。
     const userList = userThinking?.[id];
     if (Array.isArray(userList) && userList.length > 0) {
-      const efforts = userList.map((effort) => ({ id: ReasoningEffortId(effort), name: effort }));
+      const efforts = effortsAscending(userList);
       reasoning = reasoning === undefined
         ? { efforts }
         : { ...reasoning, efforts };

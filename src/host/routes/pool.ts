@@ -48,6 +48,8 @@ export interface PoolAdmin {
   hasPanelKey: () => Promise<boolean>;
   /** 状态文件刷新（写后让 params 的本地记录跟上）。 */
   refresh: () => Promise<void>;
+  /** 面板改凭据后重解析池（加 key 后让新 key 立即入池，免重启）。 */
+  refreshKeys: () => Promise<void>;
 }
 
 /**
@@ -55,8 +57,8 @@ export interface PoolAdmin {
  * @param ctx - the host root context (only `ctx.webServer` is used here).
  * @param wiring - `settings`（信任围栏）与 `poolAdmin`。
  */
-export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings"> & { poolAdmin?: PoolAdmin }) {
-  const { settings, poolAdmin } = wiring;
+export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "logger"> & { poolAdmin?: PoolAdmin }) {
+  const { settings, poolAdmin, logger } = wiring;
   if (poolAdmin === undefined) {
     return () => undefined;
   }
@@ -145,6 +147,11 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings"> & {
           await poolAdmin.store.setKeys([...record.keys, { id, name: note }]);
           await poolAdmin.store.restore(id);
           await poolAdmin.refresh();
+          // 新 key 立即重种入池：池每进程只首种一次，不重种则 statusById 不认识
+          // 新 id（行永远「未入池」）、请求轮换也永远选不中它（2026-10-27）。
+          // 失败不推翻本次保存：key 与清单都已落盘，日志留痕，下一次改动会再试。
+          await poolAdmin.refreshKeys()
+            .catch((error: unknown) => logger?.warn?.(`${name}: pool reseed failed after key add`, error));
           writeJson(response, 200, { ok: true, id, name: note }, { "cache-control": "no-store" });
           return;
         }

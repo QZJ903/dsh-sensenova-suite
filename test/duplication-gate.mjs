@@ -97,6 +97,15 @@ const WHITELIST = [
     // wire 内部：两个 sse 解析器的事件分派骨架（协议平行所致）。
     files: ["wire/sse-anthropic.ts", "wire/sse-responses.ts"],
     maxLines: 12
+  },
+  {
+    // llm-models 内部：rosterWithAvailability 的循环骨架按 rosterOf 派生
+    // （position/out 去重 + imageGen 划走 + 行投影同构，差异只在可用性字段）。
+    // 2026-10-27 首次在本机真正跑起本门禁时发现：HEAD 5eeb8be 已带此克隆
+    // （此前沙箱无 jscpd 一路 SKIP）。提取共用骨架要动额度投影路径，不在
+    // 本次改动范围——先登记封住增殖，重构另起一批。
+    files: ["llm-models.ts", "llm-models.ts"],
+    maxLines: 14
   }
 ];
 

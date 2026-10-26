@@ -224,8 +224,9 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     }
     return entries;
   };
-  // The credentials service, read once for maskKey display (and pool refs).
-  const credentialsService = getService("credentials");
+  // The credentials service is looked up PER USE (`getService`), never captured:
+  // DSH may register it after this plugin mounts, and a mount-time capture would
+  // stay null for the whole process (label fallback + degraded seed, 2026-10-27).
   // 池运营状态存储（面板管理面：停用/恢复/删除、全局并发、模型协议）。
   // params 需要同步读，所以本地持一份记录：本路由的每次写后刷新 + 探测时钟兜底刷新
   // （外部进程直改状态文件的可见性延迟 ≤ 一个探测周期，可接受）。
@@ -243,6 +244,13 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       modelGroups: settings.modelGroups,
     }),
     resolveKeys: async () => {
+      // 凭据服务未注册（DSH 启动时序：插件 mount 可早于它）时这次解析是降级
+      // 空集，绝不能被 seed 当成「真的没有 key」钉死——seeded 每进程只置一次
+      // （2026-10-27 真机：早于服务注册的首种让 store 里的 key 全部永远未入池）。
+      // 抛错让首种保持未种，下次 pick/status/refreshKeys 再试，服务就绪即自愈。
+      if (getService("credentials") === null) {
+        throw new Error("dsh-sensenova-suite: credentials service not registered yet");
+      }
       const excluded = new Set([...poolRecord.disabledIds, ...poolRecord.deletedIds]);
       return (await resolvePoolKeys()).filter((entry) => !excluded.has(entry.id));
     },
@@ -373,7 +381,9 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     const seenKeys = new Set<string>();
     if (typeof panelKeyValue === "string" && panelKeyValue !== "") seenKeys.add(panelKeyValue);
     for (const entry of savedPool?.keys ?? []) {
-      const value = await resolveRefValue(credentialsService, poolRef(entry.id));
+      // 凭据服务必须现查：mount 时捕获的实例在 DSH 服务注册晚于插件挂载时是
+      // null，全部 label 会回退成裸 id（2026-10-27 真机：三行全显示 key-<n>）。
+      const value = await resolveRefValue(getService("credentials"), poolRef(entry.id));
       // name 现在是「备注」；存量旧默认名（Key1/Key2…）不算备注。
       const isLegacyDefault = /^Key\d+$/.test(entry.name);
       if (typeof value === "string" && value !== "" && seenKeys.has(value)) {
@@ -440,6 +450,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
         const value = (await apiKeyStore.resolve().catch(() => ({ value: "" }))).value;
         return typeof value === "string" && value !== "";
       },
+      /** 面板改凭据后重解析池（加 key / 面板 key 保存与清除后调用，免重启入池）。 */
+      refreshKeys: () => orchestrator.refreshKeys(),
       refresh: refreshPoolRecord
     },
     publisher,
@@ -605,7 +617,11 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
 
   // 探测时钟：每 15s 扫一次到期探测——探测与 agent 请求解耦，
   // 「只在 2xx 清零」的短路死锁由此根治。挂 ctx.effect 随插件卸载清掉。
-  const probeTimer = setInterval(() => { void orchestrator.runDueProbes(); }, 15_000);
+  // catch 必须有：凭据服务未注册时 resolveKeys 抛错（防降级首种），空拒绝
+  // 会变成每 15s 一次的 unhandledRejection。
+  const probeTimer = setInterval(() => {
+    orchestrator.runDueProbes().catch((error: unknown) => ctx.logger?.warn?.(`${name}: probe tick skipped (pool not seeded yet)`, error));
+  }, 15_000);
   probeTimer.unref?.();
   ctx.effect(() => () => clearInterval(probeTimer), `${name}: probe timer`);
 

@@ -322,10 +322,11 @@ const healthy = {
   // dictionaries with zero call sites and green tests. Same failure shape as
   // PITFALLS §29 — scaffolding with no consumer and no watcher.
   //
-  // Only keys a text scan can judge are in scope. Two families are exempt and
+  // Only keys a text scan can judge are in scope. One family is exempt and
   // the exemption is written out rather than hidden behind a pattern:
-  //   - `llm.level.*` / `llm.src.*` are built at runtime by `dictKey()` from
-  //     Host-enumerated values, so no literal exists to find;
+  //   - `llm.level.*` is built at runtime by `dictKey()` from Host-enumerated
+  //     values, so no literal exists to find (the `llm.src.*` provenance
+  //     family went with the key-source line's removal, 2026-10-27);
   //   - keys reached through a VARIABLE (`tt(key)`, `tt(absentKey)` in
   //     `provider-controls.ts`) cannot be resolved statically. Listing them here
   //     is the honest statement that this check covers the literal-key surface
@@ -356,7 +357,7 @@ const healthy = {
     // the table, so the scans above cannot see them.
     for (const m of text.matchAll(/:\s*"([a-z][\w]*(?:\.[\w-]+)+)"/g)) usedKeys.add(m[1]);
   }
-  const unused = zhKeys.filter((key) => !usedKeys.has(key) && !DYNAMIC.has(key) && !key.startsWith("llm.level.") && !key.startsWith("llm.src."));
+  const unused = zhKeys.filter((key) => !usedKeys.has(key) && !DYNAMIC.has(key) && !key.startsWith("llm.level."));
   check("every statically-visible dictionary key is read by something", unused.length === 0,
     unused.join(", "));
 
@@ -644,23 +645,19 @@ const healthy = {
     missing.length === 0,
     missing.map((key) => `${key} (${key in zh ? "zh" : "∅"}/${key in en ? "en" : "∅"})`).join(", "));
 
-  // The dynamic families the client cannot enumerate: their VALUES come from
-  // the Host, so the Host's own lists are what they are checked against —
-  // textually, because neither list is reachable without importing the Host
-  // module (the ladder is module-private, the key sources are a JSDoc union).
-  // A level the Host adds therefore turns this red until it has a name.
-  check("the dynamic key families were found", families.size >= 2, [...families].join(", "));
+  // The dynamic family the client cannot enumerate: its VALUES come from the
+  // Host, so the Host's own list is what it is checked against — textually,
+  // because the ladder is module-private. A level the Host adds therefore
+  // turns this red until it has a name. (The `llm.src.*` provenance family
+  // went with the key-source status line's removal, 2026-10-27.)
+  check("the dynamic key family was found", families.has("llm.level."), [...families].join(", "));
   const llmSource = await readFile(new URL("../src/host/llm-models.ts", import.meta.url), "utf8");
-  const keyStoreSource = await readFile(new URL("../src/host/api-key-store.ts", import.meta.url), "utf8");
   const ladder = (llmSource.match(/THINKING_LADDER\s*=\s*\[([^\]]*)\]/)?.[1] ?? "")
     .match(/"([^"]+)"/g)?.map((quoted) => quoted.slice(1, -1)) ?? [];
-  const sources = [...new Set((keyStoreSource.match(/source:\s*"([^"]+)"/g) ?? [])
-    .map((entry) => /"([^"]+)"/.exec(entry)[1]))];
   check("the Host's thinking ladder was actually read", ladder.length >= 5, ladder.join(", "));
-  check("the Host's key sources were actually read", sources.length >= 2, sources.join(", "));
-  const familyKeys = [...ladder.map((level) => `llm.level.${level}`), ...sources.map((source) => `llm.src.${source}`)];
+  const familyKeys = ladder.map((level) => `llm.level.${level}`);
   const familyMissing = familyKeys.filter((key) => !(key in zh) || !(key in en));
-  check("every thinking level and key source the Host can send has a name",
+  check("every thinking level the Host can send has a name",
     familyMissing.length === 0,
     familyMissing.length > 0 ? familyMissing.join(", ") : `${familyKeys.length} keys checked`);
 

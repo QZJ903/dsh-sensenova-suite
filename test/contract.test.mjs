@@ -25,7 +25,8 @@ import {
   exhaustedModelIds,
   contextWindowOf,
   thinkingLevelMapFor,
-  LLM_PROVIDER_ID
+  LLM_PROVIDER_ID,
+  KNOWN_UNROUTABLE_MODELS
 } from "../src/host/llm-models.ts";
 import { credits, epochSeconds, parsePools, parseTrend, checkShape, identifyVisionModel } from "../src/host/parsers.ts";
 import { retryableCodes, QUOTA_CODES } from "../src/host/llm-retry.ts";
@@ -153,18 +154,22 @@ for (const model of contract.models) {
 
 // --- 5. buildDescriptors: the picker offer matches the contract -----------
 // The offer is every chat model NOT in a depleted pool, filtered by the
-// allow-list. With an empty pool and an empty allow-list, the offer is the
-// whole chat set. `isChatModel` is PERMISSIVE (a missing/unknown
-// `output_modalities` is treated as chat, and `deepseek-v4.1-flash` is a 403
-// plan restriction, not an image-gen model), so the picker still lists it —
-// the panel greys it via the quota/availability roster instead of dropping it
-// from the offer. The image-gen U-series (404) is the only family excluded.
+// allow-list AND by KNOWN_UNROUTABLE_MODELS. `isChatModel` is PERMISSIVE (a
+// missing/unknown `output_modalities` is treated as chat), but since
+// 2026-10-27 the known-uncallable ids are dropped at every offer exit:
+// `deepseek-v4.1-flash` (the key's plan never activated it — every call 403s,
+// and the failure cache only learns 404s, so it never self-hides) joins the
+// offline `sensenova-6.7-flash-lite`. The panel hides the row entirely (same
+// set, subtracted at the snapshot exit); the baseline below still pins the
+// PLATFORM catalog, which keeps returning both ids. The image-gen U-series
+// (404) is the only family excluded by modality.
 {
   const allEntries = contract.models.map(entryFor);
   // No pool depletion, no allow-list: the picker offers every chat model the
-  // contract marks `chat: true` (including the 403-restricted v4.1-flash,
-  // which is a plan restriction, not a non-chat model).
-  const chatIds = contract.models.filter((m) => m.chat === true).map((m) => m.id);
+  // contract marks `chat: true`, minus the known-uncallable set.
+  const chatIds = contract.models
+    .filter((m) => m.chat === true && !KNOWN_UNROUTABLE_MODELS.has(m.id))
+    .map((m) => m.id);
   const offered = buildDescriptors(allEntries, { baseUrl, enabledIds: [], unavailableModelIds: [] });
   const offeredIds = offered.map((d) => d.id);
   check("buildDescriptors offers exactly the contract's chat models (no pool depletion)",
@@ -172,7 +177,9 @@ for (const model of contract.models) {
     JSON.stringify({ offered: offeredIds, want: chatIds }));
 
   // The image-gen U-series (404 on the chat endpoint) is the only family the
-  // picker excludes: `output_modalities: ["image"]` is the load-bearing signal.
+  // picker excludes by modality: `output_modalities: ["image"]` is the
+  // load-bearing signal. The known-uncallable ids are excluded by id, not by
+  // modality.
   const imageGenIds = contract.models.filter((m) => m.imageGen === true).map((m) => m.id);
   check("buildDescriptors excludes every image-gen model from the offer",
     imageGenIds.every((id) => !offeredIds.includes(id)),

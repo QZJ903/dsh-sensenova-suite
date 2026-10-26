@@ -3,63 +3,66 @@
  * live provider switch.
  */
 import { PROVIDER_PATH } from "./const.ts";
-import { count, errorText, format } from "./format.ts";
+import { errorText, format } from "./format.ts";
 import { postJsonOrThrow } from "./http.ts";
-import { dictKey, h, useCallback, useState } from "./runtime.ts";
+import { h, useCallback, useState } from "./runtime.ts";
 import type { Tt } from "./runtime.ts";
 import type { LlmData } from "./wire.ts";
 import { S } from "./styles.ts";
 import { ToggleSwitch } from "./toggle-switch.ts";
 
 /**
- * The API-key card's status: ONLY key provenance (+ the ephemeral-host
- * warning). Registration state lives in `ProviderRegStatus` on the
- * provider card — after the panel split into one card per concern, a
- * line about registration inside the key card was information flying
- * across card boundaries, repeating what the provider card's own switch
- * and status already say.
+ * The API-key card's status: ONLY a missing-key nudge (+ the ephemeral-host
+ * warning). A stored key is silent — the form's own 显示 button and the save
+ * note say it (2026-10-27; the provenance line was noise). Registration
+ * state lives in `ProviderRegStatus` on the provider card — after the panel
+ * split into one card per concern, a line about registration inside the key
+ * card was information flying across card boundaries, repeating what the
+ * provider card's own switch and status already say.
  *
  * Hook-free on purpose: like the pool cards, it is exercised by the Node
  * render suite, so a reworded or dropped status line fails a check. It
  * renders ONLY from the snapshot's `llm` block, which never carries the
- * key itself — booleans and a source tag.
+ * key itself — booleans only.
  */
 export function ProviderStatus({ llm, tt }: { llm?: LlmData | null; tt: Tt }): unknown {
   if (!llm || typeof llm !== "object") return null;
   const rows: unknown[] = [];
-  // Where the key came from. `memory` and `env` are both real answers;
-  // an unknown source degrades to the raw tag rather than a blank line.
-  const sourceText = llm.hasApiKey === true
-    ? format(tt("llm.keyPresent"), { source: tt(dictKey("llm.src", String(llm.keySource ?? ""))) || String(llm.keySource ?? "") })
-    : tt("llm.noKey");
-  rows.push(h("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" }, role: "status" }, sourceText));
+  // A stored key is SILENT (2026-10-27): only a MISSING key asks for one.
+  if (llm.hasApiKey !== true) {
+    rows.push(h("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" }, role: "status" }, tt("llm.noKey")));
+  }
   if (llm.ephemeral === true) {
     rows.push(h("div", { style: { ...S.formNote, color: "var(--dsw-alias-state-warn-primary)" } }, tt("llm.ephemeral")));
   }
-  return h("div", { style: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 } }, ...rows);
+  return rows.length === 0
+    ? null
+    : h("div", { style: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 } }, ...rows);
 }
 
 /**
  * The provider card's registration status, hook-free like `ProviderStatus`
  * so the render suite pins every branch. The card title and the switch
- * below say "registration" already, so this is pure state + counts: the
- * id rides inside whichever line is showing, never as its own row.
+ * below say "registration" already, so this is pure state. The happy path
+ * (registered) is SILENT since 2026-10-27 — the counts said nothing the
+ * 接入 API tab's own model list didn't, and a status that only speaks when
+ * something is wrong keeps the panel scannable. The id shows only in the
+ * pending/off lines.
  */
 export function ProviderRegStatus({ llm, tt }: { llm?: LlmData | null; tt: Tt }): unknown {
   if (!llm || typeof llm !== "object") return null;
+  // The happy path is SILENT (2026-10-27) but must still SHORT-CIRCUIT here:
+  // falling through would reach the pending line below and tell a working
+  // registration it "has not landed yet" (2026-10-27 真机：能正常对话却报
+  // 「注册尚未生效」——就是缺了这一段导致的状态错报)。
+  if (llm.registerProvider === true && llm.providerRegistered === true) {
+    return null;
+  }
   // Order matters: a specific failure outranks a capability gap, which
   // outranks "the switch is ticked but registration has not landed yet".
   // The old fall-through told the reader "tick the switch above" when the
   // switch was ALREADY ticked and the registration silently failed — a lie
   // pointing at the wrong fix.
-  if (llm.registerProvider === true && llm.providerRegistered === true) {
-    return h("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" }, role: "status" },
-      format(tt("llm.registered"), {
-        id: String(llm.providerId ?? ""),
-        models: count(llm.modelCount),
-        vision: count(llm.visionCount)
-      }));
-  }
   if (llm.registerProvider === true && typeof llm.providerError === "string" && llm.providerError !== "") {
     return h("div", { style: S.formError, role: "alert" }, format(tt("llm.error"), { error: llm.providerError }));
   }

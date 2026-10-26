@@ -82,14 +82,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"pool.exhaustedNotice": "部分积分池已耗尽（剩余 0），最早于 {time} 重置；只有在别处没有额度来源的模型才会在此之前暂不可选。",
 			"pool.reset": "重置 {time}",
 			"pool.grant": "返赠余额 {balance}",
+			"pool.grantNearest": "{balance} 积分会在{time}到期",
 			"pool.grantExpiry": "最近返赠到期 {time}（{balance} 分）",
 			"pool.dedicated": "专属池",
 			"pool.default": "通用池",
-			"pool.callable": "可调用",
-			"pool.coverageUnverified": "覆盖（未核实）",
-			"pool.details": "模型与返赠详情",
-			"pool.locked": "需开通 +{count} 个",
-			"pool.uncounted": "不计入积分池：{models}",
 			"shape.api": "接口",
 			"shape.missing": "缺少字段",
 			"section.trend": "每模型消耗（近 {hours} 小时 · 缓存 {cache} 秒）",
@@ -115,16 +111,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.empty": "请输入 sk- 开头的 API Key",
 			"llm.footnote": "Key 只保存在 DSH 凭据中，不会写入插件目录或日志；请求时按次读取。",
 			"llm.keyRegisterHint": "还没有 API Key？前往官网免费获取 →",
-			"llm.keyManageHint": "前往官网管理额度 →",
 			"llm.ephemeral": "注意：当前 Host 没有凭据服务，Key 只保存在内存中，重启后失效。",
-			"llm.keyPresent": "已配置（来源：{source}）",
 			"llm.noKey": "尚未配置——在上方粘贴 sk- Key 并保存。",
-			"llm.src.credentials": "DSH 凭据",
-			"llm.src.env": "环境变量 SENSENOVA_API_KEY",
-			"llm.src.memory": "本机内存",
 			"llm.off": "未向 DSH 注册——勾选上方开关即可开启（id：{id}）。",
 			"llm.registeredPending": "开关已开但注册尚未生效（id：{id}）——等待下一次自动刷新；若持续未注册，检查 Host 日志。",
-			"llm.registered": "已注册 {id}：{models} 个模型，{vision} 个支持图片输入。",
 			"llm.noService": "registerProvider 已开启，但当前 Host 没有提供 LLM 注册服务。",
 			"llm.error": "提供方注册失败：{error}",
 			"llm.switch": "向 DSH 注册",
@@ -189,7 +179,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"poolMng.note": "备注",
 			"poolMng.saveName": "保存",
 			"poolMng.routeMissing": "Host 未加载本插件的池路由：正在运行的是旧构建。请完全退出 DSH（含托盘图标）后重新启动。",
-			"poolMng.concurrentHint": "全局在途上限；0 = 跟随 key 数",
+			"poolMng.concurrentHint": "全局在途上限",
 			"poolMng.empty": "池为空：在 cordis.patch.yml 配置 accounts，或保存一把 Key",
 			"poolMng.phaseRunning": "运行",
 			"poolMng.phaseBlocked": "阻塞",
@@ -252,14 +242,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"pool.exhaustedNotice": "Some credit pools are exhausted (0 remaining); the earliest resets at {time}. Only models with no other pool left to draw on become unselectable until then.",
 			"pool.reset": "resets {time}",
 			"pool.grant": "Grant balance {balance}",
+			"pool.grantNearest": "{balance} credits expire at {time}",
 			"pool.grantExpiry": "Next grant expiry {time} ({balance} cr)",
 			"pool.dedicated": "dedicated",
 			"pool.default": "default",
-			"pool.callable": "Callable",
-			"pool.coverageUnverified": "Covered (unverified)",
-			"pool.details": "Models & grant details",
-			"pool.locked": "+{count} need activation",
-			"pool.uncounted": "Not billed to credit pools: {models}",
 			"shape.api": "endpoint",
 			"shape.missing": "missing field",
 			"section.trend": "Per-model consumption (last {hours} h · cached {cache} s)",
@@ -285,16 +271,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.empty": "Enter an API key starting with sk-",
 			"llm.footnote": "The key is kept only in the DSH credentials, never in this plugin's folder or logs; it is read per request.",
 			"llm.keyRegisterHint": "No API key yet? Get a free one on the official site →",
-			"llm.keyManageHint": "Manage quota on the official site →",
 			"llm.ephemeral": "Note: this Host has no credentials service, so the key lives in memory only and is lost on restart.",
-			"llm.keyPresent": "Configured (source: {source})",
 			"llm.noKey": "Not configured — paste an sk- key above and save.",
-			"llm.src.credentials": "DSH credentials",
-			"llm.src.env": "environment SENSENOVA_API_KEY",
-			"llm.src.memory": "memory",
 			"llm.off": "Not registered with DSH — tick the switch above (id: {id}).",
 			"llm.registeredPending": "Switch is on but registration has not landed yet (id: {id}) — wait for the next automatic refresh; if it persists, check the Host logs.",
-			"llm.registered": "Registered {id}: {models} model(s), {vision} with image input.",
 			"llm.noService": "registerProvider is on, but this Host exposes no LLM registration service.",
 			"llm.error": "Provider registration failed: {error}",
 			"llm.switch": "Register with DSH",
@@ -359,7 +339,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"poolMng.note": "note",
 			"poolMng.saveName": "save",
 			"poolMng.routeMissing": "The Host is not serving this plugin's pool route: an older build is running. Fully quit DSH (including the tray icon) and start it again.",
-			"poolMng.concurrentHint": "global in-flight cap; 0 = follow key count",
+			"poolMng.concurrentHint": "global in-flight cap",
 			"poolMng.empty": "Pool is empty: configure accounts in cordis.patch.yml or save a key",
 			"poolMng.phaseRunning": "running",
 			"poolMng.phaseBlocked": "blocked",
@@ -1550,34 +1530,34 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 //#endregion
 //#region src/client/provider-controls.ts
 /**
-	* The API-key card's status: ONLY key provenance (+ the ephemeral-host
-	* warning). Registration state lives in `ProviderRegStatus` on the
-	* provider card — after the panel split into one card per concern, a
-	* line about registration inside the key card was information flying
-	* across card boundaries, repeating what the provider card's own switch
-	* and status already say.
+	* The API-key card's status: ONLY a missing-key nudge (+ the ephemeral-host
+	* warning). A stored key is silent — the form's own 显示 button and the save
+	* note say it (2026-10-27; the provenance line was noise). Registration
+	* state lives in `ProviderRegStatus` on the provider card — after the panel
+	* split into one card per concern, a line about registration inside the key
+	* card was information flying across card boundaries, repeating what the
+	* provider card's own switch and status already say.
 	*
 	* Hook-free on purpose: like the pool cards, it is exercised by the Node
 	* render suite, so a reworded or dropped status line fails a check. It
 	* renders ONLY from the snapshot's `llm` block, which never carries the
-	* key itself — booleans and a source tag.
+	* key itself — booleans only.
 	*/
 	function ProviderStatus({ llm, tt }) {
 		if (!llm || typeof llm !== "object") return null;
 		const rows = [];
-		const sourceText = llm.hasApiKey === true ? format(tt("llm.keyPresent"), { source: tt(dictKey("llm.src", String(llm.keySource ?? ""))) || String(llm.keySource ?? "") }) : tt("llm.noKey");
-		rows.push(h("div", {
+		if (llm.hasApiKey !== true) rows.push(h("div", {
 			style: {
 				fontSize: 12,
 				color: "var(--dsw-alias-label-secondary)"
 			},
 			role: "status"
-		}, sourceText));
+		}, tt("llm.noKey")));
 		if (llm.ephemeral === true) rows.push(h("div", { style: {
 			...S.formNote,
 			color: "var(--dsw-alias-state-warn-primary)"
 		} }, tt("llm.ephemeral")));
-		return h("div", { style: {
+		return rows.length === 0 ? null : h("div", { style: {
 			display: "flex",
 			flexDirection: "column",
 			gap: 6,
@@ -1587,22 +1567,15 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	/**
 	* The provider card's registration status, hook-free like `ProviderStatus`
 	* so the render suite pins every branch. The card title and the switch
-	* below say "registration" already, so this is pure state + counts: the
-	* id rides inside whichever line is showing, never as its own row.
+	* below say "registration" already, so this is pure state. The happy path
+	* (registered) is SILENT since 2026-10-27 — the counts said nothing the
+	* 接入 API tab's own model list didn't, and a status that only speaks when
+	* something is wrong keeps the panel scannable. The id shows only in the
+	* pending/off lines.
 	*/
 	function ProviderRegStatus({ llm, tt }) {
 		if (!llm || typeof llm !== "object") return null;
-		if (llm.registerProvider === true && llm.providerRegistered === true) return h("div", {
-			style: {
-				fontSize: 12,
-				color: "var(--dsw-alias-label-secondary)"
-			},
-			role: "status"
-		}, format(tt("llm.registered"), {
-			id: String(llm.providerId ?? ""),
-			models: count(llm.modelCount),
-			vision: count(llm.visionCount)
-		}));
+		if (llm.registerProvider === true && llm.providerRegistered === true) return null;
 		if (llm.registerProvider === true && typeof llm.providerError === "string" && llm.providerError !== "") return h("div", {
 			style: S.formError,
 			role: "alert"
@@ -2366,12 +2339,12 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		}, tt("llm.saved")) : null, formError ? h("p", {
 			style: S.formError,
 			role: "alert"
-		}, formError) : null, h("p", { style: S.formNote }, tt("llm.footnote")), h("a", {
+		}, formError) : null, h("p", { style: S.formNote }, tt("llm.footnote")), llm?.hasApiKey === true ? null : h("a", {
 			href: SENSENOVA_SIGNUP_URL,
 			target: "_blank",
 			rel: "noreferrer",
 			style: S.externalLink
-		}, tt(llm?.hasApiKey === true ? "llm.keyManageHint" : "llm.keyRegisterHint")));
+		}, tt("llm.keyRegisterHint")));
 		return h("form", { onSubmit: submit }, keyEditor, h(ProviderStatus, {
 			llm,
 			tt
@@ -2884,26 +2857,19 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	}
 	/**
 	* One pool card. The open state is intentionally tiny: name, type chip,
-	* spendable grant balance, and the twin quota sub-cards. Everything
-	* explanatory (grant expiry, the model coverage lists) folds into one
-	* `<details>` row so the deck stays scannable on wide screens.
-	*
-	* `catalogAvailable` (the snapshot's own flag) says whether the Host actually
-	* reached `GET /v1/models` this poll. Without a catalog the split cannot be
-	* made: `callableModels` IS the plan's claim list and `lockedModels` is empty
-	* by construction — so the fold must label the list as UNVERIFIED coverage,
-	* not claim every model is callable. `undefined` (an old caller that never
-	* passes the prop) keeps the verified wording, matching the Host that always
-	* states the flag.
+	* spendable grant balance (hover = the nearest expiring grant), and the twin
+	* quota sub-cards. The former 模型与返赠详情 fold (callable/locked coverage
+	* lists, uncounted models, the grant-expiry line) was removed 2026-10-27:
+	* every callable model is configurable in the 接入 API tab, the composer pill
+	* footnote still carries the grant expiry, and the lists read as noise.
 	*/
-	function PoolCard({ pool, tt, catalogAvailable }) {
-		const callable = pool.callableModels || pool.modelIds || [];
-		const locked = pool.lockedModels || [];
-		const unverified = catalogAvailable === false;
-		const hasDetails = pool.nearestGrantExpiry || callable.length > 0 || locked.length > 0;
+	function PoolCard({ pool, tt }) {
 		return h("div", { style: S.card }, h("div", { style: S.cardHead }, h("span", { style: S.poolName }, pool.name), h("span", { style: S.chip }, pool.poolType === "dedicated" ? tt("pool.dedicated") : tt("pool.default")), h("span", { style: S.spacer }), (pool.grantBalance ?? 0) > 0 ? h("span", {
 			style: S.grantChip,
-			title: format(tt("pool.grant"), { balance: count(pool.grantBalance) })
+			title: pool.nearestGrantExpiry !== null && (pool.nearestGrantExpiringBalance ?? 0) > 0 ? format(tt("pool.grantNearest"), {
+				balance: count(pool.nearestGrantExpiringBalance),
+				time: clockLong(pool.nearestGrantExpiry)
+			}) : format(tt("pool.grant"), { balance: count(pool.grantBalance) })
 		}, format(tt("pool.grant"), { balance: count(pool.grantBalance) })) : null), h("div", { style: S.quotas }, h(QuotaCard, {
 			label: tt("pool.window5h"),
 			window: pool.window5h,
@@ -2912,26 +2878,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			label: tt("pool.window7d"),
 			window: pool.window7d,
 			tt
-		})), hasDetails ? h("details", { style: S.details }, h("summary", { style: S.detailsSummary }, tt("pool.details")), h("div", { style: S.detailsBody }, pool.nearestGrantExpiry ? h("div", { style: S.grant }, format(tt("pool.grantExpiry"), {
-			time: clockLong(pool.nearestGrantExpiry),
-			balance: count(pool.nearestGrantExpiringBalance)
-		})) : null, callable.length > 0 ? h("div", { style: S.models }, h("span", { style: {
-			...S.muted,
-			fontSize: 12,
-			marginRight: 2
-		} }, `${unverified ? tt("pool.coverageUnverified") : tt("pool.callable")}:`), callable.map((model) => h("span", {
-			key: model,
-			style: S.modelTag
-		}, model))) : null, locked.length > 0 ? h("div", {
-			style: {
-				...S.models,
-				...S.muted
-			},
-			title: locked.join(", ")
-		}, h("span", { style: {
-			fontSize: 12,
-			marginRight: 2
-		} }, format(tt("pool.locked"), { count: locked.length }))) : null)) : null);
+		})));
 	}
 	/**
 	* A top-of-section notice for the "transient exhaustion" case: when one or
@@ -3329,14 +3276,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			}), h("div", { style: S.poolsGrid }, (pools?.pools || []).map((pool) => h(PoolCard, {
 				key: pool.id,
 				pool,
-				tt,
-				catalogAvailable: data.catalogAvailable !== false
-			}))), Array.isArray(data.uncountedModels) && data.uncountedModels.length > 0 ? h("div", { style: {
-				...S.muted,
-				fontSize: 12,
-				marginTop: -4,
-				marginBottom: 4
-			} }, format(tt("pool.uncounted"), { models: data.uncountedModels.join(" · ") })) : null), h(SectionCard, {
+				tt
+			})))), h(SectionCard, {
 				title: format(tt("section.trend"), {
 					hours: trend?.hours ?? 24,
 					cache: data?.cacheSeconds ?? 60
@@ -3984,7 +3925,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-10-27T00:20";
+		const CLIENT_BUILD = "2026-10-27T04:31";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			console.info(`[dsh-sensenova-suite] client build ${CLIENT_BUILD}`);

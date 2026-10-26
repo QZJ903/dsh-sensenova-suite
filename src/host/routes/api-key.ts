@@ -21,14 +21,14 @@ export const API_KEY_PATH = `/api/${name}/api-key`;
 /**
  * Register the API-key route. Wiring subset: `settings`, `apiKeyStore`,
  * `catalogStore`, `providerState`, `publishProvider`, `cache`, `inflight`,
- * `logger`.
+ * `logger`, `poolAdmin`.
  * @param ctx - the host root context (only `ctx.webServer` is used here).
- * @param {Pick<Wiring, "settings" | "apiKeyStore" | "catalogStore" | "providerState" | "publishProvider" | "cache" | "inflight" | "logger">} wiring
+ * @param {Pick<Wiring, "settings" | "apiKeyStore" | "catalogStore" | "providerState" | "publishProvider" | "cache" | "inflight" | "logger" | "poolAdmin">} wiring
  *   - the subset this route reads, as assembled by `apply()` in `index.ts`.
  * @returns {Function} the `off()` unregister callback.
  */
-export function registerApiKeyRoute(ctx: any, wiring: Pick<Wiring, "settings" | "apiKeyStore" | "catalogStore" | "providerState" | "publishProvider" | "cache" | "inflight" | "logger">) {
-  const { settings, apiKeyStore, catalogStore, providerState, publishProvider, cache, inflight, logger } = wiring;
+export function registerApiKeyRoute(ctx: any, wiring: Pick<Wiring, "settings" | "apiKeyStore" | "catalogStore" | "providerState" | "publishProvider" | "cache" | "inflight" | "logger" | "poolAdmin">) {
+  const { settings, apiKeyStore, catalogStore, providerState, publishProvider, cache, inflight, logger, poolAdmin } = wiring;
 
   return ctx.webServer.register({
     kind: "exact",
@@ -74,6 +74,10 @@ export function registerApiKeyRoute(ctx: any, wiring: Pick<Wiring, "settings" | 
           // re-sync them to what was just published, or the next poll re-publishes
           // (churns) an already-empty offer.
           syncSignaturesAfterPublish(providerState);
+          // 清除面板 key 后把池里驻留的旧 default 槽一并摘出：池每进程只首种
+          // 一次，不重解析则请求继续用已清除的旧 key（2026-10-27）。
+          await poolAdmin?.refreshKeys()
+            .catch((error: unknown) => logger?.warn?.(`${name}: pool reseed failed after api-key forget`, error));
           await answer();
         } catch (error) {
           await answer({ ok: false, error: redactedError(error) });
@@ -92,6 +96,10 @@ export function registerApiKeyRoute(ctx: any, wiring: Pick<Wiring, "settings" | 
       // Generation-bumping clear: a catalog flight from the OLD key that lands
       // after this point must not be served as the new key's models.
       clearCoalescedFetch(cache, inflight);
+      // 但池侧不是每请求解析：default 槽按首次 seed 的旧值驻留，保存新面板
+      // key 后必须重解析，否则请求继续用旧 key（与加 key 不入池同一根因）。
+      await poolAdmin?.refreshKeys()
+        .catch((error: unknown) => logger?.warn?.(`${name}: pool reseed failed after api-key save`, error));
       await answer();
     }, settings.allowedHosts)
   });

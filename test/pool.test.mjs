@@ -6,7 +6,7 @@
  *   - parseRetryAfterMs 秒数与 HTTP 日期两形态；
  *   - KeyOrchestrator：按组亲和（商汤组粘、通用组轮）、(key,组) 池格跳过
  *     与 groupFullyPoolMarked、连续 rate 踢出（阈值 3）、探测到期恢复、
- *     全局槽排队；
+ *     全局槽排队、refreshKeys 重种（新增入池/消失摘出/存量相位保留）；
  *   - normalizeAccounts / normalizeModelGroups 的丢弃与回落。
  */
 import { strict as assert } from "node:assert";
@@ -133,6 +133,58 @@ try {
   check("释放后排队者放行", thirdReleased === true);
   rel2(); rel3();
 } catch (e) { fail("KeyOrchestrator", e); }
+
+// ── 3i. refreshKeys：面板改凭据后免重启同步池（2026-10-27「未入池」bug）─────
+// 池每进程只首种一次；加 key / 换面板 key / 清面板 key 走 refreshKeys 重解析。
+// 语义 = 重启后的首次 seed：新增入池、值变/消失的旧 key 摘出、存量相位保留。
+try {
+  // id 必须显式稳定：不能用数组下标派生（splice 后全体 id 平移，语义就变了）。
+  const accounts = [
+    { id: "acc-0", key: "sk-a" },
+    { id: "acc-1", key: "sk-b" },
+  ];
+  const orch = new KeyOrchestrator({
+    params: () => ({ ...DEFAULT_ORCHESTRATOR_PARAMS, modelGroups: {} }),
+    resolveKeys: async () => accounts.map((a) => ({ id: a.id, key: a.key })),
+    probe: async () => true,
+  });
+  await orch.pickStart({ model: "m" }); // 触发首种（acc-0/acc-1 两把）
+  accounts.push({ id: "acc-2", key: "sk-c" }); // 面板加第三把——修复前它永远「未入池」且轮换选不中
+  await orch.refreshKeys();
+  const st1 = await orch.statusById();
+  check("refreshKeys：新加的 key 进池并报 running",
+    st1.find((row) => row.id === "acc-2")?.phase === "running", JSON.stringify(st1));
+  check("refreshKeys：新 key 可被轮换选中",
+    (await orch.pickNext(new Set(["sk-a", "sk-b"]), "general")) === "sk-c",
+    JSON.stringify(orch.snapshot().running));
+
+  accounts.shift(); // 删除 acc-0
+  await orch.refreshKeys();
+  const st2 = await orch.statusById();
+  check("refreshKeys：消失的 id 不再出现在 statusById",
+    st2.some((row) => row.id === "acc-0") === false, JSON.stringify(st2));
+  check("refreshKeys：消失的 key 摘出池",
+    orch.snapshot().running.includes("sk-a") === false, JSON.stringify(orch.snapshot().running));
+
+  accounts[0].key = "sk-b2"; // acc-1 换值（同 id 不同 key，面板 key 替换的形态）
+  await orch.refreshKeys();
+  const st3 = await orch.statusById();
+  check("refreshKeys：同 id 换值后新值入池",
+    st3.find((row) => row.id === "acc-1")?.phase === "running" && orch.snapshot().running.includes("sk-b2"),
+    JSON.stringify(st3));
+  check("refreshKeys：换值后旧值不再在池",
+    orch.snapshot().running.includes("sk-b") === false, JSON.stringify(orch.snapshot().running));
+
+  // 存量相位跨重种保留：把 acc-1 的新值连踢三次进阻塞态，refreshKeys 后不复活。
+  orch.reportRateLimited("sk-b2");
+  orch.reportRateLimited("sk-b2");
+  const kicked = orch.reportRateLimited("sk-b2");
+  check("重种用例前置：连续 3 次 rate 踢出", kicked.kicked === true, JSON.stringify(kicked));
+  await orch.refreshKeys();
+  const st4 = await orch.statusById();
+  check("refreshKeys：阻塞相位跨重种保留（不复活成 running）",
+    st4.find((row) => row.id === "acc-1")?.phase === "blocked", JSON.stringify(st4));
+} catch (e) { fail("refreshKeys", e); }
 
 // ── 4. 归一化 ───────────────────────────────────────────────────────────────
 try {

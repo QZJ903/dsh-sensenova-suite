@@ -133,10 +133,13 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
         : null,
     formError ? h("p", { style: S.formError, role: "alert" }, formError) : null,
     h("p", { style: S.formNote }, tt("llm.footnote")),
-    // The official-site link stays resident: no key yet → sign-up nudge,
-    // key configured → quota management.
-    h("a", { href: SENSENOVA_SIGNUP_URL, target: "_blank", rel: "noreferrer", style: S.externalLink },
-      tt(llm?.hasApiKey === true ? "llm.keyManageHint" : "llm.keyRegisterHint"))
+    // The official-site link only exists for the no-key state (sign-up
+    // nudge). With a key configured the management link was noise — the
+    // user reaches the portal from the platform console anyway (2026-10-27).
+    llm?.hasApiKey === true
+      ? null
+      : h("a", { href: SENSENOVA_SIGNUP_URL, target: "_blank", rel: "noreferrer", style: S.externalLink },
+          tt("llm.keyRegisterHint"))
   );
   // The SectionCard wrapping this form is the collapse: one fold, not
   // two. An inner `<details>` around the editor meant opening the card
