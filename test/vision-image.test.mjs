@@ -3,7 +3,7 @@
  *
  * 钉住的契约：
  *   - image-tools：参数校验（空 prompt / edits 无 images 抛错）、成功值形状
- *     （b64 → imageDataUrl + savePath 落盘）、失败进 30s 冷却（冷却期直接拒绝）、
+ *     （b64 → imageDataUrl + 面板 outputDir 落盘）、失败进 30s 冷却（冷却期直接拒绝）、
  *     key 经池解析并上报成功；
  *   - vision/run：describe 信封（成功 metadata.attempts / 失败 envelope），fetch 全部走注入桩；
  *   - vision/bridge：contentHasImage 递归（含 tool-result 内嵌）；
@@ -48,16 +48,17 @@ try {
   });
 
   resetImageCooldown();
-  const okValue = await callImageApi(deps(), { prompt: "一只海豹", savePath: undefined }, "text2img", "/images/generations");
+  const okValue = await callImageApi(deps(), { prompt: "一只海豹" }, "text2img", "/images/generations");
   check("文生图成功值形状", okValue.ok === true && okValue.imageDataUrl?.startsWith("data:image/png;base64,") === true
     && okValue.usage?.total_tokens === 30, JSON.stringify(okValue).slice(0, 160));
   check("key 经池按模型解析", keysResolved[0] === "sensenova-u1.5-lite", keysResolved.join(","));
   check("成功上报池", successes[0] === "sk-pool-1");
 
-  // savePath 落盘
+  // 落盘只由面板「输出目录」决定（savePath 参数已移除——模型不该决定落盘位置）
   const dir = mkdtempSync(join(tmpdir(), "suite-image-"));
-  const saved = await callImageApi(deps(), { prompt: "落盘测试", savePath: dir }, "text2img", "/images/generations");
-  check("savePath 落盘返回路径", typeof saved.imagePath === "string" && saved.imagePath.startsWith(dir), saved.imagePath);
+  const dirDeps = { ...deps(), options: () => ({ ...imageOptions, outputFormat: "png", responseFormat: "b64_json", promptExtend: true, outputDir: dir }) };
+  const saved = await callImageApi(dirDeps, { prompt: "落盘测试" }, "text2img", "/images/generations");
+  check("面板 outputDir 落盘返回路径", typeof saved.imagePath === "string" && saved.imagePath.startsWith(dir), saved.imagePath);
   rmSync(dir, { recursive: true, force: true });
 
   // 参数校验
@@ -72,6 +73,23 @@ try {
   resetImageCooldown();
   const editValue = await callImageApi(deps(), { prompt: "背景换冰川", images: [{ image_url: "https://example.com/a.png" }] }, "img2img", "/images/edits");
   check("img2img 成功", editValue.ok === true, JSON.stringify(editValue).slice(0, 120));
+
+  // 参数强制覆盖（2026-10-27）：面板配置是唯一真源——args 带上同名参数也被压掉。
+  // 旧 args 优先逻辑让模型的 watermark:true 压过面板「关闭水印」，水印关不掉。
+  resetImageCooldown();
+  const bodies = [];
+  const overrideDeps = {
+    ...deps(),
+    fetchImpl: (async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("x").toString("base64") }] }), { status: 200 });
+    }),
+  };
+  await callImageApi(overrideDeps, { prompt: "压参数", watermark: true, model: "sensenova-u1.5-fast", size: "512x512", prompt_extend: false }, "text2img", "/images/generations");
+  check("面板配置强制覆盖 args（水印/模型/尺寸/润色）",
+    bodies[0]?.watermark === false && bodies[0]?.model === "sensenova-u1.5-lite"
+    && bodies[0]?.size === "1024x1024" && bodies[0]?.prompt_extend === true,
+    JSON.stringify(bodies[0]));
 
   // 冷却：失败 → 30s 内直接拒绝
   resetImageCooldown();

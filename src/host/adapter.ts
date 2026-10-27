@@ -39,6 +39,8 @@ import { parseRetryAfterMs, classify429Body, classify429Full, QUOTA_RATE_RETRY_F
 import { retryableCodes } from './llm-retry.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
 import { KNOWN_UNROUTABLE_MODELS } from './llm-models.ts';
+import { IMAGE_INPUT_MODALITIES, inputModalitiesFor } from './modality.ts';
+import { traceLog } from './trace-log.ts';
 
 /**
  * SenseNova 目录通常不披露上下文字段，这里用 131072 作为合理默认
@@ -89,6 +91,7 @@ import { parseResponsesSse } from './wire/sse-responses.ts';
 import { parseAnthropicSse } from './wire/sse-anthropic.ts';
 import { resolveWirePlan, type WireProtocol } from './wire/plan.ts';
 import { prepareImages, type ImageAccessResolver, type PreparedImage } from './wire/blocks.ts';
+import { contentHasImage } from './vision/bridge.ts';
 import type { WireKind } from './wire/types.ts';
 
 export interface SensenovaConnection {
@@ -150,9 +153,10 @@ export interface SensenovaAdapterDeps {
   protocolOverrides?: () => Record<string, string>;
   /**
    * 每模型可用思考档位（dsh-sensenova-suite 扩展点，可选）：从 pool.json
-   * `thinking` 分区读取（{ modelId → ["off","low",...] }）。目录解析出的
-   * reasoning.efforts 会被它覆盖（交并集规则见 parseCatalog 注释）——DSH
-   * 对话界面的思考档位可选集 = 用户勾选集。缺省 undefined = 目录词表。
+   * `thinking` 分区读取（{ modelId → ["off","low",...] }）。在读取边界
+   * （listModels/resolveModel/stream）经 withUserThinking 现算覆盖
+   * reasoning.efforts——DSH 对话界面的思考档位可选集 = 用户勾选集，改勾选
+   * 即生效（不烘焙进目录缓存，无需重启）。缺省 undefined = 目录词表。
    */
   thinkingOverrides?: () => Record<string, string[]>;
   fetchImpl?: typeof fetch;
@@ -176,14 +180,26 @@ export interface SensenovaAdapterDeps {
    * 字节须经 resolveImageAttachmentAccess 桥接的本地只读路径（或现成 URL）取得。
    * 缺省 undefined → 图像按宿主 textOnlyImageText 占位出站（不静默丢弃）。
    */
+  /**
+   * 图片桥换图器（suite 扩展，vision/bridge.ts createImageSwapper 的产物）：
+   * 目标模型在「可看图」勾选集（pool.json vision.visionModels）里时图片原样
+   * 进请求，不在时换成转述观察文本——换图发生在请求边界，session 与用户侧
+   * 界面保持原图原文。缺省 = 不换（零回归）。
+   */
+  imageSwapper?: (messages: unknown, context: { model: string }) => Promise<unknown>;
   resolveImageAccess?: ImageAccessResolver;
+  /** 用户「可看图」勾选集（pool.json vision.visionModels）实时读；图像能力唯一真源。
+   * 两个读者：目录申报边界（listModels/resolveModel）与请求期 entry 注记（stream）。 */
+  visionModelIds?: () => readonly string[];
 }
 
-/** 目录条目：宿主所需的能力元数据快照（listModels 后缓存，resolveModel 消费）。 */
+/** 目录条目：宿主所需的能力元数据快照（listModels 后缓存，resolveModel 消费）。
+ * inputModalities 可缺省：申报「纯文本」会让宿主把图片剥成占位文本（见
+ * modality.inputModalitiesFor），不含 image 的结论一律不申报。 */
 interface CatalogEntry {
   id: string;
   name: string;
-  inputModalities: readonly ModelModality[];
+  inputModalities?: readonly ModelModality[];
   contextWindow?: number;
   maxOutputTokens?: number;
   reasoning?: LlmModelReasoningInfo;
@@ -242,20 +258,6 @@ function firstContextField(raw: Record<string, unknown>): number | undefined {
 function firstMaxOutputField(raw: Record<string, unknown>): number | undefined {
   // max_output_length 是 SenseNova /models 目录的实际字段名，置首优先；OpenAI 风格字段保留兜底。
   return firstPositiveNumber(raw, ['max_output_length', 'max_tokens', 'max_output_tokens', 'max_completion_tokens', 'maxTokens', 'maxOutputTokens', 'maxCompletionTokens']);
-}
-
-/** 把目录声明的输入模态映射为宿主 ModelModality 列表；未声明时回退 ['text']。 */
-function inputModalitiesFrom(raw: Record<string, unknown>): readonly ModelModality[] {
-  const declared = raw.input_modalities;
-  if (!Array.isArray(declared)) return ['text'];
-  const modalities: ModelModality[] = [];
-  for (const item of declared) {
-    const modality = toString(item);
-    if (modality === 'text' || modality === 'image') {
-      if (!modalities.includes(modality)) modalities.push(modality);
-    }
-  }
-  return modalities.length > 0 ? modalities : ['text'];
 }
 
 /** 读取目录中的 effort 词表字段；返回字符串数组或 undefined（无明确词表）。 */
@@ -366,8 +368,30 @@ function reasoningInfoFrom(raw: Record<string, unknown>, modelId: string): LlmMo
   };
 }
 
-/** 解析 OpenAI 模型目录为目录条目；应用自动过滤与失败缓存。 */
-function parseCatalog(value: unknown, failedModels: ReadonlySet<string>, userThinking?: Record<string, string[]>) {
+/** 用户思考档位覆盖（pool.json `thinking` 分区）的现算投影：有勾选集时该模型
+ * reasoning.efforts 改为「用户勾选集」（DSH 对话界面的可选思考档位 = 用户勾选集），
+ * defaultEffort 维持目录解析结果（不在新集内也保留——不影响可选集，只影响默认档）。
+ * 在 listModels/resolveModel/stream 三个读取边界调用，不写回目录缓存（热更新）。 */
+function withUserThinking(
+  entry: CatalogEntry | undefined,
+  model: string,
+  overrides: Record<string, string[]> | undefined,
+): CatalogEntry | undefined {
+  if (entry === undefined) return entry;
+  const userList = overrides?.[model];
+  if (!Array.isArray(userList) || userList.length === 0) return entry;
+  const efforts = effortsAscending(userList);
+  return {
+    ...entry,
+    reasoning: entry.reasoning !== undefined ? { ...entry.reasoning, efforts } : { efforts },
+  };
+}
+
+/** 解析 OpenAI 模型目录为目录条目；应用自动过滤与失败缓存。
+ * 只投影平台数据——用户配置（思考档位/可看图）一律在读取边界现算
+ * （withUserThinking / visionModelIds），绝不烘焙进 24h 目录缓存：缓存内容
+ * 若掺了用户配置，改配置不会失效缓存（2026-10-27「思考档位要重启才生效」根因）。 */
+function parseCatalog(value: unknown, failedModels: ReadonlySet<string>) {
   if (!isRecord(value) || !Array.isArray(value.data)) {
     throw new LlmError('llm-sensenova: unexpected models response shape', 'PROVIDER_PROTOCOL_ERROR');
   }
@@ -385,22 +409,16 @@ function parseCatalog(value: unknown, failedModels: ReadonlySet<string>, userThi
     if (failedModels.has(id)) continue;
     const contextWindow = firstContextField(raw);
     const maxOutputTokens = firstMaxOutputField(raw);
-    let reasoning = reasoningInfoFrom(raw, id);
-    // 3) 用户思考档位覆盖（pool.json `thinking` 分区）：有配置时该模型
-    //    的 reasoning.efforts 改为「用户勾选集」（DSH 对话界面的可选思考档位）。
-    //    目录 defaultEffort 不在用户集时保留原默认（不影响可选集，只影响默认档）。
-    const userList = userThinking?.[id];
-    if (Array.isArray(userList) && userList.length > 0) {
-      const efforts = effortsAscending(userList);
-      reasoning = reasoning === undefined
-        ? { efforts }
-        : { ...reasoning, efforts };
-    }
+    const reasoning = reasoningInfoFrom(raw, id);
     const supportedSamplingParameters = samplingListField(raw);
+    // 条目本义 = 平台申报原样（无 image 不申报）；用户勾选集在申报边界
+    // （listModels/resolveModel）与请求期注记（stream）裁决，不进这份 24h 缓存
+    // ——缓存键不含用户配置，写回会粘住（见缓存失效教训）。
+    const inputModalities = inputModalitiesFor(raw);
     out.push({
       id,
       name: displayNameFor(id),
-      inputModalities: inputModalitiesFrom(raw),
+      ...(inputModalities !== undefined ? { inputModalities } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
       ...(reasoning !== undefined ? { reasoning } : {}),
@@ -955,11 +973,15 @@ export class SensenovaAdapter extends LlmAdapter {
       if (filter === undefined) return true;
       return allowed(new Set(filter.enabledIds))(m) && !filter.unavailableIds.includes(m.id);
     };
+    // 输入模态申报跟「可看图」勾选集走（唯一真源，实时读）：勾选 → ["text","image"]
+    // （宿主放行并按视觉模型对待）；未勾选 → 不申报（宿主对 undefined 放行图片，
+    // 转述兜底才有米下锅；申报「纯文本」= 宿主剥图占位，2026-10-27 两次事故）。
+    const checked = new Set(this.deps.visionModelIds?.() ?? []);
     return models.filter(keep).map((model) => ({
       provider,
       id: model.id,
       name: model.name,
-      inputModalities: model.inputModalities,
+      ...(checked.has(model.id) ? { inputModalities: IMAGE_INPUT_MODALITIES } : {}),
     }));
   }
 
@@ -1036,7 +1058,7 @@ export class SensenovaAdapter extends LlmAdapter {
     // 失败缓存只对同一凭据和 API 地址成立；换 key 或切换端点后，旧 404 不应继续隐藏新目录。
     if (invalidateFailedModels) this.failedModels.clear();
     // 以新快照原子替换缓存，避免 listModels 新目录与 resolveModel 旧能力不一致。
-    const models = parseCatalog(parsed, this.failedModels, this.deps.thinkingOverrides?.());
+    const models = parseCatalog(parsed, this.failedModels);
     this.catalogCredential = apiKey;
     this.catalogApiBase = connection.apiBase;
     this.catalogFetchedAt = Date.now();
@@ -1045,14 +1067,23 @@ export class SensenovaAdapter extends LlmAdapter {
   }
 
   override async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    const entry = this.catalog.find((m) => m.id === model);
+    // 思考档位现算覆盖（DSH 对话界面的可选档位从这里读）——目录缓存只存平台
+    // 数据，改勾选即时生效，无需重启（2026-10-27「档位要重启」根因修复）。
+    const entry = withUserThinking(
+      this.catalog.find((m) => m.id === model),
+      model,
+      this.deps.thinkingOverrides?.(),
+    );
     // SenseNova 目录若无上下文字段，用 131072 作为合理默认（见顶部常量注释）。
     const contextWindow = entry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    // 申报跟「可看图」勾选集走（同 listModels）；旧 `?? ['text']` 兜底是宿主
+    // resolveModelInfo 路径剥图的同一扳机，未勾选一律不申报。
+    const checked = this.deps.visionModelIds?.().includes(model) === true;
     return {
       provider,
       id: model,
       name: entry?.name ?? displayNameFor(model),
-      inputModalities: entry?.inputModalities ?? ['text'],
+      ...(checked ? { inputModalities: IMAGE_INPUT_MODALITIES } : {}),
       context: { contextWindow },
       ...(entry?.maxOutputTokens !== undefined ? { defaultMaxTokens: entry.maxOutputTokens } : {}),
       ...(entry?.reasoning !== undefined ? { reasoning: entry.reasoning } : {}),
@@ -1066,7 +1097,19 @@ export class SensenovaAdapter extends LlmAdapter {
       ? await this.deps.requestSlot(options.signal)
       : undefined;
     // 目录条目驱动字段分派（catalog 未命中时静态表兜底；测试适配器常无目录）。
-    const entry = this.catalog.find((m) => m.id === options.model);
+    const catalogEntry = this.catalog.find((m) => m.id === options.model);
+    // 图像能力唯一真源 = 用户「可看图」勾选集（2026-10-27 二次事故定版）：勾选而
+    // 静态表/目录都没有 image 依据的新模型，也要按视觉模型走完整请求链（投影跳过、
+    // blocks 格式白名单给通用集）。注记只作用于本次请求的 entry 视图，不写回目录
+    // 缓存——缓存键不含用户配置，写回会粘住。
+    const visionChecked = this.deps.visionModelIds?.().includes(options.model) === true;
+    const entry = withUserThinking(
+      visionChecked
+        ? (catalogEntry ?? { id: options.model, name: displayNameFor(options.model), inputModalities: IMAGE_INPUT_MODALITIES })
+        : catalogEntry,
+      options.model,
+      this.deps.thinkingOverrides?.(),
+    );
     // §6.1 分派点：factsFor → resolveWirePlan → 按 wire 构建请求体与路径。
     // wire 一旦选定，整次请求（含所有轮换重试）不再切换——否则同一轮对话会出现
     // Responses/Chat 混合历史，function_call 与 role:tool 的 id 体系会串。
@@ -1083,14 +1126,26 @@ export class SensenovaAdapter extends LlmAdapter {
     if (override === 'anthropic' || override === 'responses' || override === 'chat-completions') {
       wire = override;
     }
-    // add-multimodal-input 2.1：纯文本模型（supportsImages=false）经宿主
-    // projectImagesForTextModel 投影（插件不自造投影）；多模态模型原样携带。
+    // 图片桥（2026-10-27）：换图与否由「可看图」勾选集判定（vision.visionModels，
+    // 换图器内部结合 bridgeMode）——勾选的模型图片原样进请求，未勾选的换成
+    // 转述观察文本。换图发生在请求边界，session 与用户侧界面保持原图原文。
+    let bridgedMessages: GenerateOptions['messages'] = options.messages;
+    if (this.deps.imageSwapper !== undefined && Array.isArray(bridgedMessages)) {
+      bridgedMessages = await this.deps.imageSwapper(bridgedMessages, {
+        model: options.model,
+      }) as GenerateOptions['messages'];
+      // 诊断：换图器已挂但消息里仍有带附件引用的图片块 = 勾选判定的走向核对点。
+      if (contentHasImage(bridgedMessages as never)) {
+        traceLog(`[dsh-sensenova-suite] 图片桥: 换图后消息仍携带图片块（勾选模型走原生，属预期）`);
+      }
+    }
+    // add-multimodal-input 2.1：非视觉模型（facts.supportsImages=false，其判据
+    // 已含上方勾选注记）经宿主 projectImagesForTextModel 投影（插件不自造投影）；
+    // 视觉模型原样携带。桥接换图后消息里已无图片块，投影自然成为无操作。
     const projectedMessages = facts.supportsImages
-      ? options.messages
-      : projectImagesForTextModel(options.messages);
-    const request: GenerateOptions = projectedMessages === options.messages
-      ? options
-      : { ...options, messages: [...projectedMessages] };
+      ? bridgedMessages
+      : projectImagesForTextModel(bridgedMessages);
+    const request: GenerateOptions = { ...options, messages: [...projectedMessages] };
     // 图像载荷按 wire 预解析（格式交集与 kimi URL 降级是 wire 相关的）；400 兜底
     // 切 wire 时按新 wire 重建（发生在任何内容流出之前，无部分发送风险）。
     const imagePayloads = new Map<WireKind, Map<string, PreparedImage>>();
@@ -1205,6 +1260,13 @@ export class SensenovaAdapter extends LlmAdapter {
         }
         const errText = await attempt.text().catch(() => '');
         const retryAfterMs = parseRetryAfterMs(attempt.headers.get('retry-after'));
+        // 400 一律落响应体原文（截 400 字符），三条 wire 都记（chat 也会 400——
+        // 2026-10-27 kimi thinking:'disabled' 被拒时日志盲区，正是这次漏记的线）：
+        // 降级判据只认 invalid_request_error 形状，商汤自家错误形状不触发降级而
+        // 直接漏到对话里；「平台拒绝的是哪个字段」只有 body 原文能回答。
+        if (attempt.status === 400) {
+          traceLog(`[dsh-sensenova-suite] ${wire} wire 400 model "${options.model}" body: ${errText.slice(0, 400)}`);
+        }
         // §5.3 运行时不符兜底：现代协议（Anthropic / Responses）400 且
         // error.type=invalid_request_error → 记进程内 unsupported 集合 + 打日志，
         // 同请求立即沿降级链换下一条 wire 重试一次（发生在任何内容流出之前，是 wire
@@ -1215,7 +1277,7 @@ export class SensenovaAdapter extends LlmAdapter {
           if (wire === 'anthropic') this.anthropicUnsupported.add(options.model);
           else this.responsesUnsupported.add(options.model);
           // eslint-disable-next-line no-console -- 适配器不持有 cordis logger，降级说明走 stderr 日志（避免用户困惑）。
-          console.warn(
+          traceLog(
             `[dsh-sensenova-suite] ${wire} wire rejected model "${options.model}" with 400 invalid_request_error; ` +
               `falling back to ${nextWire} for this and subsequent requests in this process`,
           );

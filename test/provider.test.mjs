@@ -35,7 +35,8 @@ import {
   summarizeCatalog,
   assertProviderOwnership
 } from "../src/host/llm-models.ts";
-import { isImageGenModel } from "../src/host/modality.ts";
+import { isImageGenModel, inputModalitiesFor } from "../src/host/modality.ts";
+import { factsFor } from "../src/host/wire/facts.ts";
 import {
   CATALOG_VERSION,
   KNOWN_CATALOG_VERSIONS,
@@ -226,6 +227,44 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       isImageGenModel(visionChat) === false && isChatModel(visionChat) === true);
     check("a text-output model is neither draw-only nor contradictory",
       isImageGenModel(textChat) === false && isChatModel(textChat) === true);
+
+    // --- inputModalitiesFor：宿主侧图片闸门（2026-10-27 两次图片链路事故）----
+    // 宿主见 descriptor 申报 inputModalities 而无 "image" 会把图片剥成
+    // [image omitted …] 占位文本。图像能力唯一真源 = 用户「可看图」勾选集：
+    // 勾选申报 image、未勾选不申报（宿主放行给转述兜底）、条目本义绝不申报纯文本。
+    check("entry-level: platform text+image passes through unchanged",
+      JSON.stringify(inputModalitiesFor({ input_modalities: ["text", "image"] })) === JSON.stringify(["text", "image"]));
+    check("entry-level: platform text-only is undeclared, never ['text']",
+      inputModalitiesFor({ input_modalities: ["text"] }) === undefined);
+    check("entry-level: an undeclared row stays undeclared",
+      inputModalitiesFor({}) === undefined);
+    check("entry-level: a non-array platform value reads as undeclared",
+      inputModalitiesFor({ input_modalities: "text,image" }) === undefined);
+    check("entry-level: unknown modality names are dropped, image alone still declares",
+      JSON.stringify(inputModalitiesFor({ input_modalities: ["audio", "image"] })) === JSON.stringify(["image"]));
+    check("checked: declares text+image even on a bare row (user config is the truth)",
+      JSON.stringify(inputModalitiesFor({}, true)) === JSON.stringify(["text", "image"]));
+    check("checked: image wins over a text-only platform row (catalog lags docs)",
+      JSON.stringify(inputModalitiesFor({ input_modalities: ["text"] }, true)) === JSON.stringify(["text", "image"]));
+    check("unchecked: undeclared even when the platform declares image (user config wins)",
+      inputModalitiesFor({ input_modalities: ["text", "image"] }, false) === undefined);
+
+    // --- factsFor：未知模型开图（勾选注记 → 通用宽容格式集）------------------
+    // 静态表未收录的新模型勾了「可看图」：adapter 在请求期给 entry 注记 image，
+    // factsFor 的未知分支据此开图并给通用格式集——否则 blocks 白名单为空，
+    // 图片在第三层（格式校验）再次被吃。
+    const unknownFacts = factsFor("brand-new-model", { id: "brand-new-model", inputModalities: ["text", "image"] });
+    check("unknown model with an image-annotated entry turns vision on",
+      unknownFacts.supportsImages === true,
+      JSON.stringify(unknownFacts.supportsImages));
+    check("unknown vision model gets the generic permissive format set",
+      JSON.stringify(unknownFacts.imageFormats) === JSON.stringify(["jpeg", "png", "webp", "gif"]),
+      JSON.stringify(unknownFacts.imageFormats));
+    check("unknown model without any declaration stays text-only",
+      factsFor("brand-new-model", undefined).supportsImages === false);
+    check("known model keeps its static formats when the entry declares image",
+      JSON.stringify(factsFor("deepseek-flash", { id: "deepseek-flash", inputModalities: ["text", "image"] }).imageFormats)
+        === JSON.stringify(["jpeg", "png", "gif", "webp"]));
 
     const built = buildDescriptors([gen, visionChat, textChat], { baseUrl: BASE_URL });
     check("buildDescriptors skips image-generation models",

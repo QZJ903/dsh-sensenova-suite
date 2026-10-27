@@ -27,8 +27,10 @@ import { str, obj, num, errMsg } from "./util.ts";
  * equals the `/api/${name}/…` this half builds in `routes.ts`.
  */
 export const name = "dsh-sensenova-suite";
-/** Cordis services this plugin needs; without `webServer` it stays inactive. */
-export const inject = ["webServer"];
+/** Cordis services this plugin needs; without `webServer` it stays inactive.
+ * `tools` 是 DSH 的工具注册表（上游 image 插件同款 inject + ctx.tools.register；
+ * 2026-10-27：此前只靠 ctx.get("tools") 取，该服务不经 get 暴露，工具从未注册）。 */
+export const inject = ["webServer", "tools"];
 
 /**
  * The plugin's configuration contract in one place.

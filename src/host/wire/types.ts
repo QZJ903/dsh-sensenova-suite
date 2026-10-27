@@ -60,7 +60,8 @@ export interface ModelFacts {
 /** factsFor 的目录侧输入（adapter 的 CatalogEntry 结构子集，避免循环依赖）。 */
 export interface FactsCatalogEntry {
   id: string;
-  inputModalities: readonly string[];
+  /** 可缺省：申报与否由 modality.inputModalitiesFor 裁决（无 image 不申报），facts 不消费此字段。 */
+  inputModalities?: readonly string[];
   contextWindow?: number;
   maxOutputTokens?: number;
   supportedSamplingParameters?: readonly string[];

@@ -31,6 +31,13 @@ export interface PoolFacade {
   protocolOverrides: () => Record<string, string>;
   /** 每模型可用思考档位（面板"思考档位"勾选；pool.json `thinking` 分区）。 */
   thinkingOverrides: () => Record<string, string[]>;
+  /** 图片桥换图器（vision/bridge.ts createImageSwapper 的产物；缺省 = 不换）。 */
+  visionSwapper?: (messages: unknown, context: { model: string }) => Promise<unknown>;
+  /** 原生出图通路的图像解析（附件服务直读 → base64；缺省 = 图片占位出站）。 */
+  resolveImageAccess?: (ref: unknown) => Promise<{ base64: string; mediaType: string } | undefined>;
+  /** 用户「可看图」勾选集实时读（pool.json vision.visionModels）——图像能力唯一真源：
+   * 目录申报边界（listModels/resolveModel）与请求期 entry 注记都从这里读。 */
+  visionModelIds?: () => readonly string[];
 }
 
 /**
@@ -128,6 +135,13 @@ export function createAdapterFactory(pool: PoolFacade) {
       reportOutcome: (key) => orchestrator.reportSuccess(key),
       // 面板允许清单与额度标记在目录出线处过滤（每次 publish 重新读）。
       catalogFilter: () => ({ enabledIds: enabled, unavailableIds: unavailable }),
+      // 图片桥换图器（vision/bridge.ts）：请求边界把图片块换成转述观察。
+      // exactOptionalPropertyTypes：缺省用条件展开，不显式传 undefined。
+      ...(pool.visionSwapper !== undefined ? { imageSwapper: pool.visionSwapper } : {}),
+      // 原生出图通路：勾选「可看图」的模型图片原样进请求，字节从这里读。
+      ...(pool.resolveImageAccess !== undefined ? { resolveImageAccess: pool.resolveImageAccess } : {}),
+      // 可看图勾选集实时读：申报边界 + 请求期注记的唯一真源（见 adapter Deps）。
+      ...(pool.visionModelIds !== undefined ? { visionModelIds: pool.visionModelIds } : {}),
       // 每模型协议覆盖（面板"协议"列；每次请求读取）。
       protocolOverrides: () => pool.protocolOverrides(),
       // 每模型可用思考档位（面板"思考档位"勾选；存 pool.json thinking 分区）。

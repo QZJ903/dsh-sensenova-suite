@@ -304,6 +304,36 @@ for (const model of contract.models) {
     `${visionOffer.length} vs ${visionChat.length}`);
 }
 
+// --- N. anthropic wire effort 出站词表（2026-10-27 真机 400 定版）------------
+// 平台 400 原文：output_config.effort must be one of: low, medium, high, xhigh,
+// max; got "off"。关闭思考的任何方言拼写（off/none/minimal）必须落
+// thinking:{type:'disabled'}；词表外值绝不出现在 output_config。
+{
+  const { anthropicEffortOut } = await import("../src/host/wire/effort.ts");
+  check("anthropic: 关闭思考（off）走 thinking:disabled，不发 effort",
+    anthropicEffortOut("off").thinkingDisabled === true && anthropicEffortOut("off").effortWire === undefined);
+  check("anthropic: chat 方言 none 同样走 thinking:disabled",
+    anthropicEffortOut("none").thinkingDisabled === true && anthropicEffortOut("none").effortWire === undefined);
+  check("anthropic: 静态表方言 minimal 同样走 thinking:disabled",
+    anthropicEffortOut("minimal").thinkingDisabled === true);
+  check("anthropic: 词表内档位走 output_config.effort",
+    anthropicEffortOut("max").effortWire === "max" && anthropicEffortOut("high").effortWire === "high");
+  check("anthropic: 词表外未知值不出站（不上桌让平台打 400）",
+    anthropicEffortOut("ultra").effortWire === undefined && anthropicEffortOut("ultra").thinkingDisabled === false);
+  check("anthropic: 未选档位两字段皆不发",
+    anthropicEffortOut(undefined).effortWire === undefined && anthropicEffortOut(undefined).thinkingDisabled === false);
+
+  // 拼写归一：面板 off / 静态表 minimal → chat·responses 方言的 none。
+  // 旧实现只认 'none'：off 绕过 kimi 的 thinking:disabled 特判、responses 上
+  // 整个省略 reasoning 字段（关闭静默变成「用默认」）。
+  const { canonicalThinkingEffort } = await import("../src/host/wire/effort.ts");
+  check("归一: 面板 off → none", canonicalThinkingEffort("off") === "none");
+  check("归一: 静态表 minimal → none", canonicalThinkingEffort("minimal") === "none");
+  check("归一: chat 方言 none 原样", canonicalThinkingEffort("none") === "none");
+  check("归一: 实档位原样透传", canonicalThinkingEffort("low") === "low" && canonicalThinkingEffort("max") === "max");
+  check("归一: 未选仍为未选", canonicalThinkingEffort(undefined) === undefined);
+}
+
 console.log(JSON.stringify(results, null, 2));
 const failed = results.filter((r) => !r.pass);
 if (failed.length > 0) {

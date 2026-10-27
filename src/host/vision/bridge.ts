@@ -1,11 +1,14 @@
 /**
  * 全局静默读图桥。
  *
- * 机制原样：能力覆盖（包装 resolveModelInfo 注入 image 模态）+ agent/pre-step
- * 钩子（把进入本步的图片替换为「仅模型可见」的观察文本）+ ReplacementCoordinator
- * （历史消息投影一致化，UI 原图不动）。auto 模式下主模型真支持视觉时不接管。
+ * 机制：能力覆盖（包装 resolveModelInfo 注入 image 模态，让 DSH 放行图片进
+ * 管线）+ 请求边界换图（createImageSwapper：目标模型无原生图片输入时，把
+ * 消息里的图片块换成转述观察文本）。换图发生在适配器出站前的最后一站——
+ * session 投影与用户侧界面保持原图原文（2026-10-27 撤掉会话投影补丁：它曾
+ * 把观察文本泄漏进对话界面的历史渲染）。同一张图按附件 ref 缓存（进程级，
+ * 不按转述提示词分键——改提示词不重述历史图），跨轮次只转述一次。
  *
- * 与原版的唯一结构差异：**视觉调用走池**——describeStoredImage 的 key 经注入的
+ * 与原版的唯一结构差异：**视觉调用走池**——describeImage 的 key 经注入的
  * resolveKey()（KeyOrchestrator 按视觉链模型的积分组选 key）。ctx 用宽松本地
  * 形状（get/on），不 import cordis —— 可离线单测。
  *
@@ -14,6 +17,7 @@
 
 import { postChat, extractText } from "./direct.ts";
 import { classify429Full } from "../rate-classify.ts";
+import { traceLog } from "../trace-log.ts";
 import type { ImageAttachmentRef } from "./image-input.ts";
 import type { VisionFeedback, VisionOptions } from "./run.ts";
 
@@ -23,23 +27,21 @@ export type BridgeMode = "off" | "on" | "auto";
 /** 宽松宿主上下文（可测；真实 cordis Context 结构兼容）。 */
 export interface BridgeCtx {
   get?: (service: string) => unknown;
-  on?: (event: string, handler: (payload: never, next: () => Promise<unknown>) => Promise<unknown>) => () => void;
 }
 
-/** 桥依赖：每次调用取最新配置；视觉调用的结局按套件教义回池。 */
-export interface VisionBridgeDeps {
-  ctx: BridgeCtx;
+/** 请求边界换图依赖：每次调用取最新配置；视觉调用的结局按套件教义回池。 */
+export interface ImageSwapperDeps {
   options: () => VisionOptions & { bridgeMode: BridgeMode; bridgePrompt: string };
+  /** 可看图勾选集（pool.json vision.visionModels，缺省 = deepseek-flash /
+   *  kimi-k3 / sensenova-6.8-flash-lite）。判定源：勾选 = 原生看图，不转述。 */
+  checkedIds: () => readonly string[];
   resolveKey: () => Promise<string>;
   feedback: VisionFeedback;
+  /** 读一张已入库图片 → base64（附件服务桥接的本地只读路径）。 */
+  loadImage: (ref: ImageAttachmentRef) => Promise<{ base64: string; mediaType: string }>;
 }
 
-/** 最小附件服务面（读取已入库的聊天图片）。 */
-interface AttachmentsLike {
-  readImage(ref: ImageAttachmentRef, signal?: AbortSignal): Promise<{ data?: unknown; ref?: ImageAttachmentRef }>;
-}
-
-/** 最小 llm 服务面（能力覆盖目标 + 真实能力查询）。 */
+/** 最小 llm 服务面（能力覆盖目标）。 */
 interface LlmLike {
   resolveModelInfo(provider: string, model: string, signal?: AbortSignal): Promise<{
     inputModalities?: readonly string[];
@@ -73,17 +75,6 @@ export function contentHasImage(content: readonly ContentBlockLike[] | undefined
     || (block?.type === "tool-result" && contentHasImage(block.content)));
 }
 
-/** 统计消息中的图片总数。 */
-function countImages(content: readonly ContentBlockLike[] | undefined): number {
-  if (!Array.isArray(content)) return 0;
-  let count = 0;
-  for (const block of content) {
-    if (block?.type === "image") count += 1;
-    else if (block?.type === "tool-result") count += countImages(block.content);
-  }
-  return count;
-}
-
 /** 错误摘要（安全：不吐凭据/URL 细节）。 */
 function errorText(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -91,32 +82,25 @@ function errorText(error: unknown): string {
 }
 
 /**
- * 用直连链识别一张已入库图片（key 经池解析），返回带标注的观察文本。
+ * 用直连链读取一张已入库图片并转述（key 经池解析），返回带标注的观察文本。
+ * 图片字节经注入的 loadImage（附件服务桥接的本地只读路径）取得。
  */
-async function describeStoredImage(
-  ctx: BridgeCtx,
+async function describeImage(
+  loadImage: (ref: ImageAttachmentRef) => Promise<{ base64: string; mediaType: string }>,
   options: VisionOptions,
   resolveKey: () => Promise<string>,
   feedback: VisionFeedback,
   ref: ImageAttachmentRef,
   prompt: string,
-  signal: AbortSignal | undefined,
   meta: { imageIndex: number; imageTotal: number },
 ): Promise<{ text: string; model: string }> {
-  const attachments = ctx.get?.("attachments") as AttachmentsLike | undefined;
-  if (attachments === undefined || typeof attachments.readImage !== "function") {
-    throw new Error("attachments 服务不可用，无法读取聊天图片");
-  }
-  const stored = await attachments.readImage(ref, signal);
-  const bytes = stored?.data;
-  if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
+  const stored = await loadImage(ref);
+  if (typeof stored.base64 !== "string" || stored.base64 === "") {
     throw new Error("图片附件为空或不可读");
   }
   const apiKey = await resolveKey();
-  const base64 = Buffer.from(bytes).toString("base64");
-  const mediaType = stored.ref?.mediaType ?? "image/png";
   const content = [
-    { type: "image_url", image_url: { url: `data:${mediaType};base64,${base64}` } },
+    { type: "image_url", image_url: { url: `data:${stored.mediaType};base64,${stored.base64}` } },
     { type: "text", text: prompt },
   ];
   let result: string;
@@ -169,78 +153,6 @@ export function installCapabilityOverride(
   };
 }
 
-/** 未被覆盖的 resolveModelInfo 引用（查主模型真实能力用）。 */
-let rawResolveModelInfo: ((provider: string, model: string, signal?: AbortSignal) => Promise<{ inputModalities?: readonly string[] }>) | null = null;
-
-/**
- * 查主模型真实图片能力（用未被覆盖的 resolveModelInfo）。
- * 解析失败保守返回 false（沿用接管路径，至少不让请求挂掉）。
- */
-async function modelActuallySupportsImage(
-  provider: string | undefined,
-  model: string | undefined,
-  signal: AbortSignal | undefined,
-): Promise<boolean> {
-  if (typeof provider !== "string" || provider === "" || typeof model !== "string" || model === "") return false;
-  if (typeof rawResolveModelInfo !== "function") return false;
-  try {
-    const info = await rawResolveModelInfo(provider, model, signal);
-    return Array.isArray(info?.inputModalities) && info.inputModalities.includes("image");
-  } catch {
-    return false;
-  }
-}
-
-/** 替换协调器：改 session 消息投影 + surface，让模型看观察文本、UI 留原图。 */
-class ReplacementCoordinator {
-  private readonly pending = new WeakMap<object, Map<string, MessageLike>>();
-  private readonly patched = new Map<object, unknown>();
-
-  ensureSessionProjection(session: object & { deriveMessages?: () => unknown[] }): void {
-    if (this.patched.has(session)) return;
-    const previous = session.deriveMessages;
-    if (typeof previous !== "function") return;
-    const coordinator = this;
-    session.deriveMessages = function (this: object): unknown[] {
-      const messages = previous.call(this) as MessageLike[];
-      const replacements = coordinator.pending.get(this);
-      if (replacements === undefined || replacements.size === 0) return messages;
-      return messages.map((message) => replacements.get(message.id ?? "") ?? message);
-    };
-    this.patched.set(session, previous);
-  }
-
-  stage(session: object & { deriveMessages?: () => unknown[] }, original: MessageLike[], rewritten: MessageLike[]): void {
-    this.ensureSessionProjection(session);
-    let replacements = this.pending.get(session);
-    if (replacements === undefined) {
-      replacements = new Map();
-      this.pending.set(session, replacements);
-    }
-    const activeIds = new Set(original.map((message) => message.id).filter((id): id is string => typeof id === "string"));
-    for (const id of [...replacements.keys()]) {
-      if (!activeIds.has(id)) replacements.delete(id);
-    }
-    for (let index = 0; index < original.length; index += 1) {
-      const originalMessage = original[index];
-      const rewrittenMessage = rewritten[index];
-      if (originalMessage === undefined || rewrittenMessage === undefined) continue;
-      const id = originalMessage.id;
-      if (typeof id !== "string") continue;
-      if (originalMessage === rewrittenMessage || !contentHasImage(originalMessage.content)) continue;
-      replacements.set(id, rewrittenMessage);
-    }
-  }
-
-  dispose(): void {
-    for (const [session, previous] of this.patched) {
-      const target = session as { deriveMessages?: unknown };
-      if (target.deriveMessages !== undefined) target.deriveMessages = previous;
-    }
-    this.patched.clear();
-  }
-}
-
 /** 递归把消息里的 image 块替换为观察文本（保持顺序，含 tool-result 内）。 */
 async function rewriteBridgeMessages(
   messages: MessageLike[],
@@ -281,6 +193,25 @@ async function rewriteBridgeContent(
   return next;
 }
 
+/** 统计消息里的图片块（诊断用）：总数 / 带附件引用 / 已被宿主 offloaded。 */
+export function countImageBlocks(messages: readonly MessageLike[]): { total: number; withRef: number; offloaded: number } {
+  let total = 0;
+  let withRef = 0;
+  let offloaded = 0;
+  const walk = (content: readonly ContentBlockLike[] | undefined): void => {
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (block?.type === "image") {
+        total += 1;
+        if (block.attachment !== undefined) withRef += 1;
+        if ((block as { offloaded?: unknown }).offloaded === true) offloaded += 1;
+      } else if (block?.type === "tool-result") walk(block.content);
+    }
+  };
+  for (const message of messages) walk(message.content);
+  return { total, withRef, offloaded };
+}
+
 /** 构造视觉识别提示：图片索引（多图时标注第几张）。 */
 function buildBridgePrompt(
   options: VisionOptions & { bridgePrompt: string },
@@ -293,112 +224,49 @@ function buildBridgePrompt(
     : base;
 }
 
-/** 一次视觉识别批：把 messages 里的所有图片转成观察文本（失败图 → 失败占位）。 */
-async function preprocessBridgeMessages(
-  ctx: BridgeCtx,
-  options: VisionOptions & { bridgePrompt: string },
-  resolveKey: () => Promise<string>,
-  feedback: VisionFeedback,
-  messages: MessageLike[],
-  signal: AbortSignal | undefined,
-): Promise<MessageLike[]> {
-  const imageTotal = messages.reduce((total, message) => total + countImages(message.content), 0);
-  if (imageTotal === 0) return messages;
-  let imageIndex = 0;
-  return rewriteBridgeMessages(messages, async (ref, _messageId) => {
-    imageIndex += 1;
-    const prompt = buildBridgePrompt(options, imageIndex, imageTotal);
-    try {
-      const result = await describeStoredImage(ctx, options, resolveKey, feedback, ref, prompt, signal, { imageIndex, imageTotal });
-      return result.text;
-    } catch (error: unknown) {
-      return `【图片转换失败：${errorText(error)}】`;
-    }
-  });
-}
+/** 观察文本缓存（按附件 ref id，进程级）：同一张图跨轮次/跨重注册只转述一次；
+ * 不按转述提示词分键——改提示词不重述历史图。失败不缓存（下轮重试）。 */
+const observationCache = new Map<string, string>();
 
-/** pre-step 载荷的宽松形状（dsh-agent Agent/PreStepDecision 的最小面）。 */
-interface PreStepPayload {
-  agent: {
-    session?: object & { deriveMessages?: () => unknown[]; requestHeader?: () => { config?: { provider?: string; model?: string } } | undefined };
-    options?: { provider?: string; model?: string };
-  };
-  signal: AbortSignal;
-}
-interface EnterDecision {
-  kind: "enter";
-  messages: unknown[];
-  startsRequestSeries?: boolean;
-}
-type PreStepDecisionLike = EnterDecision | { kind: string; [key: string]: unknown };
-
-/** bridge 装配（index.ts 调用）：装能力覆盖 + pre-step 钩子，返回清理函数。 */
-export function installVisionBridge(deps: VisionBridgeDeps): () => void {
-  const { ctx } = deps;
-  const coordinator = new ReplacementCoordinator();
-
-  const enabled = (): boolean => {
+/**
+ * 请求边界的图片换图器（适配器出站前调用）。判定源 = 「可看图」勾选
+ * （checkedIds）：勾选的模型原生看图（图片原样进请求），未勾选的走转述。
+ * bridgeMode "off" 不换；"on" 强制换（连勾选的也转述）；"auto" 按勾选判定。
+ * 观察按附件 ref id 缓存——同一张图跨轮次只转述一次。返回新数组；入参消息
+ * 与 session 投影不被触碰——用户侧界面保持原图原文。
+ */
+export function createImageSwapper(deps: ImageSwapperDeps) {
+  return async function swapImagesForObservations<T>(
+    messages: readonly T[],
+    context: { model: string },
+  ): Promise<T[]> {
     const options = deps.options();
-    return options.bridgeMode === "on" || options.bridgeMode === "auto";
-  };
-  // 记录未覆盖前的 resolveModelInfo，供 auto 模式真实能力判断。
-  const llm = ctx.get?.("llm") as LlmLike | undefined;
-  if (llm !== undefined && typeof (llm as { resolveModelInfo?: unknown }).resolveModelInfo === "function") {
-    rawResolveModelInfo = (llm as { resolveModelInfo: (p: string, m: string, s?: AbortSignal) => Promise<{ inputModalities?: readonly string[] }> }).resolveModelInfo.bind(llm);
-  }
-
-  const restoreCapability = installCapabilityOverride(ctx, enabled);
-
-  const disposers: Array<() => void> = [restoreCapability];
-
-  // pre-step：发送前把进入本步的图片替换为观察文本（官方支持的消息替换）。
-  const offPreStep = ctx.on?.("agent/pre-step", (async (
-    payload: PreStepPayload,
-    next: () => Promise<PreStepDecisionLike>,
-  ): Promise<PreStepDecisionLike> => {
-    const decision = await next();
-    if (decision.kind === "reject" || payload.signal.aborted) return decision;
-    const options = deps.options();
-    if (options.bridgeMode === "off") return decision;
-    // auto：主模型真支持视觉时让它直接看原图，不接管。
-    if (options.bridgeMode === "auto") {
-      const header = typeof payload.agent.session?.requestHeader === "function"
-        ? payload.agent.session.requestHeader()
-        : undefined;
-      const headerConfig = header?.config as { provider?: string; model?: string } | undefined;
-      const provider = headerConfig?.provider ?? payload.agent.options?.provider;
-      const model = headerConfig?.model ?? payload.agent.options?.model;
-      if (await modelActuallySupportsImage(provider, model, payload.signal)) return decision;
-    }
-    // 合并派生历史 + 本步消息，统一检测/替换图片；本步消息替换进 decision 返回。
-    const session = payload.agent.session as unknown as object & { deriveMessages?: () => unknown[] } | undefined;
-    const derived = typeof session?.deriveMessages === "function"
-      ? session.deriveMessages() as unknown as MessageLike[]
-      : [];
-    const decisionMessages = (decision as EnterDecision).messages as unknown as MessageLike[] | undefined;
-    if (decisionMessages === undefined) return decision;
-    const modelMessages = [...derived, ...decisionMessages];
-    if (!modelMessages.some((message) => contentHasImage(message.content))) return decision;
-    const rewritten = await preprocessBridgeMessages(ctx, options, deps.resolveKey, deps.feedback, modelMessages, payload.signal);
-    const rewrittenDecision = [...rewritten.slice(derived.length)];
-    if (session !== undefined) coordinator.stage(session, modelMessages, rewritten);
-    const enter: EnterDecision = {
-      kind: "enter",
-      messages: rewrittenDecision,
-      ...decision.kind === "enter" && (decision as EnterDecision).startsRequestSeries === true ? { startsRequestSeries: true } : {},
-    };
-    return enter;
-  }) as never);
-  if (offPreStep !== undefined) disposers.push(() => void offPreStep());
-
-  return () => {
-    for (const dispose of disposers) {
+    if (options.bridgeMode === "off") return [...messages];
+    const typed = messages as unknown as MessageLike[];
+    const stats = countImageBlocks(typed);
+    if (stats.total === 0) return [...messages];
+    const checked = deps.checkedIds().includes(context.model);
+    // 诊断行（仅带图请求输出）：判定源与走向一屏可见。
+    traceLog(
+      `[dsh-sensenova-suite] 图片桥: model=${context.model} 可看图勾选=${checked} bridgeMode=${options.bridgeMode} ` +
+        `图片块=${stats.total}（带附件引用=${stats.withRef}，offloaded=${stats.offloaded}）→ ${checked ? "原生发图" : "转述"}`,
+    );
+    if (options.bridgeMode === "auto" && checked) return [...messages];
+    let imageIndex = 0;
+    const rewritten = await rewriteBridgeMessages(typed, async (ref) => {
+      imageIndex += 1;
+      const cacheKey = ref.id ?? "";
+      const cached = cacheKey !== "" ? observationCache.get(cacheKey) : undefined;
+      if (cached !== undefined) return cached;
+      const prompt = buildBridgePrompt(options, imageIndex, stats.total);
       try {
-        dispose();
-      } catch {
-        // 清理失败静默：桥已卸载，资源尽力释放。
+        const result = await describeImage(deps.loadImage, options, deps.resolveKey, deps.feedback, ref, prompt, { imageIndex, imageTotal: stats.total });
+        if (cacheKey !== "") observationCache.set(cacheKey, result.text);
+        return result.text;
+      } catch (error: unknown) {
+        return `【图片转换失败：${errorText(error)}】`;
       }
-    }
-    coordinator.dispose();
+    });
+    return rewritten as unknown as T[];
   };
 }

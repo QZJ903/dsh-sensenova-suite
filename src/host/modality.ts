@@ -84,3 +84,43 @@ export function isImageGenModel(entry: { output_modalities?: unknown }) {
   const out = entry?.output_modalities;
   return Array.isArray(out) && out.length === 1 && out[0] === "image";
 }
+
+/** 视觉模型的输入模态申报值（listModels/resolveModel 边界与请求期注记共用同一份）。 */
+export const IMAGE_INPUT_MODALITIES: readonly ("text" | "image")[] = Object.freeze(["text", "image"]);
+
+/**
+ * The INPUT-modality declaration one catalog entry contributes, or `undefined`
+ * to declare no modality metadata at all.
+ *
+ * 宿主 LlmRuntime 见 descriptor 申报了 inputModalities 而其中没有 "image" 时，
+ * 会把请求里的图片块剥成 `[image omitted because this model accepts text only;
+ * attachment sha256:…]` 纯文本占位再派发（projectImagesForTextModel）；申报
+ * undefined 时原样放行。图像能力以**用户「可看图」勾选集为唯一真源**
+ * （2026-10-27 二次事故定版：静态表/平台目录都只是依据，不是真源——新模型
+ * 目录未报 image 而实测可看图时，勾选即生效），`checked` 三态决定申报：
+ *
+ *   - `true`（勾选）→ `["text","image"]`：宿主放行并按视觉模型对待；
+ *   - `false`（未勾选）→ `undefined`：宿主仍放行图片，读图桥转述兜底才有米下锅；
+ *     也绝不申报 `['text']`——那是宿主剥图的扳机；
+ *   - `undefined`（目录条目本义，无配置可读的层）→ 平台 `input_modalities`
+ *     去重保留 text/image；不含 image 一律 undefined，绝不申报纯文本。
+ *
+ * @param {object} raw - one raw catalog entry.
+ * @param {boolean|undefined} checked - the user's 可看图 verdict for this model.
+ * @returns {readonly ("text"|"image")[]|undefined}
+ */
+export function inputModalitiesFor(
+  raw: { input_modalities?: unknown },
+  checked?: boolean,
+): readonly ("text" | "image")[] | undefined {
+  if (checked === true) return IMAGE_INPUT_MODALITIES;
+  if (checked === false) return undefined;
+  const declared: ("text" | "image")[] = [];
+  const platform = raw?.input_modalities;
+  if (Array.isArray(platform)) {
+    for (const item of platform) {
+      if ((item === "text" || item === "image") && !declared.includes(item)) declared.push(item);
+    }
+  }
+  return declared.includes("image") ? declared : undefined;
+}

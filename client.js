@@ -153,6 +153,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"tab.api": "接入 API",
 			"tab.multimodal": "多模态",
 			"mm.enabled": "启用工具",
+			"mm.visionEnabled": "启用转述",
 			"mm.text2imgTitle": "文生图",
 			"mm.img2imgTitle": "图生图",
 			"mm.defaultModel": "模型",
@@ -313,6 +314,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"tab.api": "API Integration",
 			"tab.multimodal": "Multimodal",
 			"mm.enabled": "Enable tool",
+			"mm.visionEnabled": "Enable relay",
 			"mm.text2imgTitle": "Text to image",
 			"mm.img2imgTitle": "Image to image",
 			"mm.defaultModel": "Model",
@@ -3163,7 +3165,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			open: openCards.vision !== false,
 			onToggle: () => toggleCard("vision"),
 			tt
-		}, switchRow("toolsEnabled", "visionTools", tt("mm.enabled"), false), modelSelect("vision", tt("mm.visionModel"), visionModels, "sensenova-6.8-flash-lite"), selectRow("vision", "bridgeMode", tt("mm.bridgeMode"), [
+		}, switchRow("toolsEnabled", "visionTools", tt("mm.visionEnabled"), false), modelSelect("vision", tt("mm.visionModel"), visionModels, "sensenova-6.8-flash-lite"), selectRow("vision", "bridgeMode", tt("mm.bridgeMode"), [
 			"auto",
 			"on",
 			"off"
@@ -3925,7 +3927,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-10-27T04:31";
+		const CLIENT_BUILD = "2026-10-27T11:40";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			console.info(`[dsh-sensenova-suite] client build ${CLIENT_BUILD}`);

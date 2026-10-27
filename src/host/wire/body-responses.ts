@@ -12,6 +12,7 @@
 import type { ContentBlock, GenerateOptions, ToolCallBlock } from '@deepseek-ai/dsh-llm';
 import { factsFor } from './facts.ts';
 import { translateUserContent, type PreparedImage } from './blocks.ts';
+import { canonicalThinkingEffort } from './effort.ts';
 import type { FactsCatalogEntry } from './types.ts';
 
 /** Responses 推理摘要配置（reasoning.summary，默认 auto）。 */
@@ -133,10 +134,12 @@ export function buildResponsesBody(
   // 默认 1 不同，是能力损失提示之一）；kimi-k3 固定 temperature=1，出站不发。
   const sendTemperature = options.temperature !== undefined && !facts.blockedSampling.includes('temperature');
 
-  // 「省略优于传无效值」：非 none 档位在 Responses 上是空操作——等于默认档时
-  // 不发 reasoning；偏离默认档在 resolveWirePlan 已降级 Chat（此处只会见到
-  // none / 等于默认 / 未选三种）。仅 none 显式发送 reasoning.effort。
-  const effort = options.reasoningEffort as string | undefined;
+  // 「关闭」要显式发 reasoning.effort:'none'（官方文档：设为 none 可关闭思考模式）；
+  // 档位拼写先归一（off/minimal→none，wire/effort.ts）——旧实现只认 'none'，界面
+  // 发的 off 会整个省略 reasoning 字段，关闭静默变成「用模型默认」。非 none 档位
+  // 是空操作（文档：low/medium/high/xhigh 传入无效）且偏离默认档已降级 Chat，
+  // 此处只会见到 none / 等于默认 / 未选三种。
+  const effort = canonicalThinkingEffort(options.reasoningEffort as string | undefined);
   const reasoning = effort === 'none'
     ? { effort: 'none', summary: config.reasoningSummary ?? 'auto' }
     : undefined;

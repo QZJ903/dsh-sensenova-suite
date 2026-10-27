@@ -35,17 +35,19 @@ import { createTokenStore } from "./token-store.ts";
 import { createFileThrottleStore } from "./throttle-store.ts";
 import { createFileCatalogStore } from "./catalog-store.ts";
 import { createFileProviderStore } from "./provider-store.ts";
-import { profileSegment } from "./state-store.ts";
+import { profileSegment, profileStateDir } from "./state-store.ts";
 import { createApiKeyStore } from "./api-key-store.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "./key-orchestrator.ts";
 import { createFilePoolStore } from "./pool-store.ts";
-import { installVisionBridge } from "./vision/bridge.ts";
+import { createImageSwapper, installCapabilityOverride } from "./vision/bridge.ts";
 import { createProviderPublisher } from "./provider-publish.ts";
 import { registerRoutes } from "./routes.ts";
 import { startSideEffects, teardown } from "./lifecycle.ts";
 import { createEffectRegistry, MOUNT_EFFECT_DRAIN_TIMEOUT_MS } from "./effects.ts";
 import { CODE } from "./codes.ts";
 import { writeLoginTrace } from "./trace.ts";
+import { openTraceFile, setTraceSink, traceLog } from "./trace-log.ts";
+import { join } from "node:path";
 import {
   resolveSettings,
   resolveAuthOverrides,
@@ -147,6 +149,11 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // degrades to today's single shared directory — behaviour unchanged.
   // The throttle deliberately stays shared; see `throttle-store.ts`.
   const profile = profileSegment(ctx);
+  // 诊断文件日志（2026-10-27）：桌面主进程接管宿主 stdout，终端看不到插件的
+  // [dsh-sensenova-suite] 行——同步追加进状态目录（与 pool.json 同目录），tail 排障。
+  const traceSink = openTraceFile(join(profileStateDir(name, profile), "dsh-sensenova-suite.log"));
+  setTraceSink(traceSink);
+  traceLog(`[dsh-sensenova-suite] host 启动，诊断日志就绪（状态目录与 pool.json 同级）`);
 
   // Step three's PRIVATE catalog file: the last `/v1/models` answer the key
   // fetched, plus the curated enabled-model allow-list. It lives under
@@ -232,8 +239,32 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // （外部进程直改状态文件的可见性延迟 ≤ 一个探测周期，可接受）。
   const poolStore = createFilePoolStore({ profile, logger: ctx.logger });
   let poolRecord: import("./pool-store.ts").PoolStoreRecord = { version: 1, disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {}, keys: [], toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}, thinking: {} };
+  let reregisterImageTools: (() => Promise<void>) | undefined;
+  // 发布签名引用（publisher 在下方才创建，TDZ 规避同 reregisterImageTools 模式）。
+  let publishSignature: { signature: string } | undefined;
   const refreshPoolRecord = async () => {
+    const previousToolsEnabled = JSON.stringify(poolRecord.toolsEnabled ?? {});
+    // 影响浏览器端模型目录的两块用户配置：思考档位下拉读 reasoning.efforts、
+    // 发图能力读 inputModalities——adapter 读取边界是热的，但浏览器只在收到
+    // llm/adapters-updated（注册重建）时才重拉目录，变更必须触发一次重建。
+    const previousCatalogAffecting = JSON.stringify([poolRecord.thinking ?? {}, poolRecord.vision?.visionModels ?? []]);
     poolRecord = await poolStore.read().catch(() => poolRecord);
+    // 工具开关热重挂（2026-10-27）：toolsEnabled 变更触发拆旧重挂。**绝不 await**：
+    // 重挂内部任何一步慢/挂都会顺着 await 把保存路由一起吊死（2026-10-27 真机：
+    // 按工具开关卡住）——触发即返回，重挂在后台串行队列里自己走完。
+    if (reregisterImageTools !== undefined && previousToolsEnabled !== JSON.stringify(poolRecord.toolsEnabled ?? {})) {
+      void reregisterImageTools().catch((error: unknown) => {
+        ctx.logger?.warn?.(`${name}: 工具重挂失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+    // 思考档位/可看图勾选变更 → 作废发布签名，下一轮探测（≤30s）走「目录变更」
+    // 路径重建注册并广播 adapters-updated，浏览器重拉目录后下拉即新（2026-10-27
+    // 「档位要重启」链路最后一环）。作废只此一处写：重建后由
+    // syncSignaturesAfterPublish 恢复真值，不会死循环。
+    if (publishSignature !== undefined
+      && previousCatalogAffecting !== JSON.stringify([poolRecord.thinking ?? {}, poolRecord.vision?.visionModels ?? []])) {
+      publishSignature.signature = "";
+    }
   };
   void refreshPoolRecord();
   // 面板停用/删除的账号不进池：解析后按 id 过滤（pool-store 的名单先于池）。
@@ -272,9 +303,47 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // 字面量动态 import 必须保持字面量：rolldown 构建期据此把 "./llm-adapter.ts"
   // 改写为产物 "./llm-adapter.js"（llm-adapter 是独立 entry）；改成变量路径会让
   // 产物带着 .ts 说明符在宿主里找不到模块（2026-10-24 注册失败事故）。
+  /** 读一张已入库聊天图片 → base64（附件服务桥接）。图片桥转述与原生出图
+   * 共用同一个读取口，避免两段手抄漂移。 */
+  const loadImageAttachment = async (ref: unknown): Promise<{ base64: string; mediaType: string }> => {
+    const attachments = getService("attachments") as
+      | { readImage?: (ref: unknown) => Promise<{ data?: unknown; ref?: { mediaType?: string } }> }
+      | undefined;
+    const stored = await attachments?.readImage?.(ref);
+    if (stored === undefined) throw new Error("图片附件为空或不可读");
+    const bytes = stored.data;
+    if (!(bytes instanceof Uint8Array) || bytes.length === 0) {
+      throw new Error("图片附件为空或不可读");
+    }
+    return { base64: Buffer.from(bytes).toString("base64"), mediaType: stored.ref?.mediaType ?? "image/png" };
+  };
+  /** 原生出图通路的图像解析：附件 → base64（失败 → undefined → 占位出站）。 */
+  const resolveImageAccess = (ref: unknown) =>
+    loadImageAttachment(ref).then((img) => ({ base64: img.base64, mediaType: img.mediaType })).catch(() => undefined);
   const loadAdapterModule = deps.loadAdapterModule ?? (async () => {
     const module = await import("./llm-adapter.ts");
-    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, protocolOverrides: () => poolRecord.modelProtocols, thinkingOverrides: () => poolRecord.thinking }) };
+    // 图片桥换图器（请求边界换图；vision/bridge.ts createImageSwapper）。
+    // deps 全部是闭包：visionFeedback 在下方才声明，用 getter 延迟解引用。
+    const imageSwapper = createImageSwapper({
+      options: () => ({
+        apiBase: settings.apiBase,
+        model: poolRecord.vision?.model ?? settings.visionModel,
+        imageMode: settings.visionImageMode,
+        timeoutMs: settings.visionTimeoutMs,
+        bridgeMode: (poolRecord.vision?.bridgeMode ?? settings.visionBridgeMode) as "off" | "on" | "auto",
+        bridgePrompt: poolRecord.vision?.bridgePrompt ?? settings.visionBridgePrompt,
+      }),
+      checkedIds: () => poolRecord.vision?.visionModels ?? [],
+      resolveKey: async () => {
+        const picked = await orchestrator.pickStart({ model: poolRecord.vision?.model ?? settings.visionModel });
+        return picked.key;
+      },
+      get feedback() {
+        return visionFeedback;
+      },
+      loadImage: loadImageAttachment,
+    });
+    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, protocolOverrides: () => poolRecord.modelProtocols, thinkingOverrides: () => poolRecord.thinking, visionSwapper: imageSwapper as (messages: unknown, context: { model: string }) => Promise<unknown>, resolveImageAccess, visionModelIds: () => poolRecord.vision?.visionModels ?? [] }) };
   });
   const publisher = createProviderPublisher({
     settings,
@@ -292,6 +361,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     logger: ctx.logger
   });
   const providerState = publisher.state;
+  publishSignature = publisher.state;
   // `unavailableModelIds` is annotated rather than left to the `= []`
   // initializer: a default initializer types the parameter from it, so without
   // the annotation it read as `never[]` and `publisher.publish` (which takes a
@@ -513,15 +583,36 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // 主模型拖图不被阻断。视觉/出图调用都经池解析 key（按模型积分组）。
   ctx.effect(() => {
     const disposers: Array<() => void> = [];
-    const tools = getService("tools") as { register?: (tool: unknown) => () => void } | null;
-    if (tools !== null && typeof tools.register === "function"
-      && (settings.text2imgEnabled || settings.img2imgEnabled || settings.visionToolsEnabled
-        || poolRecord.toolsEnabled?.text2img === true || poolRecord.toolsEnabled?.img2img === true
-        || poolRecord.toolsEnabled?.visionTools === true)) {
-      try {
-        // 懒加载 peer 半区（vision/tools.ts import dsh-tools）；失败降级为工具缺席。
-        void import("./vision/tools.ts").then(async (module) => {
-          await refreshPoolRecord(); // 开关读取前面板值已就位
+    // 工具热重挂（2026-10-27）：注册不再是启动一次性——toolsEnabled 变更时
+    // 拆旧重挂（register 返回 disposer，拆除的机械能力在）。DSH 的 agent 对
+    // 工具集没有中途注销语义：新会话必然按新集合走，进行中的会话视宿主实现
+    // 而定——这是本路径唯一的宿主侧未知，验收按「新会话生效」口径。
+    let toolDisposers: Array<() => void> = [];
+    let chain: Promise<void> = Promise.resolve();
+    const registerImageTools = (): Promise<void> => {
+      chain = chain.catch(() => {}).then(async () => {
+        // 阶段标记 + 看门狗：重挂若挂死，30s 后日志报出最后阶段——保存路由已
+        // 解耦不受影响，但工具缺席/卡顿的原因就在这一行里。
+        let stage = "拆除旧注册";
+        const startedAt = Date.now();
+        const watchdog = setTimeout(() => {
+          ctx.logger?.warn?.(`${name}: 工具重挂超时未完成（>30s），最后阶段=${stage}——保存路由已解耦不受影响`);
+        }, 30_000);
+        try {
+          for (const dispose of toolDisposers) {
+            try { dispose(); } catch { /* 拆除失败静默：重挂覆盖同名注册。 */ }
+          }
+          toolDisposers = [];
+          stage = "检查 tools 服务";
+          // 工具注册表走 inject 注入的 ctx.tools（上游 image 插件同款）；它不经
+          // ctx.get 暴露——此前 ctx.get("tools") 恒 null，工具从未注册（2026-10-27）。
+          const tools = (ctx as { tools?: { register?: (tool: unknown) => () => void } }).tools ?? null;
+          if (tools === null || typeof tools.register !== "function") {
+            ctx.logger?.warn?.(`${name}: ctx.tools 未注入（inject 缺 "tools"），出图/识图工具未注册`);
+            return;
+          }
+          stage = "读取 pool.json";
+          await refreshPoolRecord(); // 开关读取磁盘现值（面板保存已落盘）
           const enabled = (name: string): boolean => {
             if (name === "sn_text2img") return settings.text2imgEnabled || poolRecord.toolsEnabled.text2img === true;
             if (name === "sn_img2img") return settings.img2imgEnabled || poolRecord.toolsEnabled.img2img === true;
@@ -530,6 +621,13 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
             }
             return false;
           };
+          const anyEnabled = settings.text2imgEnabled || settings.img2imgEnabled || settings.visionToolsEnabled
+            || poolRecord.toolsEnabled?.text2img === true || poolRecord.toolsEnabled?.img2img === true
+            || poolRecord.toolsEnabled?.visionTools === true;
+          if (!anyEnabled) return; // 全关：保持零注册（与旧行为一致，peer 也不加载）。
+          stage = "加载 tools 模块";
+          const module = await import("./vision/tools.ts");
+          stage = "构建工具集";
           const toolset = module.buildToolset({
             visionOptions: () => ({
               apiBase: settings.apiBase,
@@ -577,42 +675,39 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
             reportImageSuccess: (key) => orchestrator.reportSuccess(key),
             ctx: { get: (service: string) => getService(service) },
           });
+          stage = "注册工具";
           for (const tool of toolset) {
             if (enabled(String((tool as { name?: unknown }).name ?? ""))) {
-              disposers.push(tools.register?.(tool) ?? (() => {}));
+              toolDisposers.push(tools.register?.(tool) ?? (() => {}));
             }
           }
-        }).catch((error: unknown) => {
-          ctx.logger?.warn?.(`${name}: vision/image tools peer load failed: ${error instanceof Error ? error.message : String(error)}`);
-        });
-      } catch (error) {
-        ctx.logger?.warn?.(`${name}: toolset build failed: ${error instanceof Error ? error.message : String(error)}`);
+        } catch (error: unknown) {
+          ctx.logger?.warn?.(`${name}: 工具重挂失败（阶段=${stage}）：${error instanceof Error ? error.message : String(error)}`);
+        } finally {
+          clearTimeout(watchdog);
+          if (Date.now() - startedAt > 3000) {
+            ctx.logger?.warn?.(`${name}: 工具重挂完成但耗时 ${Date.now() - startedAt}ms（阶段=${stage}）——保存路由已解耦，不再卡面板`);
+          }
+        }
+      });
+      return chain;
+    };
+    reregisterImageTools = registerImageTools;
+    void registerImageTools();
+    // 图片桥能力覆盖：让 DSH 的发送前图片校验放行（换图本体在适配器请求
+    // 边界，vision/bridge.ts createImageSwapper）。开关读面板现值——装一次、
+    // 动态生效，不再按 patch 默认值条件安装。
+    const restoreCapability = installCapabilityOverride(
+      ctx as unknown as import("./vision/bridge.ts").BridgeCtx,
+      () => (poolRecord.vision?.bridgeMode ?? settings.visionBridgeMode) !== "off",
+    );
+    disposers.push(restoreCapability);
+    return () => {
+      for (const dispose of disposers) dispose();
+      for (const dispose of toolDisposers) {
+        try { dispose(); } catch { /* 卸载失败静默。 */ }
       }
-    }
-    if (settings.visionBridgeMode !== "off") {
-      try {
-        const bridge = installVisionBridge({
-          ctx: ctx as unknown as import("./vision/bridge.ts").BridgeCtx,
-          options: () => ({
-            apiBase: settings.apiBase,
-            model: poolRecord.vision?.model ?? settings.visionModel,
-            imageMode: settings.visionImageMode,
-            timeoutMs: settings.visionTimeoutMs,
-            bridgeMode: (poolRecord.vision?.bridgeMode ?? settings.visionBridgeMode) as "off" | "on" | "auto",
-            bridgePrompt: poolRecord.vision?.bridgePrompt ?? settings.visionBridgePrompt,
-          }),
-          resolveKey: async () => {
-            const picked = await orchestrator.pickStart({ model: poolRecord.vision?.model ?? settings.visionModel });
-            return picked.key;
-          },
-          feedback: visionFeedback,
-        });
-        disposers.push(bridge);
-      } catch (error) {
-        ctx.logger?.warn?.(`${name}: vision bridge install failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    return () => { for (const dispose of disposers) dispose(); };
+    };
   }, `${name}: image/vision`);
 
   // 探测时钟：每 15s 扫一次到期探测——探测与 agent 请求解耦，

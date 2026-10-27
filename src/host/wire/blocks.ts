@@ -20,20 +20,25 @@ import { readFile } from 'node:fs/promises';
 import { LlmError, contentHasImage, offloadedImageText, textOnlyImageText } from '@deepseek-ai/dsh-llm';
 import type { ContentBlock, GenerateOptions, ImageBlock } from '@deepseek-ai/dsh-llm';
 import { factsFor } from './facts.ts';
+import { traceLog } from '../trace-log.ts';
 import type { FactsCatalogEntry, WireKind } from './types.ts';
 
 /** 宿主持久化图像引用（0.1.7 类型面 ImageBlock.attachment 的索引访问，避免直接
  * import 未随 dsh-llm 发布的 @deepseek-ai/dsh-attachment 类型包）。 */
 export type ImageRef = ImageBlock['attachment'];
 
-/** 一个图像出站前解析到的来源：本地只读路径（读文件转 base64 data URL）或现成 URL。
- * byteLength 可选覆盖实际字节数（测试注入大文件阈值用）。 */
+/** 一个图像出站前解析到的来源：本地只读路径（读文件转 base64 data URL）、现成 URL、
+ * 或内存字节（附件服务直读 → 直接组 data URL）。byteLength 可选覆盖实际字节数
+ * （测试注入大文件阈值用）。 */
 export type ImageAccess =
   | { readonlyPath: string; byteLength?: number | undefined }
-  | { url: string };
+  | { url: string }
+  | { base64: string; mediaType: string };
 
-/** 装配层注入的图像来源解析器（bridge resolveImageAttachmentAccess 的结果）。 */
-export type ImageAccessResolver = (ref: ImageRef) => ImageAccess | undefined;
+/** 装配层注入的图像来源解析器（附件服务直读或本地路径）。允许返回 Promise：
+ * 附件读取是异步的（vision/bridge 与原生出图共用同一读取口）；Promise 落空
+ * （undefined）→ 占位出站。 */
+export type ImageAccessResolver = (ref: ImageRef) => ImageAccess | undefined | Promise<ImageAccess | undefined>;
 
 /** 出站前已备好的一个图像载荷。 */
 export interface PreparedImage {
@@ -118,6 +123,24 @@ export async function prepareImages(
     }
   }
   const limits = options.model === 'deepseek-flash' ? DEEPSEEK_FLASH_IMAGE_LIMITS : undefined;
+  // deepseek-flash 限额（单张/总量）的共用判定：两个解析分支（路径/内存字节）
+  // 同一把尺，重复写第二遍会被 duplication 门抓住（2026-10-27 教训）。
+  const checkImageLimits = (byteLength: number): void => {
+    if (limits === undefined) return;
+    if (byteLength > limits.singleBytes) {
+      throw new LlmError(
+        `llm-sensenova: deepseek-flash 单张图片不超过 50 MB（${(byteLength / 1024 / 1024).toFixed(1)} MB）；请压缩图片`,
+        'INVALID_REQUEST',
+      );
+    }
+    totalBytes += byteLength;
+    if (totalBytes > limits.totalBytes) {
+      throw new LlmError(
+        'llm-sensenova: deepseek-flash 请求图片总量不超过 64 MB；请减少或压缩图片',
+        'INVALID_REQUEST',
+      );
+    }
+  };
 
   const prepared = new Map<string, PreparedImage>();
   let count = 0;
@@ -144,12 +167,16 @@ export async function prepareImages(
           'INVALID_REQUEST',
         );
       }
-      const access = resolveImageAccess?.(ref);
-      if (access === undefined) continue; // 占位（builders 处理）
+      const access = resolveImageAccess !== undefined ? await resolveImageAccess(ref) : undefined;
+      if (access === undefined) {
+        // 诊断：解析失败的图片走占位——模型「看不了图」最常见的原因就在这。
+        traceLog(`[dsh-sensenova-suite] 图片出站解析失败（无 resolver 或读取失败）→ 占位文本，模型看不到这张图`);
+        continue; // 占位（builders 处理）
+      }
       if ('url' in access) {
         if (facts.imageRequiresBase64) {
           // design 决策 3：kimi-k3 无公网 URL 通路——占位保连续性，不拒绝整次对话。
-          console.warn(
+          traceLog(
             `[dsh-sensenova-suite] model ${options.model} accepts base64 images only; ` +
               `public-URL image ${JSON.stringify(ref.name ?? String(ref.attachmentId))} was replaced with a text placeholder`,
           );
@@ -159,23 +186,17 @@ export async function prepareImages(
         prepared.set(key, { url: access.url, fromUrlSource: true });
         continue;
       }
+      if ('base64' in access) {
+        // 内存字节（附件服务直读）：直接组 data URL；限额与路径分支同一把尺
+        // （base64 长度 ×3/4 ≈ 原始字节数）。
+        const byteLength = Math.floor(access.base64.length * 3 / 4);
+        checkImageLimits(byteLength);
+        prepared.set(key, { url: `data:${access.mediaType};base64,${access.base64}`, fromUrlSource: false });
+        continue;
+      }
       const bytes = await readFile(access.readonlyPath);
       const byteLength = access.byteLength ?? bytes.byteLength;
-      if (limits !== undefined) {
-        if (byteLength > limits.singleBytes) {
-          throw new LlmError(
-            `llm-sensenova: deepseek-flash 单张图片不超过 50 MB（${(byteLength / 1024 / 1024).toFixed(1)} MB）；请压缩图片`,
-            'INVALID_REQUEST',
-          );
-        }
-        totalBytes += byteLength;
-        if (totalBytes > limits.totalBytes) {
-          throw new LlmError(
-            'llm-sensenova: deepseek-flash 请求图片总量不超过 64 MB；请减少或压缩图片',
-            'INVALID_REQUEST',
-          );
-        }
-      }
+      checkImageLimits(byteLength);
       prepared.set(key, {
         url: `data:${ref.mediaType};base64,${bytes.toString('base64')}`,
         fromUrlSource: false,

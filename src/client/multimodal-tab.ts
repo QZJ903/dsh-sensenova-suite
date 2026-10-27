@@ -198,7 +198,9 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
     h(
       SectionCard,
       { title: tt("mm.visionTitle"), open: openCards.vision !== false, onToggle: () => toggleCard("vision"), tt },
-      switchRow("toolsEnabled", "visionTools", tt("mm.enabled"), false),
+      // 文案是「启用转述」不是「启用工具」——视觉卡不是模型工具，是转述管道
+      // （独立 i18n key，出图两卡仍用 mm.enabled「启用工具」）。
+      switchRow("toolsEnabled", "visionTools", tt("mm.visionEnabled"), false),
       modelSelect("vision", tt("mm.visionModel"), visionModels, "sensenova-6.8-flash-lite"),
       selectRow("vision", "bridgeMode", tt("mm.bridgeMode"), ["auto", "on", "off"], "auto",
         (option) => tt(option === "auto" ? "mm.bridgeModeAuto" : option === "on" ? "mm.bridgeModeOn" : "mm.bridgeModeOff")),

@@ -1,5 +1,118 @@
 # 更新日志（Changelog）
 
+## 0.1.15（2026-10-27）
+
+- **「关闭思考」拼写归一（三线共判，官方文档对照审计产物）**：对话界面发的
+  面板档位是 `off`，而 chat/responses 两线的关闭判据历来只认 `none`——
+  responses 上「关闭」整个省略 reasoning 字段（静默变成「用模型默认」，文档
+  明确 `reasoning.effort:"none"` 才是关闭）；kimi chat 的 thinking:disabled
+  特判被绕过（错发其词表里不存在的 `reasoning_effort:"none"`）。新增
+  `canonicalThinkingEffort`：off/minimal → none，三条 wire 共用一份判定，
+  补 5 条契约钉。
+- **anthropic `max_tokens` 改文档语义（非必填）**：官方文档 /messages 参数表
+  必填列为「—」。宿主未给时不发字段（用平台/模型默认），删除「必填」错误
+  前提下常驻的 4096 兜底（其真实害处是把输出悄悄掐在 4096）。
+
+## 0.1.14（2026-10-27）
+
+- **思考档位/可看图勾选真正热更新**：0.1.13 修热了插件（resolveModel 现算）与
+  宿主（modelCatalog 现调）两层，但浏览器只在收到 `llm/adapters-updated`
+  （注册重建广播）时才重拉模型目录，思考/勾选保存不触发重建，下拉仍旧。
+  现在 `refreshPoolRecord` 检测 thinking / visionModels 变更即作废发布签名，
+  下一轮探测（≤30s）走「目录变更」路径重建注册并广播，浏览器重拉后下拉即新
+  ——不用重启、不用刷新窗口。作废只一处写，重建后签名恢复真值，不循环。
+- **anthropic effort 出站按平台词表收紧（修 flash-lite 400）**：真机 400 原文
+  `output_config.effort must be one of: low, medium, high, xhigh, max; got "off"`
+  ——面板「关闭」的方言拼写经用户勾选集混进了 anthropic 出站。新纯函数
+  `wire/effort.ts`：关闭思考的任何拼写（off/none/minimal）→
+  `thinking:{type:'disabled'}`；`output_config.effort` 只接受平台枚举五值，
+  词表外宁可不发（用模型默认）也不上桌。补 6 条契约钉（peer-free）。
+
+## 0.1.13（2026-10-27）
+
+- **思考档位热更新**：旧实现在目录解析时把用户勾选集烘焙进适配器 24h 目录
+  缓存，改勾选只写 pool.json、缓存不失效，必须重启 DSH 才生效。现在缓存只存
+  平台数据，`withUserThinking` 在读取边界现算（resolveModel 供对话界面可选
+  档位、stream 供请求期 effort 词表校验）——改勾选保存后约 5s（宿主问询周期）
+  生效，无需重启。
+- **生图工具移除 savePath 参数**：两个工具 schema 只剩 prompt/images——落盘
+  位置只由面板「输出目录」决定（配了自动落盘并报路径，留空只回 Base64）；
+  结果文本不再引导模型调用已不存在的 savePath 参数。
+- **400 响应体落诊断日志**：anthropic/responses wire 上凡是 400，响应体原文
+  （截 400 字符）进日志——定位 flash-lite「anthropic+图片 400、官方协议直连
+  可用」用；同时覆盖降级判据的形状盲区（商汤自家 `{error:{code,message}}`
+  形状不触发降级，现在也有原文可查）。
+- **诊断日志文件补 UTF-8 BOM**：无 BOM 的 UTF-8 会被 PowerShell 5.1 默认按
+  ANSI（GBK）解码成乱码；首建写 BOM、旧无 BOM 文件轮转 .old 让位，默认
+  `Get-Content` 直接可读（不再需要 `-Encoding UTF8`）。
+
+## 0.1.12（2026-10-27）
+
+- **图片链路修复（宿主剥图根因，两次事故定版）**：图像能力唯一真源 =
+  用户「可看图」勾选集。宿主见模型描述符申报了 `inputModalities` 而无 image
+  会把图片剥成 `[image omitted …]` 占位文本；旧目录解析把平台未申报的模型
+  回退申报 `['text']`（deepseek-flash/kimi-k3 因此看不了图，flash-lite 因
+  平台申报了 image 幸免）。现在：勾选 → 申报 `["text","image"]`；未勾选 →
+  不申报（宿主放行，转述兜底有米下锅）；条目本义绝不申报纯文本。
+  `listModels` / `resolveModel` 申报边界与请求期 entry 注记都实时读勾选集，
+  新模型（静态表未收录、目录未报 image）勾选即生效；`factsFor` 未知分支
+  开图并给通用宽容格式集（格式白名单不再为空）。
+- **出图工具参数强制覆盖**：面板配置是唯一真源——模型/尺寸/输出/返回格式/
+  水印/prompt 润色无条件用面板值，调用侧同名参数不再读（旧 args 优先逻辑
+  让模型带的 `watermark: true` 压掉面板「关闭水印」，水印关不掉）。两个工具
+  schema 移除被覆盖的六个参数（只留 prompt/images/savePath），描述同步。
+- **视觉卡文案**：开关改「启用转述」（英文 Enable relay）——它不是模型工具；
+  出图两卡保持「启用工具」。
+- **诊断文件日志**：桌面主进程接管宿主 stdout，终端看不到插件诊断行。
+  新增 `trace-log.ts`：全部宿主诊断行（图片桥判定/换图核对/wire 降级/
+  图片出站解析失败/kimi URL 占位）双出口——console 原样 + 追加进状态目录
+  `dsh-sensenova-suite.log`（与 pool.json 同目录，带时间戳，启动打分隔行，
+  超 2MB 启动轮转 .old，永不抛错）。tail 该文件排障。
+
+## 0.1.11（2026-10-27）
+
+- 视觉档案按真机实测修正：deepseek-flash / kimi-k3 走 anthropic wire 发图成功，
+  `anthropicSupportsImages` 从文档口径的 false 翻 true——auto 模式下勾选「可看图」
+  的三家（deepseek-flash / kimi-k3 / sensenova-6.8-flash-lite）带图请求全部留在
+  anthropic wire 直连，不再降级。带图降级目标回归 Responses（文档口径；仅剩
+  未实测模型会走到）。
+
+## 0.1.10（2026-10-27）
+
+- 图片链路诊断（带图请求时输出三行，定位「模型看不了图」的断点）：
+  - 图片桥决策行：勾选集读没读到、判定走向（原生/转述）、图片块形状
+    （带附件引用数 / offloaded 数）；
+  - 换图后核对：换图器跑完消息里是否仍带图片块；
+  - 出站解析：哪张图解析失败走了占位文本。
+
+## 0.1.9（2026-10-27）
+
+- 「可看图」勾选正式生效（0.1.8 构建后补的判定与通路，本版起可用）：
+  - 转述判定源改为「可看图」勾选集（不再按目录 input_modalities——官方文档与
+    目录声明冲突时按文档，用户拍板）：勾选的模型**原生看图**（图片原样进请求），
+    未勾选的走转述。默认勾选 deepseek-flash / kimi-k3 / sensenova-6.8-flash-lite。
+  - 原生看图通路补全：适配器经附件服务直读图片字节（base64 data URL 进请求），
+    deepseek-flash 单张/总量限额收敛为共用判定。此前该通路从未接线。
+  - 勾选热生效：模型设置改勾选 → 保存 → 下一次请求即按新集合走（不用重启）。
+- 工具开关保存卡死修复：保存路由不再 await 工具重挂（解耦），重挂加 30s 看门狗
+  与六阶段标记——挂死时日志报出最后阶段，保存永不卡。
+
+## 0.1.8（2026-10-27）
+
+- 图片转述（读图桥）整体迁到适配器请求边界，会话投影补丁退役：**用户侧对话
+  永远显示原图 + 原文**，观察文本只存在于发给模型的请求里。
+- 转述判定源改为**「可看图」勾选**（不再按目录 input_modalities）：勾选的模型
+  原生看图（图片原样进请求），未勾选的走转述。默认勾选 deepseek-flash /
+  kimi-k3 / sensenova-6.8-flash-lite（字段缺省时；显式保存的勾选集优先）。
+  bridgeMode：off 不换；auto 按勾选；on 强制转述。
+- 原生看图通路补全：适配器接入附件读取（base64 直出 data URL），deepseek-flash
+  单张/总量限额收敛为共用判定；此前该通路从未接线，勾选了也只会发出占位文本。
+- 观察文本按附件 ref 缓存（进程级）：同一张图跨轮次只转述一次。
+- 出图/识图工具注册改**热重挂**：多模态 tab 工具开关保存后即时拆旧重挂，不再
+  要求重启 DSH；修复工具从未注册的根因——工具注册表须经 cordis inject
+  （`inject = ["webServer", "tools"]` + `ctx.tools.register`）注入，此前
+  ctx.get("tools") 恒 null；peer 加载失败与 tools 服务缺席从静默改为日志可见。
+
 ## 0.1.7（2026-10-27）
 
 - 面板降噪一批（用户逐项拍板的删除）：

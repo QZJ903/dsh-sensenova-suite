@@ -19,6 +19,7 @@
 import type { ContentBlock, GenerateOptions, ToolCallBlock } from '@deepseek-ai/dsh-llm';
 import { factsFor } from './facts.ts';
 import { translateUserContent, type PreparedImage } from './blocks.ts';
+import { anthropicEffortOut } from './effort.ts';
 import type { FactsCatalogEntry } from './types.ts';
 
 /** 目录条目的 Anthropic 侧输入（adapter CatalogEntry 的结构子集，避免循环依赖）。 */
@@ -125,9 +126,11 @@ function toAnthropicMessages(
 /**
  * 组装 /messages 请求体。
  *
- * effort 出站策略（与 Chat 路径同一套域判定）：
- * - `none` → `thinking: {type:'disabled'}`，不发 effort（文档明确二者为关闭思考的两种表达）；
- * - 其余档位 → `output_config: {effort}`，仅当值落在该模型 effort 词表内；
+ * effort 出站策略（2026-10-27 按平台词表收紧，判定在 wire/effort.ts）：
+ * - 「关闭思考」的任何方言拼写（面板 off / chat 方言 none / 静态表 minimal）→
+ *   `thinking: {type:'disabled'}`，不发 effort（文档：关闭思考的两种表达之一）；
+ * - 其余档位 → `output_config: {effort}`，仅接受平台枚举的五个值，词表外
+ *   一律不发（不发未知值，绝不上桌让平台打 400）；
  * - 未选档位 → 两者都不发（网关默认 enabled + effort=high，即「用模型默认」）。
  */
 export function buildAnthropicBody(
@@ -144,16 +147,7 @@ export function buildAnthropicBody(
     input_schema: tool.parameters,
   }));
 
-  // 档位词表：目录 reasoning.efforts 优先，静态表兜底；两者皆空 = 未知，不发（不发未知值）。
-  const catalogEfforts = entry?.reasoning?.efforts.map((effort) => effort.id as string);
-  const effortDomain = catalogEfforts ?? (facts.efforts.length > 0 ? facts.efforts : undefined);
-  const effort = options.reasoningEffort as string | undefined;
-  const thinkingDisabled = effort === 'none';
-  const effortWire = !thinkingDisabled
-    && effort !== undefined
-    && (effortDomain === undefined || effortDomain.includes(effort))
-    ? effort
-    : undefined;
+  const { thinkingDisabled, effortWire } = anthropicEffortOut(options.reasoningEffort as string | undefined);
 
   // temperature：显式设置才发；kimi-k3 固定 1，出站不发（与 Chat 路径同一纪律）。
   const sendTemperature = options.temperature !== undefined && !facts.blockedSampling.includes('temperature');
@@ -162,7 +156,10 @@ export function buildAnthropicBody(
     model,
     messages,
     stream: true,
-    max_tokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
+    // max_tokens 非必填（官方文档 /messages 请求参数表：必填列「—」、无默认值）。
+    // 宿主未给时不发而非填兜底值——填值会把输出悄悄掐在兜底数上（模型默认 64K），
+    // 省略 = 用平台/模型默认。2026-10-27 旧实现在「必填」的错误前提下常驻 4096。
+    ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
     ...(system !== undefined ? { system } : {}),
     ...(tools.length > 0 ? { tools } : {}),
     ...(sendTemperature ? { temperature: options.temperature } : {}),
@@ -171,6 +168,3 @@ export function buildAnthropicBody(
     ...(effortWire !== undefined ? { output_config: { effort: effortWire } } : {}),
   };
 }
-
-/** max_tokens 缺省值：Anthropic 协议必填，宿主未显式设置时给一个安全默认。 */
-export const DEFAULT_MAX_TOKENS = 4096;

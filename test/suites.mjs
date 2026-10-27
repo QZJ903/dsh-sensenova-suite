@@ -94,6 +94,7 @@ export const SUITES = Object.freeze([
   { name: "silent-catch.test.mjs", kind: "suite", note: "source hygiene: every statement-less catch explains itself" },
   { name: "pool.test.mjs", kind: "suite", note: "key pool orchestration + 429 classification" },
   { name: "vision-image.test.mjs", kind: "suite", note: "image tools + vision relay" },
+  { name: "trace-log.test.mjs", kind: "suite", note: "diagnostic file log" },
   { name: "host-range.test.mjs", kind: "suite", note: "peer range × version universe alignment (golden, zero install)" },
 
   // ── the five gate files. Not *.test.mjs, so the three-way roster pin

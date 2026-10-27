@@ -30,6 +30,7 @@
 import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import { contentHasImage } from '@deepseek-ai/dsh-llm';
+import { canonicalThinkingEffort } from './effort.ts';
 import type { ModelFacts, WireKind } from './types.ts';
 
 /** 插件配置的四种 wire 模式（缺省 auto：Anthropic 优先，逐级降级）。 */
@@ -102,7 +103,11 @@ function anthropicDegrade(
     return { wire: supportsResponses(facts) ? 'responses' : 'chat-completions', reason: 'downgrade-unsupported-model' };
   }
   if (hasImages(options) && !facts.anthropicSupportsImages) {
-    // 文档：Anthropic 协议的 image 块仅 sensenova-6.8-flash-lite 支持。
+    // Anthropic 图片块按 api-compatibility-params 记录仅 6.8——但 2026-10-27
+    // 真机实测 deepseek-flash / kimi-k3 走 anthropic 发图同样成功（档案已翻
+    // true，不再进本分支）。Responses 的 input_image 支持按文档成立（base64
+    // /URL，png/jpeg/gif/webp）——本分支现仅剩未实测模型，降级目标按文档
+    // 回到 Responses。
     return { wire: 'responses', reason: 'downgrade-image' };
   }
   if (runtime.anthropicUnsupported?.has(options.model) === true) {
@@ -126,7 +131,9 @@ function responsesDegrade(
   if (!supportsResponses(facts)) {
     return { wire: 'chat-completions', reason: 'downgrade-unsupported-model' };
   }
-  const effort = options.reasoningEffort as string | undefined;
+  // 档位拼写先归一（off/minimal→none）：界面发的 off 不该被当成「偏离默认档」，
+  // 关闭思考在 responses 上是真实支持的（reasoning.effort:'none'），不该降级。
+  const effort = canonicalThinkingEffort(options.reasoningEffort as string | undefined);
   if (effort !== undefined && effort !== 'none' && effort !== facts.responsesDefaultEffort) {
     return { wire: 'chat-completions', reason: 'downgrade-effort' };
   }

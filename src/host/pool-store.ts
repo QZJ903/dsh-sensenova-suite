@@ -131,7 +131,10 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     return out;
   };
   const readVision = (value: unknown): VisionSettings => {
-    const out: VisionSettings = {};
+    // 可看图勾选默认集（2026-10-27 用户拍板）：deepseek-flash / kimi-k3 /
+    // sensenova-6.8-flash-lite 原生看图（不走转述）。字段缺省 = 按此默认；
+    // 显式保存的空数组（全不勾）尊重用户选择。
+    const out: VisionSettings = { visionModels: ["deepseek-flash", "kimi-k3", "sensenova-6.8-flash-lite"] };
     if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
     const rec = value as Record<string, unknown>;
     const model = strOf(rec.model); if (model !== undefined) out.model = model;

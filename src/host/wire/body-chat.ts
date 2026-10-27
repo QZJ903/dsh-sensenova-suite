@@ -14,6 +14,7 @@ import type {
 } from '@deepseek-ai/dsh-llm';
 import { factsFor, staticFacts } from './facts.ts';
 import { translateUserContent, type PreparedImage } from './blocks.ts';
+import { canonicalThinkingEffort } from './effort.ts';
 import type { FactsCatalogEntry } from './types.ts';
 
 /** 目录条目的 Chat 侧输入（adapter CatalogEntry 的结构子集，避免循环依赖）。 */
@@ -180,15 +181,16 @@ export function buildChatBody(
     return samplingWhitelist.includes(field);
   };
 
-  // reasoning_effort 出站策略（design D5）：值域内原样；命中兼容映射改写；
-  // 均不在（含 kimi none 特例）不发送未知值。
+  // reasoning_effort 出站策略（design D5）：档位拼写先归一（off/minimal→none，
+  // wire/effort.ts——对话界面发的是面板 off，kimi 特判与映射表只认 none，2026-10-27）；
+  // 值域内原样；命中兼容映射改写；均不在（含 kimi none 特例）不发送未知值。
   let reasoningEffortWire: string | undefined;
   let thinkingDisabled = false;
   if (options.reasoningEffort !== undefined) {
-    const effort = options.reasoningEffort as string;
+    const effort = canonicalThinkingEffort(options.reasoningEffort as string);
     if (plan.noneMapsToThinkingDisabled && effort === 'none') {
       thinkingDisabled = true; // kimi-k3：不发 reasoning_effort，改发 thinking:"disabled"（待实测修正）
-    } else {
+    } else if (effort !== undefined) {
       const mapped = plan.effortCompat?.[effort];
       const inDomain = plan.effortDomain?.includes(effort) ?? true;
       reasoningEffortWire = mapped !== undefined

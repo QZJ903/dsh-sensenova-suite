@@ -4,6 +4,10 @@
  * 同源（原文 /tmp/sn_docs_zh.md；Chat 出站行为零变化，见 adapter.ts 消费注释）。 */
 import type { FactsCatalogEntry, ModelFacts } from './types.ts';
 
+/** 未知/未声明格式模型的通用宽容集：格式白名单只拦「已知不支持」，未知不预拦
+ * （交平台 API 自行裁决）。已知分支缺省与未知分支开图共用同一份（duplication 门）。 */
+const GENERIC_IMAGE_FORMATS = ['jpeg', 'png', 'webp', 'gif'];
+
 /** 未收录模型 id 的通用兜底档案（不抛错；Chat 行为与迁移前「未知模型」路径一致）。 */
 const GENERIC_FACTS: ModelFacts = {
   id: '',
@@ -101,7 +105,10 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsImages: true,
     imageFormats: ['jpeg', 'png', 'gif', 'webp'],
     imageRequiresBase64: false,
-    anthropicSupportsImages: false,
+    // 2026-10-27 用户真机实测：deepseek-flash 走 anthropic wire 发图成功——
+    // 此前按文档 api-compatibility-params 写的 false（「仅 6.8 支持图片块」）
+    // 与实测不符，已翻 true；auto 模式带图不再降级离开 anthropic。
+    anthropicSupportsImages: true,
     responsesMaxOutputTokens: null, // §3.2 范围表漏列 deepseek-flash，须实测
     responsesSupportsJsonSchema: true,
   }],
@@ -131,7 +138,9 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['kimi-k3', {
     id: 'kimi-k3',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
-    efforts: ['low', 'medium', 'high', 'max'],
+    // none 入表依据：官方文档思考强度梯子明确列 `none`＝关闭推理；2026-09-29
+    // 全模型探测口径 thinkingLevelMap off→none 同证（其余模型 efforts 均含 none）。
+    efforts: ['low', 'medium', 'high', 'max', 'none'],
     defaultEffort: 'max',
     responsesDefaultEffort: 'max',
     anthropicDefaultEffort: 'max',
@@ -140,7 +149,10 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsStreamOptions: true,
     requiresReasoningReplay: false,
     forbidThinkingDisabled: false,
-    noneMapsToThinkingDisabled: true, // 文档自相矛盾，按 thinking 可关落地（待实测修正）
+    // 2026-10-27 真机实测修正（原注释「文档自相矛盾，待实测」的实测结果）：
+    // `thinking:'disabled'`（string）被平台 400 invalid arguments code 3 拒绝；
+    // 关闭思考走 reasoning_effort:'none'（efforts 已含 none，文档梯子表背书）。
+    noneMapsToThinkingDisabled: false,
     fixedTemperature: 1,
     fixedTopP: 0.95,
     blockedSampling: ['frequency_penalty', 'presence_penalty', 'temperature', 'top_p'],
@@ -148,7 +160,9 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsImages: true,
     imageFormats: ['jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif'],
     imageRequiresBase64: true, // 不支持公网 URL，仅 base64
-    anthropicSupportsImages: false,
+    // 2026-10-27 用户真机实测：kimi-k3 走 anthropic 发图成功（与 deepseek-flash
+    // 同批确认），档案从文档口径的 false 翻 true。
+    anthropicSupportsImages: true,
     responsesMaxOutputTokens: 1048576,
     responsesSupportsJsonSchema: true,
   }],
@@ -164,22 +178,28 @@ export function staticFacts(model: string): ModelFacts | undefined {
 export function factsFor(model: string, entry: FactsCatalogEntry | undefined): ModelFacts {
   const base = STATIC_FACTS.get(model);
   if (base === undefined) {
-    // 未知模型：目录能补的只有输出上限与采样白名单（与迁移前未知模型路径一致）。
+    // 未知模型：目录能补的只有输出上限、图像与采样白名单（与迁移前未知模型路径一致）。
+    // 图像：目录申报含 image（含请求期勾选注记，adapter stream）即开——用户勾选
+    // 「可看图」的新模型不因静态表未收录而被格式白名单/投影拦死（2026-10-27）。
+    const catalogImage = entry?.inputModalities?.includes('image') === true;
     return {
       ...GENERIC_FACTS,
       id: model,
       outputLimitMax: entry?.maxOutputTokens ?? null,
+      ...(catalogImage ? { supportsImages: true, imageFormats: GENERIC_IMAGE_FORMATS } : {}),
       ...(entry?.supportedSamplingParameters !== undefined
         ? { samplingParameters: entry.supportedSamplingParameters }
         : {}),
     };
   }
   const outputLimitMax = entry?.maxOutputTokens ?? base.outputLimitMax;
-  // input_modalities 实测覆盖：目录声明含 image 才开图像；静态格式非空沿用，否则用通用格式集。
-  const catalogDeclaresImage = entry?.inputModalities.includes('image') ?? base.supportsImages;
+  // input_modalities 实测覆盖：目录申报含 image 才开图像；申报缺像（undefined，
+  // modality.inputModalitiesFor 对无 image 的结论一律不申报）回退静态表。静态
+  // supportsImages 的模型在 parseCatalog 已强制并入 image，两条路不再打架。
+  const catalogDeclaresImage = entry?.inputModalities?.includes('image') ?? base.supportsImages;
   const supportsImages = catalogDeclaresImage;
   const imageFormats = supportsImages
-    ? (base.imageFormats.length > 0 ? base.imageFormats : ['jpeg', 'png', 'webp', 'gif'])
+    ? (base.imageFormats.length > 0 ? base.imageFormats : GENERIC_IMAGE_FORMATS)
     : [];
   return {
     ...base,
