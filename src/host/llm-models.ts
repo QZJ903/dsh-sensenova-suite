@@ -167,10 +167,10 @@ export function drainedPoolsWithoutModels(pools: { pools?: unknown }): string[] 
  * `registerAdapter` with a colliding id is refused as a duplicate. This own
  * slug-shaped id cannot collide with that row or with another plugin.
  */
-export const LLM_PROVIDER_ID = "sensenova-token-plan";
+export const LLM_PROVIDER_ID = "sensenova-suite";
 
 /** What the DSH model picker shows as the provider's name. */
-export const LLM_DISPLAY_NAME = "SenseNova Token Plan";
+export const LLM_DISPLAY_NAME = "SenseNova Suite";
 
 /**
  * The thinking effort the profile pins as DSH's "Default" on this provider.
@@ -185,7 +185,7 @@ export const DEFAULT_REASONING_EFFORT = "high";
 /**
  * Per-token prices are unknowable for a quota plan; report zero everywhere.
  *
- * ⚠️ The zeros are a SENTINEL, not "free". SenseNova Token Plan is a credit
+ * ⚠️ The zeros are a SENTINEL, not "free". SenseNova Suite is a credit
  * pool billed by pool usage, so a per-token USD price simply does not exist on
  * this route — but the model still burns credits. A panel row showing
  * "$0.00" is describing "no per-token price known", never "this model costs

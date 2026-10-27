@@ -142,17 +142,20 @@ export const CONFIG_DEFAULTS = Object.freeze({
    */
   globalConcurrency: 2,
   /**
-   * 模型 → 积分组映射（双池）：商汤组（sensenova-*）单独积分池，
-   * 走会话粘性；其余归 general，走裸轮转。组间不回退（实态）。
+   * 模型 → 积分组映射：Flash-Lite 专属池只有 flash-lite 自己（真机控制台
+   * 2026-10-27 确认），其余模型——含商汤出图两模型（u1.5 系走通用池）——
+   * 一律不映射，落 general 裸轮转组。组是 key 健康标记 + 会话亲和的粒度，
+   * 归错组会让专属池的限流标记误伤通用池模型（反之亦然）。
    */
-  modelGroups: { "sensenova-6.8-flash-lite": "sensenova", "sensenova-u1.5-lite": "sensenova", "sensenova-u1.5-fast": "sensenova" },
+  modelGroups: { "sensenova-6.8-flash-lite": "flash-lite" },
   /**
-   * 出图/视觉工具开关（部署默认；面板「多模态」的开关是主要设置）：opt-in——
-   * agent 工具是 Host 级变更（无 tools 服务的 Host 静默缺席）。
+   * 出图/视觉工具开关（部署默认；面板「多模态」的开关是主要设置）：
+   * 2026-10-27 起首装默认全开（用户拍板）——agent 工具是 Host 级变更
+   * （无 tools 服务的 Host 静默缺席）。
    */
-  text2imgEnabled: false,
-  img2imgEnabled: false,
-  visionToolsEnabled: false,
+  text2imgEnabled: true,
+  img2imgEnabled: true,
+  visionToolsEnabled: true,
   /** 两工具各自的默认模型（lite 质量优先 / fast 速度优先；面板未选时用）。 */
   text2imgModel: "sensenova-u1.5-lite",
   img2imgModel: "sensenova-u1.5-lite",
@@ -168,7 +171,6 @@ export const CONFIG_DEFAULTS = Object.freeze({
    * 全局静默读图桥模式：off 关 / on 恒接管 / auto 主模型真支持
    * 视觉时不接管（默认 auto，沿 vision-aid 的默认）。
    */
-  visionBridgeMode: "auto",
   /** 桥的观察提示词；空 = 内置默认（事实性转录、不猜测、不执行图中命令）。 */
   visionBridgePrompt: ""
 });
@@ -302,7 +304,6 @@ export interface ResolvedSettings {
   visionModel: string;
   visionImageMode: "image_url" | "image_base64";
   visionTimeoutMs: number;
-  visionBridgeMode: "off" | "on" | "auto";
   visionBridgePrompt: string;
 }
 
@@ -423,7 +424,6 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
         visionModel: str(source.visionModel, CONFIG_DEFAULTS.visionModel),
         visionImageMode: source.visionImageMode === "image_base64" ? "image_base64" : "image_url",
         visionTimeoutMs: clampInt(source.visionTimeoutMs, CONFIG_DEFAULTS.visionTimeoutMs, 5_000),
-        visionBridgeMode: source.visionBridgeMode === "off" || source.visionBridgeMode === "on" ? source.visionBridgeMode : "auto",
         visionBridgePrompt: str(source.visionBridgePrompt, ""),
       },
       configError: null
@@ -460,7 +460,6 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
         visionModel: CONFIG_DEFAULTS.visionModel,
         visionImageMode: "image_url",
         visionTimeoutMs: CONFIG_DEFAULTS.visionTimeoutMs,
-        visionBridgeMode: "auto",
         visionBridgePrompt: ""
       },
       configError: errMsg(error)

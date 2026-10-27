@@ -272,7 +272,7 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
 
   const off = rendered(render.ProviderStatus, {
     llm: { hasApiKey: false, keySource: null, ephemeral: false, registerProvider: false,
-      llmAvailable: false, providerRegistered: false, providerId: "sensenova-token-plan" },
+      llmAvailable: false, providerRegistered: false, providerId: "sensenova-suite" },
     tt: ttZh
   });
   check("no key asks for one", off.some((line) => line.includes(zh["llm.noKey"])), off.join("\n"));
@@ -281,17 +281,17 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
 
   const regOff = rendered(render.ProviderRegStatus, {
     llm: { hasApiKey: false, keySource: null, ephemeral: false, registerProvider: false,
-      llmAvailable: false, providerRegistered: false, providerId: "sensenova-token-plan" },
+      llmAvailable: false, providerRegistered: false, providerId: "sensenova-suite" },
     tt: ttZh
   });
   check("the opt-in being off is stated",
     regOff.some((line) => line.includes("未向 DSH 注册") && line.includes("开关")), regOff.join("\n"));
   check("the provider id is shown",
-    regOff.some((line) => line.includes("sensenova-token-plan")), regOff.join("\n"));
+    regOff.some((line) => line.includes("sensenova-suite")), regOff.join("\n"));
 
   const registered = rendered(render.ProviderStatus, {
     llm: { hasApiKey: true, keySource: "credentials", ephemeral: false, registerProvider: true,
-      llmAvailable: true, providerRegistered: true, providerId: "sensenova-token-plan",
+      llmAvailable: true, providerRegistered: true, providerId: "sensenova-suite",
       modelCount: 3, visionCount: 1,
       // A defensive field the Host never sends: it must never reach the screen.
       value: "sk-secret-value" },
@@ -299,7 +299,7 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
   });
   const regOn = rendered(render.ProviderRegStatus, {
     llm: { hasApiKey: true, keySource: "credentials", ephemeral: false, registerProvider: true,
-      llmAvailable: true, providerRegistered: true, providerId: "sensenova-token-plan",
+      llmAvailable: true, providerRegistered: true, providerId: "sensenova-suite",
       modelCount: 3, visionCount: 1, value: "sk-secret-value" },
     tt: ttZh
   });

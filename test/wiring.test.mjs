@@ -90,7 +90,7 @@ function adapterDeps() {
     loadAdapterModule: async () => ({
       createSensenovaAdapter(options) {
         builds.push(options);
-        return { providerIds: ["sensenova-token-plan"], adapter: { fake: true } };
+        return { providerIds: ["sensenova-suite"], adapter: { fake: true } };
       }
     })
   };
@@ -120,7 +120,7 @@ function gatedAdapterDeps() {
         builds.push(options);
         // Only the FIRST build parks, so the second can finish ahead of it.
         if (n === 1) await new Promise((resolve) => { open = resolve; });
-        return { providerIds: ["sensenova-token-plan"], adapter: { tag: n } };
+        return { providerIds: ["sensenova-suite"], adapter: { tag: n } };
       }
     })
   };
@@ -347,7 +347,7 @@ async function bootPlugin({ withCredentials = true, withLlm = false, config = {}
     llm.calls.adapter === 1 && llm.calls.directory === 1,
     JSON.stringify({ adapter: llm.calls.adapter, directory: llm.calls.directory }));
   check("the adapter is owned by the non-colliding provider id",
-    Array.isArray(llm.calls.lastIds) && llm.calls.lastIds[0] === "sensenova-token-plan",
+    Array.isArray(llm.calls.lastIds) && llm.calls.lastIds[0] === "sensenova-suite",
     JSON.stringify(llm.calls.lastIds));
   check("the directory row names this plugin's settings namespace",
     llm.calls.lastRows?.[0]?.settingsNs === "dsh-sensenova-suite" &&

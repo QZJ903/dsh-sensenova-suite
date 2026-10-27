@@ -26,7 +26,6 @@ function Field({ label, children }: { label: string; children: unknown }): unkno
 }
 
 const IMAGE_FORMATS = ["png", "jpeg", "webp"];
-const RESPONSE_FORMATS = ["b64_json", "url"];
 /** 官方建议尺寸（值 = 直通商汤 body.size；auto 让平台自选）。 */
 const IMAGE_SIZES = [
   ["auto", "auto"],
@@ -53,8 +52,6 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   const settings = pool?.settings ?? { toolsEnabled: {}, text2img: {}, img2img: {}, vision: {} };
   const [busySection, setBusySection] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  /** 文本输入的本地草稿（key = section.key）。 */
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
   /** 三张参数卡各自可合拢（默认全展开）。 */
   const [openCards, setOpenCards] = useState<Record<string, boolean>>({ text2img: true, img2img: true, vision: true });
   const toggleCard = (key: string) => setOpenCards((current) => ({ ...current, [key]: current[key] === false }));
@@ -91,24 +88,6 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   const setKey = (section: string, key: string, value: unknown) => {
     void save(section, { [key]: value });
   };
-  const draftOf = (section: string, key: string): string => {
-    const compose = `${section}.${key}`;
-    return drafts[compose] ?? saved(section, key);
-  };
-  const setDraft = (section: string, key: string, value: string) => {
-    setDrafts((current) => ({ ...current, [`${section}.${key}`]: value }));
-  };
-  const commitDraft = (section: string, key: string) => {
-    const compose = `${section}.${key}`;
-    const draft = drafts[compose];
-    if (draft === undefined || draft === saved(section, key)) return;
-    setKey(section, key, draft);
-    setDrafts((current) => {
-      const next = { ...current };
-      delete next[compose];
-      return next;
-    });
-  };
 
   /** 开关（即改即存）。 */
   const switchRow = (section: string, key: string, label: string, fallback: boolean) => h(
@@ -138,19 +117,106 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
       : list.map((model) => h("option", { key: String(model.id), value: String(model.id) }, String(model.name ?? model.id))))
   );
 
-  /** 文本行（失焦提交）。 */
-  const textRow = (section: string, key: string, label: string, placeholder: string) => h(
-    Field,
-    { label },
-    h("input", {
-      style: { ...S.input, width: "auto", flex: 1 },
-      value: draftOf(section, key),
-      placeholder,
-      disabled: busySection === section,
-      onChange: (event: { target: { value: string } }) => setDraft(section, key, event.target.value),
-      onBlur: () => commitDraft(section, key)
-    })
-  );
+  /** 文本草稿（key = section.key；常驻输入框用）。 */
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [focusedField, setFocusedField] = useState<string | null>(null);
+  const draftOf = (section: string, key: string): string => drafts[`${section}.${key}`] ?? saved(section, key);
+  const setDraft = (section: string, key: string, value: string) => {
+    setDrafts((current) => ({ ...current, [`${section}.${key}`]: value }));
+  };
+
+  /** 剥一层成对引号（资源管理器「复制文件地址」自带引号）+ 首尾空白。 */
+  const unquote = (raw: string): string => raw.trim().replace(/^"(.*)"$/, "$1").trim();
+
+  /**
+   * 「保存目录」校验：保存位置是本机文件系统路径，错误要在保存时暴露而不是
+   * 等出图落盘失败才发现。空白 = 不落盘（合法）；必须是绝对路径（盘符 / UNC /
+   * POSIX 根）；盘符外不得含 Windows 非法字符与控制字符。
+   */
+  const validateOutputDir = (raw: string): string | null => {
+    const value = unquote(raw);
+    if (value === "") return null;
+    if (!/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(value)) return tt("mm.outputDirNotAbsolute");
+    if (/[<>:"|?*\u0000-\u001f]/.test(value.replace(/^[a-zA-Z]:/, ""))) return tt("mm.outputDirIllegalChars");
+    return null;
+  };
+
+  const [dirErrors, setDirErrors] = useState<Record<string, string>>({});
+  const clearDirError = (tool: "text2img" | "img2img") => {
+    setDirErrors((current) => {
+      if (!(tool in current)) return current;
+      const rest = { ...current };
+      delete rest[tool];
+      return rest;
+    });
+  };
+
+  /** 保存目录提交：非法 = 红字 + 输入框恢复已存原值；合法 = 归一后落库并清红字。 */
+  const commitOutputDir = (tool: "text2img" | "img2img", raw: string): void => {
+    const verdict = validateOutputDir(raw);
+    if (verdict !== null) {
+      setDirErrors((current) => ({ ...current, [tool]: verdict }));
+      setDraft(tool, "outputDir", saved(tool, "outputDir"));
+      return;
+    }
+    const next = unquote(raw);
+    setDraft(tool, "outputDir", next);
+    if (next !== saved(tool, "outputDir")) setKey(tool, "outputDir", next);
+    clearDirError(tool);
+  };
+  const commitBridgePrompt = (raw: string): void => {
+    const next = unquote(raw);
+    if (next !== saved("vision", "bridgePrompt")) setKey("vision", "bridgePrompt", next);
+  };
+
+  /** 常驻输入框：聚焦且有改动时在最右加「保存」；失焦/回车/保存同源提交。
+   * commit 无返回值——非法输入由 commit 自行恢复原值并设红字（行下方）。 */
+  const inputWithSaveRow = (section: string, key: string, opts: {
+    label: string;
+    placeholder: string;
+    busy: boolean;
+    error: string | undefined;
+    commit: (raw: string) => void;
+  }) => {
+    const target = `${section}.${key}`;
+    const showSave = focusedField === target && draftOf(section, key) !== saved(section, key);
+    return h(
+      "div",
+      null,
+      h(
+        Field,
+        { label: opts.label },
+        h("span", { style: { display: "flex", gap: 4, alignItems: "center" } },
+          h("input", {
+            style: { ...S.input, flex: "1 1 auto" },
+            value: draftOf(section, key),
+            placeholder: opts.placeholder,
+            disabled: opts.busy,
+            onFocus: () => setFocusedField(target),
+            onChange: (event: { target: { value: string } }) => setDraft(section, key, event.target.value),
+            onBlur: () => {
+              setFocusedField((current) => (current === target ? null : current));
+              opts.commit(draftOf(section, key));
+            },
+            onKeyDown: (event: { key: string; preventDefault?: () => void }) => {
+              // 回车提交；preventDefault 防冒泡外层 form（同 key 备注的 2026-10-25 坑）。
+              if (event.key === "Enter") {
+                event.preventDefault?.();
+                opts.commit(draftOf(section, key));
+                setFocusedField(null);
+              }
+            }
+          }),
+          showSave
+            ? h("button", {
+                type: "button", style: S.rosterBulk, disabled: opts.busy,
+                onClick: () => opts.commit(draftOf(section, key))
+              }, tt("poolMng.saveName"))
+            : null)
+      ),
+      opts.error !== undefined ? h("p", { style: S.formError, role: "alert" }, opts.error) : null
+    );
+  };
 
   /** 单选下拉行。 */
   const selectRow = (section: string, key: string, label: string, options: string[], fallback: string,
@@ -172,19 +238,25 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
     // 开关写进 toolsEnabled 分区（宿主注册 gating 只认 toolsEnabled.text2img /
     // toolsEnabled.img2img）。写进 text2img.enabled 会被 readImage 白名单丢弃，
     // 工具永不注册 —— 2026-10-25 修的「按了开启没反应」根因。
-    switchRow("toolsEnabled", tool, tt("mm.enabled"), false),
+    switchRow("toolsEnabled", tool, tt("mm.enabled"), true),
     modelSelect(tool, tt("mm.defaultModel"), imageModels, modelFallback),
     selectRow(tool, "size", tt("mm.size"), IMAGE_SIZES.map(([value]) => value), "auto",
       (option) => IMAGE_SIZES.find(([value]) => value === option)?.[1] ?? option),
     selectRow(tool, "outputFormat", tt("mm.outputFormat"), IMAGE_FORMATS, "png"),
-    selectRow(tool, "responseFormat", tt("mm.responseFormat"), RESPONSE_FORMATS, "b64_json"),
     // 描述润色（默认开）在关闭水印（默认开）之前；两者默认都开，
     // 水印开关语义是「关闭水印」——开=不加官方水印，关=加。与宿主默认一致
     // （imageOptions: watermark ?? true / promptExtend ?? true）。
     switchRow(tool, "promptExtend", tt("mm.promptExtend"), true),
     switchRow(tool, "watermark", tt("mm.watermark"), true),
-    // 提示放进输入框 placeholder（留空不自动保存）。
-    textRow(tool, "outputDir", tt("mm.outputDir"), tt("mm.outputDirHint"))
+    // 保存目录：常驻输入框，聚焦且有改动时最右出现「保存」；校验（绝对路径 +
+    // 非法字符）非法恢复原值 + 红字内联（每卡独立），合法归一（剥引号/空白）后提交。
+    inputWithSaveRow(tool, "outputDir", {
+      label: tt("mm.outputDir"),
+      placeholder: tt("mm.outputDirHint"),
+      busy: busySection === tool,
+      error: dirErrors[tool],
+      commit: (raw) => commitOutputDir(tool, raw)
+    })
   );
 
   return h(
@@ -200,11 +272,15 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
       { title: tt("mm.visionTitle"), open: openCards.vision !== false, onToggle: () => toggleCard("vision"), tt },
       // 文案是「启用转述」不是「启用工具」——视觉卡不是模型工具，是转述管道
       // （独立 i18n key，出图两卡仍用 mm.enabled「启用工具」）。
-      switchRow("toolsEnabled", "visionTools", tt("mm.visionEnabled"), false),
+      switchRow("toolsEnabled", "visionTools", tt("mm.visionEnabled"), true),
       modelSelect("vision", tt("mm.visionModel"), visionModels, "sensenova-6.8-flash-lite"),
-      selectRow("vision", "bridgeMode", tt("mm.bridgeMode"), ["auto", "on", "off"], "auto",
-        (option) => tt(option === "auto" ? "mm.bridgeModeAuto" : option === "on" ? "mm.bridgeModeOn" : "mm.bridgeModeOff")),
-      textRow("vision", "bridgePrompt", tt("mm.bridgePrompt"), tt("mm.bridgePromptPlaceholder"))
+      inputWithSaveRow("vision", "bridgePrompt", {
+        label: tt("mm.bridgePrompt"),
+        placeholder: tt("mm.bridgePromptPlaceholder"),
+        busy: busySection === "vision",
+        error: undefined,
+        commit: commitBridgePrompt
+      })
     ),
     h("p", { style: { ...S.trendLegend, marginTop: 10 } }, tt("mm.hint"))
   );

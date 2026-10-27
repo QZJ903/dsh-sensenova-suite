@@ -3,7 +3,7 @@
  *
  * 钉住的契约：
  *   - image-tools：参数校验（空 prompt / edits 无 images 抛错）、成功值形状
- *     （b64 → imageDataUrl + 面板 outputDir 落盘）、失败进 30s 冷却（冷却期直接拒绝）、
+ *     （url 信封 → 只回 URL 不回 base64 + 面板 outputDir 落盘拉字节）、失败进 30s 冷却（冷却期直接拒绝）、
  *     key 经池解析并上报成功；
  *   - vision/run：describe 信封（成功 metadata.attempts / 失败 envelope），fetch 全部走注入桩；
  *   - vision/bridge：contentHasImage 递归（含 tool-result 内嵌）；
@@ -34,29 +34,39 @@ try {
   const keysResolved = [];
   const successes = [];
   let now = 1_000_000;
+  const IMAGE_URL = "https://img.example.com/gen/abc.png";
+  // 两段式桩：出图 API → 返回 url 信封；随后对 URL 的 GET → 图片字节。
+  const fetchStub = (async (url) => {
+    const u = String(url);
+    if (u.endsWith("/images/generations") || u.endsWith("/images/edits")) {
+      return new Response(JSON.stringify({
+        data: [{ url: IMAGE_URL }],
+        output_format: "png",
+        size: "1024x1024",
+        usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30, images_count: 1 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(Buffer.from("fake-png-bytes"), { status: 200 });
+  });
   const deps = () => ({
-    options: () => ({ ...imageOptions, outputFormat: "png", responseFormat: "b64_json", promptExtend: true }),
+    options: () => ({ ...imageOptions, outputFormat: "png", promptExtend: true }),
     resolveKey: async (model) => { keysResolved.push(model); return "sk-pool-1"; },
     reportSuccess: (key) => successes.push(key),
     now: () => now,
-    fetchImpl: (async () => new Response(JSON.stringify({
-      data: [{ b64_json: Buffer.from("fake-png").toString("base64") }],
-      output_format: "png",
-      size: "1024x1024",
-      usage: { input_tokens: 10, output_tokens: 20, total_tokens: 30, images_count: 1 },
-    }), { status: 200, headers: { "content-type": "application/json" } })),
+    fetchImpl: fetchStub,
   });
 
   resetImageCooldown();
   const okValue = await callImageApi(deps(), { prompt: "一只海豹" }, "text2img", "/images/generations");
-  check("文生图成功值形状", okValue.ok === true && okValue.imageDataUrl?.startsWith("data:image/png;base64,") === true
-    && okValue.usage?.total_tokens === 30, JSON.stringify(okValue).slice(0, 160));
+  check("文生图只回 URL（base64 不进返回值）",
+    okValue.ok === true && okValue.imageUrl === IMAGE_URL && okValue.imageDataUrl === undefined
+    && okValue.usage?.total_tokens === 30, JSON.stringify(okValue).slice(0, 200));
   check("key 经池按模型解析", keysResolved[0] === "sensenova-u1.5-lite", keysResolved.join(","));
   check("成功上报池", successes[0] === "sk-pool-1");
 
-  // 落盘只由面板「输出目录」决定（savePath 参数已移除——模型不该决定落盘位置）
+  // 落盘只由面板「输出目录」决定：插件拉取 URL 字节存文件（savePath 参数已移除）
   const dir = mkdtempSync(join(tmpdir(), "suite-image-"));
-  const dirDeps = { ...deps(), options: () => ({ ...imageOptions, outputFormat: "png", responseFormat: "b64_json", promptExtend: true, outputDir: dir }) };
+  const dirDeps = { ...deps(), options: () => ({ ...imageOptions, outputFormat: "png", promptExtend: true, outputDir: dir }) };
   const saved = await callImageApi(dirDeps, { prompt: "落盘测试" }, "text2img", "/images/generations");
   check("面板 outputDir 落盘返回路径", typeof saved.imagePath === "string" && saved.imagePath.startsWith(dir), saved.imagePath);
   rmSync(dir, { recursive: true, force: true });
@@ -86,9 +96,10 @@ try {
     }),
   };
   await callImageApi(overrideDeps, { prompt: "压参数", watermark: true, model: "sensenova-u1.5-fast", size: "512x512", prompt_extend: false }, "text2img", "/images/generations");
-  check("面板配置强制覆盖 args（水印/模型/尺寸/润色）",
+  check("面板配置强制覆盖 args（水印/模型/尺寸/润色/返回格式）",
     bodies[0]?.watermark === false && bodies[0]?.model === "sensenova-u1.5-lite"
-    && bodies[0]?.size === "1024x1024" && bodies[0]?.prompt_extend === true,
+    && bodies[0]?.size === "1024x1024" && bodies[0]?.prompt_extend === true
+    && bodies[0]?.response_format === "url",
     JSON.stringify(bodies[0]));
 
   // 冷却：失败 → 30s 内直接拒绝

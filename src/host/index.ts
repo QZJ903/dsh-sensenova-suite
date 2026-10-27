@@ -1,7 +1,7 @@
 /**
  * dsh-sensenova-suite — Host half (thin router).
  *
- * Reads the SenseNova Token Plan quota through the platform's own console API
+ * Reads the SenseNova Suite quota through the platform's own console API
  * (the same endpoints the web console calls) and serves the result to the
  * Client panel over one read-only `/api` route.
  *
@@ -330,8 +330,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
         model: poolRecord.vision?.model ?? settings.visionModel,
         imageMode: settings.visionImageMode,
         timeoutMs: settings.visionTimeoutMs,
-        bridgeMode: (poolRecord.vision?.bridgeMode ?? settings.visionBridgeMode) as "off" | "on" | "auto",
         bridgePrompt: poolRecord.vision?.bridgePrompt ?? settings.visionBridgePrompt,
+        relayOn: settings.visionToolsEnabled || poolRecord.toolsEnabled.visionTools === true,
       }),
       checkedIds: () => poolRecord.vision?.visionModels ?? [],
       resolveKey: async () => {
@@ -441,7 +441,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     const panelKeyValue = (await apiKeyStore.resolve().catch(() => ({ value: "" }))).value;
     if (typeof panelKeyValue === "string" && panelKeyValue !== "") {
       rows.push({
-        id: "default", label: maskKey(panelKeyValue), note: null,
+        id: "default", label: maskKey(panelKeyValue),
+        note: poolRecord.defaultNote !== undefined && poolRecord.defaultNote !== "" ? poolRecord.defaultNote : null,
         phase: phaseById.get("default") ?? "absent",
         disabled: poolRecord.disabledIds.includes("default"),
         deleted: poolRecord.deletedIds.includes("default")
@@ -579,7 +580,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   };
   // 工具集：按工具开关（text2imgEnabled/img2imgEnabled/visionToolsEnabled，
   // 面板「多模态」为主设置）且 Host 暴露 tools 服务才注册；视觉桥
-  // （visionBridgeMode !== 'off'）独立于工具开关——它不注册任何工具，只让纯文本
+  // 恒开（2026-10-27 读图桥设置删除）——它不注册任何工具，只让纯文本
   // 主模型拖图不被阻断。视觉/出图调用都经池解析 key（按模型积分组）。
   ctx.effect(() => {
     const disposers: Array<() => void> = [];
@@ -654,7 +655,6 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
                 watermark: !(saved?.watermark ?? true),
                 defaultSize: saved?.size ?? "",
                 outputFormat: saved?.outputFormat ?? "png",
-                responseFormat: saved?.responseFormat ?? "b64_json",
                 promptExtend: saved?.promptExtend ?? true,
                 outputDir: saved?.outputDir ?? "",
                 timeoutMs: settings.imageTimeoutMs,
@@ -699,7 +699,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     // 动态生效，不再按 patch 默认值条件安装。
     const restoreCapability = installCapabilityOverride(
       ctx as unknown as import("./vision/bridge.ts").BridgeCtx,
-      () => (poolRecord.vision?.bridgeMode ?? settings.visionBridgeMode) !== "off",
+      () => true,
     );
     disposers.push(restoreCapability);
     return () => {

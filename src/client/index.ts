@@ -2,7 +2,7 @@
  * dsh-sensenova-suite — Client half (entry).
  *
  * Registers a config card inside the Plugins page (`plugins.bundle.config`
- * slot). The card renders the SenseNova Token Plan quota pools (5h / 7d
+ * slot). The card renders the SenseNova Suite quota pools (5h / 7d
  * windows with used/limit/percent), per-model credit consumption, and the
  * quota / api tab layout. The data comes from the Host's read-only snapshot
  * route, polled only while the card is mounted — the Client folds no session
@@ -76,7 +76,7 @@ import { ComposerUsagePill } from "./composer-usage-pill.ts";
  * 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
  * 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
  */
-const CLIENT_BUILD = "2026-10-27T11:40";
+const CLIENT_BUILD = "2026-10-27T14:44";
 
 function clientFactory(loaderRequire: (specifier: string) => unknown): {
   inject: string[];

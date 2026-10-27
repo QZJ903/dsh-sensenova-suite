@@ -285,25 +285,45 @@ export function PoolManager({ pool, onDone, tt }: {
             { key: entry.id, style: { ...S.modelRow, ...(entry.disabled || entry.deleted ? S.modelRowOff : {}) } },
             h(
               "div",
-              { style: { display: "flex", gap: 8, alignItems: "center" } },
-              // 显示：脱敏名（无框大字）+ 备注（无框小字，紧跟 key 名之后）
-              h("span", { style: { ...S.modelName, flex: "0 1 auto" }, title: entry.id },
+              { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "nowrap" } },
+              // key 脱敏名（无框大字）。
+              h("span", { style: { ...S.modelName, flex: "none" }, title: entry.id },
                 entry.label ?? entry.id),
-              entry.note !== null && entry.note !== ""
-                ? h("span", { style: { ...S.muted, fontSize: 12 } }, entry.note)
-                : null,
-              h("span", { style: { ...S.modelBadge, marginLeft: "auto" } },
-                entry.deleted ? tt("poolMng.deleted") : phaseLabel[entry.phase] ?? entry.phase),
+              // 备注紧跟 key、同一行（2026-10-27 用户拍板：不单独换行、不右对齐）。
+              // 未编辑 = 有内容显示内容、空显示「备注」占位（点击进入编辑）；
+              // 编辑 = 输入框内联。提交路径只有一条（setNote：失焦/回车/保存同源）。
+              editingId === entry.id
+                ? h("input", {
+                    style: { ...S.input, flex: "1 1 140px", minWidth: 140, height: 26, fontSize: 12, padding: "0 6px", boxSizing: "border-box" },
+                    value: noteDraft,
+                    autoFocus: true,
+                    placeholder: tt("poolMng.note"),
+                    disabled: busyId !== null,
+                    onChange: (event: { target: { value: string } }) => setNoteDraft(event.target.value),
+                    onBlur: () => { if (editingId === entry.id) void setNote(entry.id, noteDraft); },
+                    onKeyDown: (event: { key: string; preventDefault?: () => void }) => {
+                      // 回车保存备注；必须 preventDefault，否则会冒泡到外层
+                      // form 的 onSubmit（填 key 的表单），把空的 apiKey 提交并报
+                      // 「请输入 sk- 开头的 API Key」——2026-10-25 用户实测。
+                      if (event.key === "Enter") {
+                        event.preventDefault?.();
+                        void setNote(entry.id, noteDraft);
+                      }
+                    }
+                  })
+                : h("span", {
+                    style: { ...S.muted, fontSize: 12, cursor: "pointer", flex: "0 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+                    title: entry.note !== null && entry.note !== "" ? entry.note : tt("poolMng.note"),
+                    onClick: () => { setEditingId(entry.id); setNoteDraft(entry.note ?? ""); }
+                  }, entry.note !== null && entry.note !== "" ? entry.note : tt("poolMng.note")),
               editingId === entry.id
                 ? h("button", {
                     type: "button", style: S.rosterBulk, disabled: busyId !== null,
                     onClick: () => void setNote(entry.id, noteDraft)
                   }, tt("poolMng.saveName"))
-                : h("span", {
-                    // 备注以内容为准：显示「备注」两个字，点它整行变成输入框再回车保存
-                    style: { ...S.muted, fontSize: 12, cursor: "pointer" },
-                    onClick: () => { setEditingId(entry.id); setNoteDraft(entry.note ?? ""); }
-                  }, tt("poolMng.note")),
+                : null,
+              h("span", { style: { ...S.modelBadge, marginLeft: "auto" } },
+                entry.deleted ? tt("poolMng.deleted") : phaseLabel[entry.phase] ?? entry.phase),
               entry.deleted
                 ? h("button", {
                     type: "button", style: S.rosterBulk, disabled: busyId !== null,
@@ -326,28 +346,7 @@ export function PoolManager({ pool, onDone, tt }: {
                       onClick: () => void act({ action: "delete", id: entry.id }, entry.id)
                     }, tt("poolMng.delete"))
                   )
-            ),
-            // 编辑备注行：编辑态输入框显示在 key 行下方。
-            editingId === entry.id
-              ? h("input", {
-                  style: { ...S.input, width: "100%", boxSizing: "border-box", marginTop: 6 },
-                  value: noteDraft,
-                  autoFocus: true,
-                  placeholder: tt("poolMng.note"),
-                  disabled: busyId !== null,
-                  onChange: (event: { target: { value: string } }) => setNoteDraft(event.target.value),
-                  onBlur: () => { if (editingId === entry.id) void setNote(entry.id, noteDraft); },
-                  onKeyDown: (event: { key: string; preventDefault?: () => void }) => {
-                    // 回车保存备注；必须 preventDefault，否则会冒泡到外层
-                    // form 的 onSubmit（填 key 的表单），把空的 apiKey 提交并报
-                    // 「请输入 sk- 开头的 API Key」——2026-10-25 用户实测。
-                    if (event.key === "Enter") {
-                      event.preventDefault?.();
-                      void setNote(entry.id, noteDraft);
-                    }
-                  }
-                })
-              : null
+            )
           ))
         ),
     error !== null ? h("p", { style: S.formError, role: "alert" }, error) : null

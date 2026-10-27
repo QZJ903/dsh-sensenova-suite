@@ -197,11 +197,34 @@ try {
   check("normalizeAccounts：丢非法、补缺省、去空白",
     accounts.length === 2 && accounts[0].id === "account-1" && accounts[1].apiKeyRef === "K2",
     JSON.stringify(accounts));
-  check("normalizeModelGroups：非对象回落默认", normalizeModelGroups("junk")["sensenova-u1.5-lite"] === "sensenova");
+  // 2026-10-27 分组定版：Flash-Lite 专属池只有 flash-lite；u1.5 出图两模型走
+  // 通用池（不映射 → general 裸轮转），专属池的限流标记不再误伤通用池模型。
+  check("normalizeModelGroups：非对象回落默认（仅 flash-lite 归专属组）",
+    normalizeModelGroups("junk")["sensenova-6.8-flash-lite"] === "flash-lite"
+    && !("sensenova-u1.5-lite" in normalizeModelGroups("junk"))
+    && !("sensenova-u1.5-fast" in normalizeModelGroups("junk")));
   const custom = normalizeModelGroups({ "my-model": " custom ", "": "x", "k": 5 });
   check("normalizeModelGroups：收 string→string、去空白、丢非法值",
     custom["my-model"] === "custom" && !("k" in custom), JSON.stringify(custom));
 } catch (e) { fail("normalize", e); }
+
+// ── 思考档位首装默认（2026-10-27 用户拍板：按文档原生档位）──────────────────
+try {
+  const { parsePoolPayload, POOL_STORE_VERSION } = await import("../src/host/pool-store.ts");
+  const base = { version: POOL_STORE_VERSION, disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {}, keys: [] };
+  const fresh = parsePoolPayload(base);
+  check("首装播种：已知模型按原生档位给默认集（deepseek-flash 原生无 medium）",
+    JSON.stringify(fresh?.thinking["deepseek-flash"]) === JSON.stringify(["off", "low", "high", "max"])
+    && JSON.stringify(fresh?.thinking["kimi-k3"]) === JSON.stringify(["off", "low", "medium", "high", "max"])
+    && fresh?.thinking["glm-5.2"]?.includes("xhigh") !== true,
+    JSON.stringify(fresh?.thinking));
+  const explicit = parsePoolPayload({ ...base, thinking: { "deepseek-flash": [], "kimi-k3": ["max"] } });
+  check("显式空数组（全不勾）尊重用户，未提及的模型仍播种",
+    Array.isArray(explicit?.thinking["deepseek-flash"]) && explicit.thinking["deepseek-flash"].length === 0
+    && JSON.stringify(explicit?.thinking["kimi-k3"]) === JSON.stringify(["max"])
+    && (explicit?.thinking["glm-5.2"]?.length ?? 0) > 0,
+    JSON.stringify(explicit?.thinking));
+} catch (e) { fail("thinking-defaults", e); }
 
 let failed = 0;
 for (const r of results) if (!r.pass) failed += 1;

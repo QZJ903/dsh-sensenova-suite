@@ -1,16 +1,18 @@
 /**
  * 出图两工具：文生图（/images/generations）
- * + 图片编辑（/images/edits）。结果信封、Base64/24h URL 行为与
- * 源插件一致；suite 化改动：
+ * + 图片编辑（/images/edits）。suite 化改动：
  *
  *   1. **key 按调用经池解析**（resolveKey(model)——按模型的积分组选 key，
  *      u1.5 系归商汤组走会话亲和；替换源插件的三级 key 解析链）；
  *   2. **失败 30s 冷却**（冷却期内出图工具
  *      直接拒绝，避免 agent 对着故障连环重试）；
- *   3. **面板参数强制覆盖**（2026-10-27）：模型/尺寸/输出/返回格式/水印/prompt
+ *   3. **面板参数强制覆盖**（2026-10-27）：模型/尺寸/输出格式/水印/prompt
  *      润色以面板保存值为唯一真源，调用时强制生效——旧逻辑 args 优先、配置只补缺，
  *      模型带 `watermark: true` 就把面板的「关闭水印」压掉（水印关不掉的根因）。
  *      同名参数已从 schema 移除（schema 广告被静默忽略的参数 = 对模型的假承诺）。
+ *   4. **只回 URL（2026-10-27）**：response_format 固定 url，base64 不进工具
+ *      返回值（一张 2K 图 ≈ 7MB 文本，回传即灌爆模型上下文）；落盘走「保存目录」
+ *      ——插件拉取 URL 字节存文件，失败不吞结果（诊断日志）。
  *
  * 纯逻辑模块（fetch 全局；peer 由 vision/tools.ts 的 defineTool 包裹），
  * 可离线单测。
@@ -19,6 +21,8 @@
  */
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, resolve, extname } from "node:path";
+import { traceLog } from "./trace-log.ts";
+
 
 /** 出图单工具的生效配置（面板保存值 → 配置默认 → 代码默认，index.ts 归一）。 */
 export interface ImageToolOptions {
@@ -27,7 +31,6 @@ export interface ImageToolOptions {
   watermark: boolean;
   defaultSize: string;
   outputFormat: string;
-  responseFormat: string;
   promptExtend: boolean;
   outputDir: string;
   timeoutMs: number;
@@ -43,8 +46,6 @@ export interface ImageToolDeps {
   fetchImpl?: typeof fetch;
 }
 
-const MIME: Record<string, string> = { png: "image/png", jpeg: "image/jpeg", jpg: "image/jpeg", webp: "image/webp" };
-
 /** 失败后的冷却期：30s 内出图工具直接拒绝。 */
 export const IMAGE_COOLDOWN_MS = 30_000;
 
@@ -58,7 +59,6 @@ export interface ImageToolValue {
   model?: string;
   size?: string;
   output_format?: string;
-  imageDataUrl?: string;
   imageUrl?: string;
   imagePath?: string;
   /** exactOptionalPropertyTypes：usage 子字段可为 undefined（上游 JSON 缺项如实透传）。 */
@@ -93,8 +93,8 @@ async function postImage(path: string, apiKey: string, body: Record<string, unkn
   }
 }
 
-/** Save base64 image to disk; returns absolute path. */
-function saveImage(b64: string, targetPath: string, format: string): string {
+/** Save image bytes to disk; returns absolute path. */
+function saveImage(bytes: Buffer, targetPath: string, format: string): string {
   const ext = (format === "jpeg" ? "jpg" : format) || "png";
   let filePath = resolve(process.cwd(), targetPath);
   const hasImgExt = [".png", ".jpg", ".jpeg", ".webp"].includes(extname(filePath).toLowerCase());
@@ -104,8 +104,21 @@ function saveImage(b64: string, targetPath: string, format: string): string {
   } else if (!existsSync(dirname(filePath))) {
     mkdirSync(dirname(filePath), { recursive: true });
   }
-  writeFileSync(filePath, Buffer.from(b64, "base64"));
+  writeFileSync(filePath, bytes);
   return filePath;
+}
+
+/** 拉取出图 URL 的字节（落盘用）；失败抛错，由调用方决定兜底（URL 已在手）。 */
+async function downloadImage(url: string, fetchImpl: typeof fetch, timeoutMs: number): Promise<Buffer> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(url, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return Buffer.from(await response.arrayBuffer());
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function buildValue(result: Record<string, unknown>, model: string): ImageToolValue {
@@ -135,7 +148,6 @@ export function renderImageResult(_args: unknown, value: unknown): Array<{ type:
   const lines = [`✅ SenseNova ${v.model} 生成完成${v.size ? `（${v.size}）` : ""}`];
   if (v.imagePath !== undefined) lines.push(`已保存：${v.imagePath}`);
   if (v.imageUrl !== undefined) lines.push(`图片 URL（24h 有效）：${v.imageUrl}`);
-  if (v.imageDataUrl !== undefined) lines.push(`Base64 图片数据已返回（${Math.round(v.imageDataUrl.length / 1024)} KB）。` + (v.imagePath !== undefined ? `已同时保存：${v.imagePath}` : "如需本地文件，请在插件面板配置输出目录后重新生成。"));
   if (v.usage) lines.push(`Token：input ${v.usage.input_tokens ?? "?"} / output ${v.usage.output_tokens ?? "?"} / total ${v.usage.total_tokens ?? "?"}`);
   return [{ type: "text", text: lines.join("\n") }];
 }
@@ -148,7 +160,6 @@ export const imageResultSchema = {
     model: { type: "string" },
     size: { type: "string" },
     output_format: { type: "string" },
-    imageDataUrl: { type: "string" },
     imageUrl: { type: "string" },
     imagePath: { type: "string" },
     usage: { type: "object", additionalProperties: true },
@@ -211,7 +222,7 @@ export async function callImageApi(
     return { ok: false, error: `出图刚失败过，${Math.ceil((cooldownUntil - now()) / 1000)}s 后冷却结束再试` };
   }
 
-  // 参数强制覆盖（2026-10-27）：面板配置是唯一真源，args 不参与这六个旋钮——
+  // 参数强制覆盖（2026-10-27）：面板配置是唯一真源，args 不参与这些旋钮——
   // schema 已不广告它们；这里也不再读，防止 schema 漂移后旧客户端参数复活。
   const model = config.defaultModel;
   const body: Record<string, unknown> = {
@@ -223,7 +234,9 @@ export async function callImageApi(
   // 面板「尺寸」留空 = 不发 size（平台默认）。
   if (config.defaultSize !== "") body.size = config.defaultSize;
   body.output_format = config.outputFormat;
-  body.response_format = config.responseFormat;
+  // response_format 固定 url：base64 回传会灌爆模型上下文（一张 2K 图 ≈ 7MB
+  // 文本），模型侧只需要可引用的链接（24h 有效）；本地留存走「保存目录」落盘。
+  body.response_format = "url";
   body.prompt_extend = config.promptExtend;
 
   if (endpoint === "/images/edits") {
@@ -261,17 +274,21 @@ export async function callImageApi(
   const format = typeof result.output_format === "string" ? result.output_format
     : (config.outputFormat !== "" ? config.outputFormat : "png");
 
-  const b64 = data.b64_json;
-  if (typeof b64 === "string" && b64 !== "") {
-    value.imageDataUrl = `data:${MIME[format] ?? "image/png"};base64,${b64}`;
-    // 落盘位置只由面板「输出目录」决定（savePath 参数已从 schema 移除——模型
-    // 不该决定文件落在哪）；留空 = 不落盘，仅返回 Base64。
+  // 只回 URL（2026-10-27）：base64 不再进工具返回值。落盘位置只由面板「输出
+  // 目录」决定（savePath 参数已移除——模型不该决定文件落在哪）；留空 = 不落盘。
+  const imageUrl = typeof data.url === "string" ? data.url : undefined;
+  if (imageUrl !== undefined) {
+    value.imageUrl = imageUrl;
     const target = config.outputDir;
     if (typeof target === "string" && target.trim() !== "") {
-      value.imagePath = saveImage(b64, target.trim(), format);
+      try {
+        const bytes = await downloadImage(imageUrl, fetchImpl, config.timeoutMs);
+        value.imagePath = saveImage(bytes, target.trim(), format);
+      } catch (error) {
+        // 落盘失败不吞结果：URL 已在手，模型仍可引用；原因走诊断日志。
+        traceLog(`[dsh-sensenova-suite] 出图落盘失败（URL 已返回）：${error instanceof Error ? error.message : String(error)}`);
+      }
     }
-  } else if (typeof data.url === "string") {
-    value.imageUrl = data.url;
   }
   return value;
 }
@@ -299,7 +316,7 @@ export function buildImageTools(deps: ImageToolDeps): Array<{
   return [
     {
       name: "sn_text2img",
-      description: "调用商汤 U 系列模型生成图片。将文字描述生成图片，返回 Base64 图片数据或 24 小时有效 URL；面板配置了输出目录时自动保存本地文件。模型、尺寸、输出/返回格式、水印、prompt 润色由插件面板配置强制生效，调用时不接受这些参数",
+      description: "调用商汤 U 系列模型生成图片。将文字描述生成图片，返回 Base64 图片数据或 24 小时有效 URL；面板配置了保存目录时自动保存本地文件。模型、尺寸、输出/返回格式、水印、prompt 润色由插件面板配置强制生效，调用时不接受这些参数",
       parameters: text2imgParams,
       output: { schema: imageResultSchema, render: renderImageResult },
       execute: (args) => callImageApi(deps, args, "text2img", "/images/generations"),

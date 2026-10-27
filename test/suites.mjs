@@ -93,6 +93,7 @@ export const SUITES = Object.freeze([
   { name: "state-segmentation.test.mjs", kind: "suite", note: "per-profile state directories" },
   { name: "silent-catch.test.mjs", kind: "suite", note: "source hygiene: every statement-less catch explains itself" },
   { name: "pool.test.mjs", kind: "suite", note: "key pool orchestration + 429 classification" },
+  { name: "pool-route.test.mjs", kind: "suite", note: "pool management routes (rename/note persistence)" },
   { name: "vision-image.test.mjs", kind: "suite", note: "image tools + vision relay" },
   { name: "trace-log.test.mjs", kind: "suite", note: "diagnostic file log" },
   { name: "host-range.test.mjs", kind: "suite", note: "peer range × version universe alignment (golden, zero install)" },

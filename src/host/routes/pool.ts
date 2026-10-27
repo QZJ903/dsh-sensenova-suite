@@ -11,6 +11,7 @@
  */
 import { name } from "../host-config.ts";
 import { writeJson, refuseMethod, readJsonBodyOr400, withOrigin, redactedError } from "./http.ts";
+import { traceLog } from "../trace-log.ts";
 import type { Wiring } from "../types.ts";
 
 /** Key 池管理路由。 */
@@ -25,6 +26,7 @@ export interface PoolAdmin {
     delete(id: string): Promise<void>;
     setGlobalConcurrency(value: number | null): Promise<void>;
     setKeys(keys: Array<{ id: string; name: string }>): Promise<void>;
+    setDefaultNote(note: string): Promise<void>;
     setSection(
       section: "toolsEnabled" | "text2img" | "img2img" | "vision" | "thinking",
       values: Record<string, unknown>
@@ -83,6 +85,7 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
             keys.push({
               id: "default",
               label: "Key1",
+              note: record.defaultNote !== undefined && record.defaultNote !== "" ? record.defaultNote : null,
               phase: poolAdmin.phaseOf("default"),
               disabled: record.disabledIds.includes("default"),
               deleted: record.deletedIds.includes("default")
@@ -158,9 +161,18 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
         // 改备注（原「重命名」语义保留为 update：整行 name 覆盖；备注可为空）。
         if (body.value.action === "rename" && typeof body.value.id === "string" && body.value.id !== "") {
           const note = typeof body.value.name === "string" ? body.value.name.trim() : "";
-          const record = await poolAdmin.store.read();
-          await poolAdmin.store.setKeys(record.keys.map((entry) =>
-            entry.id === body.value.id ? { ...entry, name: note } : entry));
+          // 排障钉（2026-10-27「备注无法保存」）：每次 rename 都记收到了什么——
+          // 客户端发没发、发的 name 是否为空，一条日志定责任在哪一侧。
+          traceLog(`[dsh-sensenova-suite] rename id=${body.value.id} name="${note}" (name 类型 ${typeof body.value.name})`);
+          if (body.value.id === "default") {
+            // 面板默认 key 不在 keys 清单里——2026-10-27 真机：rename id=default
+            // 在 keys.map 里零命中、原样写回、返回 ok:true，备注静默丢失。
+            await poolAdmin.store.setDefaultNote(note);
+          } else {
+            const record = await poolAdmin.store.read();
+            await poolAdmin.store.setKeys(record.keys.map((entry) =>
+              entry.id === body.value.id ? { ...entry, name: note } : entry));
+          }
           await poolAdmin.refresh();
           writeJson(response, 200, { ok: true }, { "cache-control": "no-store" });
           return;

@@ -1,6 +1,6 @@
 # dsh-sensenova-suite — the bundle's own patch layer.
 #
-# Reads the SenseNova Token Plan quota through the console API and shows it in
+# Reads the SenseNova Suite quota through the console API and shows it in
 # a config card on the Plugins page (`plugins.bundle.config` slot) — not in the
 # sidebar. Everything below is plain configuration: edit it here (or
 # override the same id in the profile's cordis.patch.yml) and reinstall/reload.
@@ -70,9 +70,9 @@
         # agent 工具是 Host 级变更；无 tools 服务的 Host 静默缺席。
         # key 全部经池解析。参数（模型/尺寸/格式/水印/落盘目录）在面板
         # 「多模态」设置，存插件状态文件。
-        text2imgEnabled: false
-        img2imgEnabled: false
-        visionToolsEnabled: false
+        text2imgEnabled: true
+        img2imgEnabled: true
+        visionToolsEnabled: true
         text2imgModel: sensenova-u1.5-lite
         img2imgModel: sensenova-u1.5-lite
         imageTimeoutMs: 180000
@@ -111,7 +111,7 @@
         # Step three ("one-stop service"): register the SenseNova LLM
         # provider DIRECTLY, with no hand-written llm-pi-ai row. When true
         # the Host offers an OpenAI-compatible provider
-        # (`sensenova-token-plan`, base apiBase above): the panel's API-key
+        # (`sensenova-suite`, base apiBase above): the panel's API-key
         # field stores the `sk-` key in the DSH credentials (the process
         # environment still works as a fallback), the catalog poll builds
         # the model list, and vision models accept image input

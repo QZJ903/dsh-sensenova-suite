@@ -962,7 +962,7 @@ async function withNetwork(stub, body) {
       loadAdapterModule: async () => ({
         createSensenovaAdapter(options) {
           builds.push(options);
-          return { providerIds: ["sensenova-token-plan"], adapter: { fake: true, builtFrom: options.entries.length } };
+          return { providerIds: ["sensenova-suite"], adapter: { fake: true, builtFrom: options.entries.length } };
         }
       })
     };
@@ -1000,11 +1000,11 @@ async function withNetwork(stub, body) {
         snapshot.payload.llm?.providerRegistered === true, JSON.stringify(snapshot.payload.llm));
       check("O1 the adapter was registered under the own (non-colliding) id",
         llm.calls.adapter.length >= 1 &&
-        JSON.stringify(llm.calls.adapter.at(-1).ids) === JSON.stringify(["sensenova-token-plan"]),
+        JSON.stringify(llm.calls.adapter.at(-1).ids) === JSON.stringify(["sensenova-suite"]),
         JSON.stringify(llm.calls.adapter.map((c) => c.ids)));
       check("O1 the provider directory row was declared",
         llm.calls.directory.length >= 1 &&
-        llm.calls.directory.at(-1)[0]?.provider === "sensenova-token-plan",
+        llm.calls.directory.at(-1)[0]?.provider === "sensenova-suite",
         JSON.stringify(llm.calls.directory));
       const lastBuild = adapterDeps.builds.at(-1);
       check("O1 the adapter was built from the two catalog models at apiBase",
@@ -1151,7 +1151,7 @@ async function withNetwork(stub, body) {
       loadAdapterModule: async () => ({
         createSensenovaAdapter(options) {
           builds.push(options);
-          return { providerIds: ["sensenova-token-plan"], adapter: { fake: true } };
+          return { providerIds: ["sensenova-suite"], adapter: { fake: true } };
         }
       })
     };

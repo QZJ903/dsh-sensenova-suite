@@ -65,8 +65,8 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   try {
     const descriptor = toPiDescriptor({ id: "SenseNova-Lite", name: "SenseNova Lite" }, { baseUrl: BASE_URL });
 
-    check("provider id is the collision-free own slug", LLM_PROVIDER_ID === "sensenova-token-plan", LLM_PROVIDER_ID);
-    check("display name is set", LLM_DISPLAY_NAME === "SenseNova Token Plan");
+    check("provider id is the collision-free own slug", LLM_PROVIDER_ID === "sensenova-suite", LLM_PROVIDER_ID);
+    check("display name is set", LLM_DISPLAY_NAME === "SenseNova Suite");
     check("identity fields are mapped", descriptor.id === "SenseNova-Lite" && descriptor.name === "SenseNova Lite");
     check("api is openai-completions", descriptor.api === "openai-completions", descriptor.api);
     check("descriptor is tagged with the provider", descriptor.provider === LLM_PROVIDER_ID);
@@ -1497,7 +1497,7 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       /sensenova-raccoon/.test(refusalOf(() => assertProviderOwnership(owned, "sensenova-raccoon")) ?? ""),
       String(refusalOf(() => assertProviderOwnership(owned, "sensenova-raccoon"))));
     check("a descriptor built on the DEFAULTED id is still checked, not waved through",
-      /sensenova-token-plan/.test(refusalOf(() => assertProviderOwnership(buildDescriptors(entries, {}), "sensenova-raccoon")) ?? ""));
+      /sensenova-suite/.test(refusalOf(() => assertProviderOwnership(buildDescriptors(entries, {}), "sensenova-raccoon")) ?? ""));
     check("an empty id is rejected before any descriptor is trusted",
       /providerId is required/.test(refusalOf(() => assertProviderOwnership(owned, "")) ?? ""));
   } catch (error) {

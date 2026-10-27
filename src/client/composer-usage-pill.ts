@@ -98,7 +98,7 @@ import type { PoolData, QuotaWindowData } from "./wire.ts";
  * the provider match IS the pill's data decision: the numbers come from the
  * Token Plan snapshot route.
  */
-const TOKEN_PLAN = "sensenova-token-plan";
+const PROVIDER_ID = "sensenova-suite";
 
 
 /**
@@ -205,7 +205,7 @@ export function poolFor(
   const dedicated = covering.find((p) => p.poolType === "dedicated");
   if (dedicated !== undefined) return dedicated;
   if (covering.length > 0) return covering[0];
-  return provider === TOKEN_PLAN ? pools?.[0] : undefined;
+  return provider === PROVIDER_ID ? pools?.[0] : undefined;
 }
 
 /**
@@ -569,7 +569,7 @@ export function ComposerUsagePill(props: ComposerPillProps) {
   const projection = (useProjection ?? (() => undefined))("modelSelection");
   const provider = selectedProviderOf(projection);
   const model = selectedModelOf(projection);
-  if (provider === TOKEN_PLAN) return h(TokenPlanPill, { tt, model });
+  if (provider === PROVIDER_ID) return h(TokenPlanPill, { tt, model });
   return null;
 }
 
@@ -593,7 +593,7 @@ function TokenPlanPill({ tt, model }: ActivePillProps) {
   // toggles back = a panel that cannot be dismissed).
   const close = useCallback(() => setOpen(false), []);
   const pools = data?.pools?.pools ?? [];
-  const pool = poolFor(pools, model, TOKEN_PLAN);
+  const pool = poolFor(pools, model, PROVIDER_ID);
   const w5 = pool?.window5h ?? null;
   const w7 = pool?.window7d ?? null;
   const tier = worseTier(tierOf(w5), tierOf(w7));

@@ -896,6 +896,16 @@ function httpError(status: number, errText: string, retryAfterMs: number | undef
   return new LlmError(`llm-sensenova: SenseNova API error ${status}: ${errText.slice(0, 500)}`, 'PROVIDER_HTTP_ERROR', { status });
 }
 
+/**
+ * 跨实例目录种子（模块级，2026-10-27）：重注册（思考/勾选保存触发的签名重建）
+ * 会新建适配器实例，实例级缓存从零开始——不播种则每次重建后的首个 listModels
+ * 必打 /v1/models（HTTP 秒级），DSH 目录重建窗口拉长到会话超时（真机：
+ * `session/model-unavailable: The operation was aborted due to timeout`）。
+ * 成功拉取的最新目录落在这里；新实例冷启动时同凭据同端点且未过期即认领，
+ * 重建零网络、零窗口。只作种子：TTL/失败退避判定仍在实例内照常走。
+ */
+let catalogSeed: { credential: string; apiBase: string; fetchedAt: number; entries: CatalogEntry[] } | undefined;
+
 /** SenseNova（OpenAI 兼容）适配器。 */
 export class SensenovaAdapter extends LlmAdapter {
   private readonly deps: SensenovaAdapterDeps;
@@ -1005,6 +1015,15 @@ export class SensenovaAdapter extends LlmAdapter {
     const now = Date.now();
     const credentialChanged = this.catalogCredential !== undefined && this.catalogCredential !== apiKey;
     const apiBaseChanged = this.catalogApiBase !== undefined && this.catalogApiBase !== connection.apiBase;
+    // 冷启动播种：新实例（catalogFetchedAt === 0）认领模块级种子的条件 = 同凭据、
+    // 同端点。认领后 TTL 判定照常——种子过期照样实发，不会无限续命。
+    if (this.catalogFetchedAt === 0 && catalogSeed !== undefined
+      && catalogSeed.credential === apiKey && catalogSeed.apiBase === connection.apiBase) {
+      this.catalog = catalogSeed.entries;
+      this.catalogCredential = catalogSeed.credential;
+      this.catalogApiBase = catalogSeed.apiBase;
+      this.catalogFetchedAt = catalogSeed.fetchedAt;
+    }
     // 缓存命中：同 key、同 base、未过期。
     if (
       !credentialChanged && !apiBaseChanged
@@ -1063,6 +1082,8 @@ export class SensenovaAdapter extends LlmAdapter {
     this.catalogApiBase = connection.apiBase;
     this.catalogFetchedAt = Date.now();
     this.catalog = models;
+    // 成功快照落到模块级种子：下一次重注册的新实例从这里冷启动（零网络）。
+    catalogSeed = { credential: apiKey, apiBase: connection.apiBase, fetchedAt: this.catalogFetchedAt, entries: models };
     return models;
   }
 

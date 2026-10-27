@@ -500,18 +500,18 @@ const healthy = {
 }
 
 // === F5b. the composer pill's provider ids are the Host's own ==============
-// The pill sorts models into two buckets by the provider id (Token Plan vs.
+// The pill sorts models into two buckets by the provider id (suite vs.
 // Raccoon) — that attribution is what keeps the two data sources from bleeding
 // into each other. The ids are declared ONCE in the Host's model tables, but
 // the pill carries its own literal; a drift there would silently file every
-// Token Plan model under a foreign readout and no suite would go red. Pin the
+// suite model under a foreign readout and no suite would go red. Pin the
 // copy to the Host's declaration.
 {
   const pill = await readFile(new URL("../src/client/composer-usage-pill.ts", import.meta.url), "utf8");
   const own = (name) => pill.match(new RegExp(`const\\s+${name}\\s*=\\s*"([^"]+)"`))?.[1];
-  check("the composer pill's Token Plan id is the Host's own",
-    own("TOKEN_PLAN") === LLM_PROVIDER_ID,
-    `${own("TOKEN_PLAN") ?? "not found"} vs ${LLM_PROVIDER_ID}`);
+  check("the composer pill's provider id is the Host's own",
+    own("PROVIDER_ID") === LLM_PROVIDER_ID,
+    `${own("PROVIDER_ID") ?? "not found"} vs ${LLM_PROVIDER_ID}`);
 }
 
 // === F5c. (moved) no token is read through str() — see credential-guard =====

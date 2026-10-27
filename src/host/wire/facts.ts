@@ -173,6 +173,33 @@ export function staticFacts(model: string): ModelFacts | undefined {
   return STATIC_FACTS.get(model);
 }
 
+/** 面板思考梯子（与 client 的 THINKING_CHOICES 同一五档；facts 不 import client）。 */
+const PANEL_LADDER: readonly string[] = ["off", "low", "medium", "high", "max"];
+
+/**
+ * 模型的面板思考档位首装默认集（2026-10-27 用户拍板）：按官方文档的**原生
+ * 档位**（静态表 efforts 就是文档口径）∩ 面板五档——`none` 与面板 `off` 同义
+ * 归一；xhigh/minimal 等面板表达不了的拼写不管（梯子本就没有，0.1.4 移除）。
+ * 未收录模型返回 []（文档没覆盖的模型不给臆造默认）。
+ */
+export function defaultThinkingLevels(modelId: string): string[] {
+  const facts = STATIC_FACTS.get(modelId);
+  if (facts === undefined) return [];
+  const out = new Set<string>();
+  for (const level of facts.efforts) {
+    const panel = level === "none" ? "off" : level;
+    if (PANEL_LADDER.includes(panel)) out.add(panel);
+  }
+  return PANEL_LADDER.filter((level) => out.has(level));
+}
+
+/** 全部已知模型的默认集（pool-store readThinking 播种用；id → 档位升序）。 */
+export function nativeThinkingDefaults(): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const id of STATIC_FACTS.keys()) out[id] = defaultThinkingLevels(id);
+  return out;
+}
+
 /** 目录实测值 > 静态档案：context/max_output/input_modalities/supported_sampling_parameters
  * 覆盖静态对应项，缺失回退静态；未知目录字段宽容忽略；未收录模型返回通用兜底（不抛错）。 */
 export function factsFor(model: string, entry: FactsCatalogEntry | undefined): ModelFacts {

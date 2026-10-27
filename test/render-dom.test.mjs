@@ -515,7 +515,7 @@ function typeInto(input, value) {
   // host's materialized one does: only then does a conditional early-return that
   // skips the poller's hooks actually violate the Rules of Hooks. A plain
   // function would let the old shape limp through this section.
-  const selection = { next: { provider: "sensenova-token-plan", model: "deepseek-v4-flash" } };
+  const selection = { next: { provider: "sensenova-suite", model: "deepseek-v4-flash" } };
   const useProjection = () => {
     React.useState(selection);
     return selection;
@@ -568,7 +568,7 @@ function typeInto(input, value) {
     `error=${foreignSwitchError?.message ?? "none"} button=${button() !== null} fetches=${pillFetches} (stable while foreign: ${pillFetches === fetchesWhileForeign})`);
 
   // Switching BACK — the exact step the old hook mismatch made unrecoverable.
-  selection.next = { provider: "sensenova-token-plan", model: "deepseek-v4-flash" };
+  selection.next = { provider: "sensenova-suite", model: "deepseek-v4-flash" };
   let switchBackError = null;
   try {
     pill.rerender(React.createElement(panel.components.ComposerUsagePill, { tt, useProjection }));
@@ -587,10 +587,57 @@ function typeInto(input, value) {
   // frames (the reported switch: the selected model was still a Token Plan
   // one when the pill vanished).
   selection.next = {};
-  selection.lastUsed = { provider: "sensenova-token-plan", model: "sensenova-6.8-flash-lite" };
+  selection.lastUsed = { provider: "sensenova-suite", model: "sensenova-6.8-flash-lite" };
 
   // 卸载胶囊：其轮询 interval 不清，进程会被活句柄吊住（run-all 卡死的根因）。
   pill.unmount();
+}
+
+// ── §N. key 行备注编辑器（2026-10-27 报障「备注无法保存」）─────────────────
+// 真实产物 + 真实 React 完整驱动备注流，抓真实 POST 载荷：
+//   路径 A：点「备注」→ 输入 → 失焦提交（用户怀疑的失效路径）；
+//   路径 B：点「备注」→ 输入 → 点「保存」（mousedown 先触发 blur 的真实次序）。
+{
+  const postCalls = [];
+  win.fetch = (path, init) => {
+    postCalls.push({ path: String(path), body: init?.body ? JSON.parse(String(init.body)) : null });
+    return Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+  };
+  const pool = {
+    keys: [{ id: "key-2", label: "sk-cM······A9S", note: null, phase: "running", disabled: false, deleted: false }]
+  };
+  const m = mount(React.createElement(panel.components.ApiKeyForm, { pool, onDone: () => {}, tt, bare: true }));
+
+  const noteAffordance = () => [...m.host.querySelectorAll("span")].find((el) => el.textContent === "poolMng.note");
+  const noteInput = () => [...m.host.querySelectorAll("input")].find((el) => el.placeholder === "poolMng.note");
+  const saveButton = () => [...m.host.querySelectorAll("button")].find((el) => el.textContent === "poolMng.saveName");
+  console.error(`[note-debug] host len=${m.host.innerHTML.length} noteSpan=${noteAffordance() !== undefined} body=${m.host.innerHTML.slice(0, 200)}`);
+
+  check("note: 未编辑显示「备注」占位", noteAffordance() !== undefined);
+
+  // 路径 A：失焦提交。
+  act(() => noteAffordance().dispatchEvent(new win.MouseEvent("click", { bubbles: true })));
+  check("note: 点击后内联输入框出现", noteInput() !== undefined && noteInput() !== null);
+  typeInto(noteInput(), "hello");
+  // React 的 onBlur 挂在 focusout（冒泡）上——派发非冒泡 blur 不会触发它。
+  act(() => noteInput().dispatchEvent(new win.FocusEvent("focusout", { bubbles: true })));
+  const renameA = postCalls.find((c) => c.body?.action === "rename");
+  check("note: 失焦提交发出 rename 且携带输入内容",
+    renameA !== undefined && renameA.body.name === "hello" && renameA.body.id === "key-2",
+    JSON.stringify(postCalls.map((c) => c.body)));
+
+  // 路径 B：保存按钮（mousedown 先触发 blur 的真实次序——用户假设的失效点）。
+  await act(async () => { await Promise.resolve(); });
+  act(() => noteAffordance().dispatchEvent(new win.MouseEvent("click", { bubbles: true })));
+  typeInto(noteInput(), "second");
+  act(() => saveButton().dispatchEvent(new win.MouseEvent("mousedown", { bubbles: true })));
+  const btnAfterBlur = saveButton();
+  act(() => { if (btnAfterBlur) btnAfterBlur.dispatchEvent(new win.MouseEvent("click", { bubbles: true })); });
+  const renameB = [...postCalls].reverse().find((c) => c.body?.action === "rename");
+  check("note: 保存按钮路径提交 name=输入内容（blur 先行也不丢字）",
+    renameB !== undefined && renameB.body.name === "second",
+    JSON.stringify(postCalls.map((c) => c.body)));
+  m.unmount();
 }
 
 finish();

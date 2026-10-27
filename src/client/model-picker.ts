@@ -235,22 +235,34 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   onDone?: () => void;
   tt: Tt;
 }): unknown {
-  const hostProtocols = llm?.modelProtocols ?? {};
+  const rawProtocols = llm?.modelProtocols ?? {};
   const models = Array.isArray(llm?.models) ? llm.models : NO_MODELS;
   const hostIds = Array.isArray(llm?.enabledModelIds) ? llm.enabledModelIds : NO_IDS;
-  // 用户勾选的「可识图」模型（存在 vision.visionModels；图片转述下拉以此为准）。
-  const visionHost = Array.isArray(pool?.settings?.vision?.visionModels)
+  // 用户勾选的「可识图」模型原始快照（存在 vision.visionModels）。
+  const rawVision = Array.isArray(pool?.settings?.vision?.visionModels)
     ? (pool.settings.vision.visionModels as string[])
     : [];
+  const rawThinking = typeof pool?.settings?.thinking === "object" && pool.settings.thinking !== null
+    ? (pool.settings.thinking as Record<string, string[]>)
+    : {};
+  // 保存成功的在途写入覆盖层（2026-10-27）：POST 已确认、快照未回显的窗口里，
+  // 显示与**下一次保存的载荷基座**都必须看到已写入的值——否则连存两次时第二次
+  // 拿旧快照打包，把第一次的写入整段冲掉（thinking 带回旧档位、vision 用旧
+  // 清单，2026-10-27 真机「连调两个模型第二个没保存」）。快照回显一致后摘除；
+  // 30s 兜底强制摘除，防宿主侧后续变更被覆盖层永久遮蔽。
+  const [inflight, setInflight] = useState<{
+    thinking?: { values: Record<string, string[]>; at: number };
+    vision?: { values: string[]; at: number };
+    protocols?: { values: Record<string, string>; at: number };
+  }>({});
+  const hostProtocols = { ...rawProtocols, ...inflight.protocols?.values };
+  const visionHost = inflight.vision?.values ?? rawVision;
+  const thinkingHost = { ...rawThinking, ...inflight.thinking?.values };
   const [ids, setIds] = useState<string[]>(() => hostIds.slice());
   // 思考/看图/协议的「本地显示」永远 = 宿主快照 + 草稿，不设宿主镜像 state：
   // 快照轮询可能晚到（面板先挂载、宿主值后到），镜像 state 锁在 mount 时的旧值
   // 会让面板显示与宿主脱节，勾选后还把宿主已存的配置整段冲掉（2026-10-26 复现）。
   // 每次 render 都从最新 props 现算生效值，天然跟随宿主。
-  // 每模型可用思考档位（pool.json `thinking` 分区；面板勾选初值=宿主值）。
-  const thinkingHost = typeof pool?.settings?.thinking === "object" && pool.settings.thinking !== null
-    ? pool.settings.thinking
-    : {};
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
   // 保存成功一次后的「已保存」回显 key（仅用于展示成功行，不参与 dirty 判据）。
@@ -296,6 +308,31 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   const thinkingDirty = JSON.stringify(effectiveThinking) !== JSON.stringify(thinkingHost);
   const visionDirty = JSON.stringify(effectiveVision.sort()) !== JSON.stringify([...visionHost].sort());
   const anyDirty = dirty || protocolsDirty || thinkingDirty || visionDirty;
+  // 覆盖层摘除：快照追平在途写入（或 30s 兜底）即放手，显示与基座交还快照。
+  const snapKey = JSON.stringify([rawThinking, rawVision, rawProtocols]);
+  useEffect(() => {
+    setInflight((current) => {
+      if (current.thinking === undefined && current.vision === undefined && current.protocols === undefined) return current;
+      const now = Date.now();
+      const next: typeof current = { ...current };
+      const thinkingPart = next.thinking;
+      if (thinkingPart !== undefined) {
+        const sub = Object.fromEntries(Object.entries(rawThinking).filter(([k]) => k in thinkingPart.values));
+        if (JSON.stringify(sub) === JSON.stringify(thinkingPart.values) || now - thinkingPart.at > 30_000) delete next.thinking;
+      }
+      const visionPart = next.vision;
+      if (visionPart !== undefined) {
+        if (JSON.stringify([...rawVision].sort()) === JSON.stringify([...visionPart.values].sort()) || now - visionPart.at > 30_000) delete next.vision;
+      }
+      const protocolsPart = next.protocols;
+      if (protocolsPart !== undefined) {
+        const sub = Object.fromEntries(Object.entries(rawProtocols).filter(([k]) => k in protocolsPart.values));
+        if (JSON.stringify(sub) === JSON.stringify(protocolsPart.values) || now - protocolsPart.at > 30_000) delete next.protocols;
+      }
+      return next;
+    });
+    // eslint-disable 不存在；snapKey 是快照变动的唯一稳定信号（数组每次轮询都是新引用）。
+  }, [snapKey]);
 
   // Follow the Host while the picker is untouched, so a catalogue refresh
   // reaches the list and a save from another client clears the draft.
@@ -343,19 +380,25 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
       if (visionDirty) {
         posts.push(postJsonOrThrow(POOL_PATH, { section: "vision", values: { visionModels: visionNext } })
           .then(() => {
-            // 无本地镜像 state：清掉草稿即可，显示从最新快照现算。
+            // 清草稿 + 记在途写入：显示与下次保存的基座立即看到本次结果，
+            // 不等快照回显（回显一致后覆盖层自动摘除）。
             setDraftVision({});
+            setInflight((current) => ({ ...current, vision: { values: visionNext, at: Date.now() } }));
           }));
       }
       if (thinkingDirty) {
         posts.push(postJsonOrThrow(POOL_PATH, { section: "thinking", values: thinkingNext })
           .then(() => {
             setDraftThinking({});
+            setInflight((current) => ({ ...current, thinking: { values: thinkingNext, at: Date.now() } }));
           }));
       }
       if (protocolsDirty) {
         posts.push(postJsonOrThrow(MODELS_PATH, { modelProtocols: protocolsNext })
-          .then(() => { setDraftProtocols({}); }));
+          .then(() => {
+            setDraftProtocols({});
+            setInflight((current) => ({ ...current, protocols: { values: protocolsNext, at: Date.now() } }));
+          }));
       }
       await Promise.all(posts);
       setJustSaved(true);

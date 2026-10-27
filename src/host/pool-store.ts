@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { obj, degrade } from "./util.ts";
 import { name } from "./host-config.ts";
 import { profileStateDir, readStateJson, createStateReadCache, createVersionedJsonWriter } from "./state-store.ts";
+import { nativeThinkingDefaults } from "./wire/facts.ts";
 import type { StoreOptions } from "./types.ts";
 
 /** 形状版本；不兼容变更时递增。 */
@@ -34,7 +35,6 @@ export interface ImageToolSettings {
   model?: string;
   size?: string;
   outputFormat?: string;
-  responseFormat?: string;
   watermark?: boolean;
   promptExtend?: boolean;
   outputDir?: string;
@@ -43,7 +43,6 @@ export interface ImageToolSettings {
 /** 视觉卡的面板设置。 */
 export interface VisionSettings {
   model?: string;
-  bridgeMode?: string;
   bridgePrompt?: string;
   /** 用户勾选为「可识图」的模型 id 列表（在接入 API tab 思考档位旁勾选）。 */
   visionModels?: string[];
@@ -83,6 +82,8 @@ export interface PoolStoreRecord {
   vision: VisionSettings;
   /** 每模型可用思考档位（用户配置；modelId → 档位列表）。空 = 用平台/静态默认。 */
   thinking: Record<string, string[]>;
+  /** 面板默认 key（apiKeyStore 那把）的备注——它不在 keys 清单里，单独存。 */
+  defaultNote?: string;
 }
 
 /** 空白记录（全部回落配置默认）。 */
@@ -124,10 +125,11 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     const model = strOf(rec.model); if (model !== undefined) out.model = model;
     const size = strOf(rec.size); if (size !== undefined) out.size = size;
     const outputFormat = strOf(rec.outputFormat); if (outputFormat !== undefined) out.outputFormat = outputFormat;
-    const responseFormat = strOf(rec.responseFormat); if (responseFormat !== undefined) out.responseFormat = responseFormat;
     const watermark = boolOf(rec.watermark); if (watermark !== undefined) out.watermark = watermark;
     const promptExtend = boolOf(rec.promptExtend); if (promptExtend !== undefined) out.promptExtend = promptExtend;
-    const outputDir = strOf(rec.outputDir); if (outputDir !== undefined) out.outputDir = outputDir;
+    // outputDir 归一：剥一层成对引号（资源管理器「复制文件地址」自带引号）
+    // 与首尾空白——面板保存时已校验，这里兜底直改状态文件的写入。
+    const outputDir = strOf(rec.outputDir); if (outputDir !== undefined) out.outputDir = outputDir.trim().replace(/^"(.*)"$/, "$1").trim();
     return out;
   };
   const readVision = (value: unknown): VisionSettings => {
@@ -138,8 +140,6 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
     const rec = value as Record<string, unknown>;
     const model = strOf(rec.model); if (model !== undefined) out.model = model;
-    const bridgeMode = strOf(rec.bridgeMode);
-    if (bridgeMode === "off" || bridgeMode === "on" || bridgeMode === "auto") out.bridgeMode = bridgeMode;
     const bridgePrompt = strOf(rec.bridgePrompt); if (bridgePrompt !== undefined) out.bridgePrompt = bridgePrompt;
     if (Array.isArray(rec.visionModels)) {
       out.visionModels = rec.visionModels.filter((id): id is string => typeof id === "string" && id !== "");
@@ -179,19 +179,27 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     text2img: readImage(source.text2img),
     img2img: readImage(source.img2img),
     vision: readVision(source.vision),
-    thinking: readThinking(source.thinking)
+    thinking: readThinking(source.thinking),
+    ...(typeof source.defaultNote === "string" ? { defaultNote: source.defaultNote.trim() } : {})
   };
 }
 
-/** 读取每模型可用思考档位（modelId → string[]；仅保留已知档位）。 */
+/** 读取每模型可用思考档位（modelId → string[]；仅保留已知档位）。
+ * 首装播种（2026-10-27 用户拍板）：文件里没有条目的已知模型按文档原生档位
+ * 给默认集（wire/facts.nativeThinkingDefaults）——与 readVision 的默认集同一
+ * 纪律：缺省 = 按默认；显式保存的空数组（全不勾）尊重用户，因此空条目保留。 */
 function readThinking(value: unknown): Record<string, string[]> {
   const out: Record<string, string[]> = {};
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
-  const ALLOWED = ["off", "low", "medium", "high", "xhigh", "max"] as const;
-  for (const [modelId, levels] of Object.entries(value as Record<string, unknown>)) {
-    if (modelId === "" || !Array.isArray(levels)) continue;
-    const clean = levels.filter((l): l is string => typeof l === "string" && (ALLOWED as readonly string[]).includes(l));
-    if (clean.length > 0) out[modelId] = clean;
+  const present = typeof value === "object" && value !== null && !Array.isArray(value);
+  if (present) {
+    const ALLOWED = ["off", "low", "medium", "high", "xhigh", "max"] as const;
+    for (const [modelId, levels] of Object.entries(value as Record<string, unknown>)) {
+      if (modelId === "" || !Array.isArray(levels)) continue;
+      out[modelId] = levels.filter((l): l is string => typeof l === "string" && (ALLOWED as readonly string[]).includes(l));
+    }
+  }
+  for (const [modelId, defaults] of Object.entries(nativeThinkingDefaults())) {
+    if (!(modelId in out)) out[modelId] = defaults;
   }
   return out;
 }
@@ -275,6 +283,11 @@ export function createFilePoolStore(options: StoreOptions = {}) {
      * values 为该分区的部分键（合并进已存值）。值已在 parse 时白名单过滤，
      * 这里只做键合并。
      */
+    /** 面板默认 key 的备注写入（default 不在 keys 清单，单独存）。 */
+    async setDefaultNote(note: string): Promise<void> {
+      const record = await seen();
+      await apply({ ...record, defaultNote: note });
+    },
     /** 面板 key 清单写入（add/rename/remove 的落盘半边）。 */
     async setKeys(keys: PoolKeyEntry[]): Promise<void> {
       const record = await seen();

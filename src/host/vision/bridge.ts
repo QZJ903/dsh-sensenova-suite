@@ -22,7 +22,6 @@ import type { ImageAttachmentRef } from "./image-input.ts";
 import type { VisionFeedback, VisionOptions } from "./run.ts";
 
 /** bridge 三种模式。 */
-export type BridgeMode = "off" | "on" | "auto";
 
 /** 宽松宿主上下文（可测；真实 cordis Context 结构兼容）。 */
 export interface BridgeCtx {
@@ -31,7 +30,7 @@ export interface BridgeCtx {
 
 /** 请求边界换图依赖：每次调用取最新配置；视觉调用的结局按套件教义回池。 */
 export interface ImageSwapperDeps {
-  options: () => VisionOptions & { bridgeMode: BridgeMode; bridgePrompt: string };
+  options: () => VisionOptions & { bridgePrompt: string; /** 「启用转述」开关现值：false 时未勾选模型不转述，原图原样出站。 */ relayOn: boolean };
   /** 可看图勾选集（pool.json vision.visionModels，缺省 = deepseek-flash /
    *  kimi-k3 / sensenova-6.8-flash-lite）。判定源：勾选 = 原生看图，不转述。 */
   checkedIds: () => readonly string[];
@@ -231,7 +230,6 @@ const observationCache = new Map<string, string>();
 /**
  * 请求边界的图片换图器（适配器出站前调用）。判定源 = 「可看图」勾选
  * （checkedIds）：勾选的模型原生看图（图片原样进请求），未勾选的走转述。
- * bridgeMode "off" 不换；"on" 强制换（连勾选的也转述）；"auto" 按勾选判定。
  * 观察按附件 ref id 缓存——同一张图跨轮次只转述一次。返回新数组；入参消息
  * 与 session 投影不被触碰——用户侧界面保持原图原文。
  */
@@ -241,17 +239,20 @@ export function createImageSwapper(deps: ImageSwapperDeps) {
     context: { model: string },
   ): Promise<T[]> {
     const options = deps.options();
-    if (options.bridgeMode === "off") return [...messages];
     const typed = messages as unknown as MessageLike[];
     const stats = countImageBlocks(typed);
     if (stats.total === 0) return [...messages];
     const checked = deps.checkedIds().includes(context.model);
     // 诊断行（仅带图请求输出）：判定源与走向一屏可见。
     traceLog(
-      `[dsh-sensenova-suite] 图片桥: model=${context.model} 可看图勾选=${checked} bridgeMode=${options.bridgeMode} ` +
+      `[dsh-sensenova-suite] 图片桥: model=${context.model} 可看图勾选=${checked} ` +
         `图片块=${stats.total}（带附件引用=${stats.withRef}，offloaded=${stats.offloaded}）→ ${checked ? "原生发图" : "转述"}`,
     );
-    if (options.bridgeMode === "auto" && checked) return [...messages];
+    // 恒为自动（2026-10-27 用户拍板，读图桥设置已删）：勾选 = 原生直传。
+    if (checked) return [...messages];
+    // 「启用转述」关 = 转述链路整体下线（工具不注册 + 请求边界不转述），
+    // 未勾选模型的图原样出站——文本模型收图是否 400 由调用方自担。
+    if (options.relayOn === false) return [...messages];
     let imageIndex = 0;
     const rewritten = await rewriteBridgeMessages(typed, async (ref) => {
       imageIndex += 1;
