@@ -20,16 +20,22 @@ import { ToggleSwitch } from "./toggle-switch.ts";
  * card was information flying across card boundaries, repeating what the
  * provider card's own switch and status already say.
  *
+ * The nudge tracks "no key ANYWHERE" (2026-10-29 真机：sk- 框的保存进的是
+ * pool，不写面板主 key——按 hasApiKey 单判会让配置了池 key 的卡片永远
+ * 催贴 key，而它指点的动作恰恰不治它自己). `poolConfigured` 是 ApiKeyForm
+ * 算好的「池里有没有 key」；缺省（旧调用方/测试）保持旧行为。
+ *
  * Hook-free on purpose: like the pool cards, it is exercised by the Node
  * render suite, so a reworded or dropped status line fails a check. It
  * renders ONLY from the snapshot's `llm` block, which never carries the
  * key itself — booleans only.
  */
-export function ProviderStatus({ llm, tt }: { llm?: LlmData | null; tt: Tt }): unknown {
+export function ProviderStatus({ llm, tt, poolConfigured }: { llm?: LlmData | null; tt: Tt; poolConfigured?: boolean }): unknown {
   if (!llm || typeof llm !== "object") return null;
   const rows: unknown[] = [];
-  // A stored key is SILENT (2026-10-27): only a MISSING key asks for one.
-  if (llm.hasApiKey !== true) {
+  // A stored key is SILENT (2026-10-27): only a MISSING key asks for one —
+  // and "missing" means nowhere: neither the panel key nor the pool.
+  if (llm.hasApiKey !== true && poolConfigured !== true) {
     rows.push(h("div", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" }, role: "status" }, tt("llm.noKey")));
   }
   if (llm.ephemeral === true) {

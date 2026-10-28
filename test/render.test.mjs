@@ -278,6 +278,16 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
   check("no key asks for one", off.some((line) => line.includes(zh["llm.noKey"])), off.join("\n"));
   check("the key card does NOT speak for the provider card",
     !off.some((line) => line.includes("未向 DSH 注册")), off.join("\n"));
+  // 2026-10-29 真机（sk- 框保存进池、不写面板主 key）：池里有 key 的卡片是
+  // 「已配置」，催贴 key 的提示必须静默——否则它催的动作治不了它自己。
+  // 不传 poolConfigured（旧调用方/旧行为）仍催，上一条钉住的就是它。
+  const poolConfigured = rendered(render.ProviderStatus, {
+    llm: { hasApiKey: false, keySource: null, ephemeral: false, registerProvider: false,
+      llmAvailable: false, providerRegistered: false, providerId: "sensenova-suite" },
+    tt: ttZh,
+    poolConfigured: true
+  });
+  check("pool keys silence the no-key nudge", poolConfigured.length === 0, poolConfigured.join("\n"));
 
   const regOff = rendered(render.ProviderRegStatus, {
     llm: { hasApiKey: false, keySource: null, ephemeral: false, registerProvider: false,

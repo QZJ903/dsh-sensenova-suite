@@ -1047,6 +1047,12 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				...BUTTON,
 				height: 32
 			},
+			rosterBulkDanger: {
+				...BUTTON,
+				height: 32,
+				color: "var(--dsw-alias-state-error-primary)",
+				borderColor: "var(--dsw-alias-state-error-primary)"
+			},
 			modelList: {
 				display: "flex",
 				flexDirection: "column",
@@ -1535,15 +1541,20 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* card was information flying across card boundaries, repeating what the
 	* provider card's own switch and status already say.
 	*
+	* The nudge tracks "no key ANYWHERE" (2026-10-29 真机：sk- 框的保存进的是
+	* pool，不写面板主 key——按 hasApiKey 单判会让配置了池 key 的卡片永远
+	* 催贴 key，而它指点的动作恰恰不治它自己). `poolConfigured` 是 ApiKeyForm
+	* 算好的「池里有没有 key」；缺省（旧调用方/测试）保持旧行为。
+	*
 	* Hook-free on purpose: like the pool cards, it is exercised by the Node
 	* render suite, so a reworded or dropped status line fails a check. It
 	* renders ONLY from the snapshot's `llm` block, which never carries the
 	* key itself — booleans only.
 	*/
-	function ProviderStatus({ llm, tt }) {
+	function ProviderStatus({ llm, tt, poolConfigured }) {
 		if (!llm || typeof llm !== "object") return null;
 		const rows = [];
-		if (llm.hasApiKey !== true) rows.push(h("div", {
+		if (llm.hasApiKey !== true && poolConfigured !== true) rows.push(h("div", {
 			style: {
 				fontSize: 12,
 				color: "var(--dsw-alias-label-secondary)"
@@ -2209,6 +2220,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		const postApiKey = useCallback((payload) => postJson(API_KEY_PATH, payload), []);
 		const submit = useCallback(async (event) => {
 			event?.preventDefault?.();
+			setSaved(false);
+			setForgotten(false);
 			if (!/^sk-[A-Za-z0-9]/.test(apiKey.trim())) {
 				setFormError(tt("llm.empty"));
 				return;
@@ -2263,6 +2276,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			tt
 		]);
 		const canForget = llm?.hasApiKey === true && llm?.keySource === "credentials";
+		const poolConfigured = Array.isArray(pool?.keys) && pool.keys.length > 0;
 		const keyEditor = h("div", null, h("label", { style: S.field }, h("span", { style: S.fieldLabel }, tt("llm.keyField")), h("div", { style: {
 			display: "flex",
 			gap: 6,
@@ -2320,7 +2334,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		}, tt("llm.saved")) : null, formError ? h("p", {
 			style: S.formError,
 			role: "alert"
-		}, formError) : null, h("p", { style: S.formNote }, tt("llm.footnote")), llm?.hasApiKey === true ? null : h("a", {
+		}, formError) : null, h("p", { style: S.formNote }, tt("llm.footnote")), llm?.hasApiKey === true || poolConfigured ? null : h("a", {
 			href: SENSENOVA_SIGNUP_URL,
 			target: "_blank",
 			rel: "noreferrer",
@@ -2328,7 +2342,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		}, tt("llm.keyRegisterHint")));
 		return h("form", { onSubmit: submit }, keyEditor, h(ProviderStatus, {
 			llm,
-			tt
+			tt,
+			poolConfigured
 		}), h(PoolManager, {
 			pool: pool ?? null,
 			onDone,
@@ -2429,6 +2444,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			blocked: tt("poolMng.phaseBlocked"),
 			absent: tt("poolMng.phaseAbsent")
 		};
+		const phaseColor = {
+			running: "var(--dsw-alias-state-success-primary)",
+			absent: "var(--dsw-alias-state-error-primary)"
+		};
 		return h("div", { style: { marginTop: 10 } }, h("div", { style: {
 			display: "flex",
 			gap: 8,
@@ -2460,110 +2479,122 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		} }, tt("poolMng.empty")) : h("ul", {
 			style: S.modelList,
 			role: "list"
-		}, keys.map((entry) => h("li", {
-			key: entry.id,
-			style: {
-				...S.modelRow,
-				...entry.disabled || entry.deleted ? S.modelRowOff : {}
-			}
-		}, h("div", { style: {
-			display: "flex",
-			gap: 8,
-			alignItems: "center",
-			flexWrap: "nowrap"
-		} }, h("span", {
-			style: {
-				...S.modelName,
-				flex: "none"
-			},
-			title: entry.id
-		}, entry.label ?? entry.id), editingId === entry.id ? h("input", {
-			style: {
-				...S.input,
-				flex: "1 1 140px",
-				minWidth: 140,
-				height: 26,
-				fontSize: 12,
-				padding: "0 6px",
-				boxSizing: "border-box"
-			},
-			value: noteDraft,
-			autoFocus: true,
-			placeholder: tt("poolMng.note"),
-			disabled: busyId !== null,
-			onChange: (event) => setNoteDraft(event.target.value),
-			onBlur: () => {
-				setEditingId(null);
-				setNoteDraft("");
-			},
-			onKeyDown: (event) => {
-				if (event.key === "Enter") {
-					event.preventDefault?.();
-					setNote(entry.id, noteDraft);
+		}, keys.map((entry) => {
+			const rowDim = entry.deleted ? S.modelRowOff : {};
+			const textDim = entry.disabled && !entry.deleted ? S.modelRowOff : {};
+			return h("li", {
+				key: entry.id,
+				style: {
+					...S.modelRow,
+					...rowDim
 				}
-			}
-		}) : h("span", {
-			style: {
-				...S.muted,
-				fontSize: 12,
-				cursor: "pointer",
-				flex: "0 1 auto",
-				overflow: "hidden",
-				textOverflow: "ellipsis",
-				whiteSpace: "nowrap"
-			},
-			title: entry.note !== null && entry.note !== "" ? entry.note : tt("poolMng.note"),
-			onClick: () => {
-				setEditingId(entry.id);
-				setNoteDraft(entry.note ?? "");
-			}
-		}, entry.note !== null && entry.note !== "" ? entry.note : tt("poolMng.note")), editingId === entry.id ? h("button", {
-			type: "button",
-			style: S.rosterBulk,
-			disabled: busyId !== null,
-			onMouseDown: (event) => event.preventDefault?.(),
-			onClick: () => void setNote(entry.id, noteDraft)
-		}, tt("poolMng.saveName")) : null, h("span", { style: {
-			...S.modelBadge,
-			marginLeft: "auto"
-		} }, entry.deleted ? tt("poolMng.deleted") : phaseLabel[entry.phase] ?? entry.phase), entry.deleted ? h("button", {
-			type: "button",
-			style: S.rosterBulk,
-			disabled: busyId !== null,
-			onClick: () => void act({
-				action: "restore",
-				id: entry.id
-			}, entry.id)
-		}, tt("poolMng.restore")) : h("span", { style: {
-			display: "flex",
-			gap: 4
-		} }, entry.disabled ? h("button", {
-			type: "button",
-			style: S.rosterBulk,
-			disabled: busyId !== null,
-			onClick: () => void act({
-				action: "restore",
-				id: entry.id
-			}, entry.id)
-		}, tt("poolMng.restore")) : h("button", {
-			type: "button",
-			style: S.rosterBulk,
-			disabled: busyId !== null,
-			onClick: () => void act({
-				action: "disable",
-				id: entry.id
-			}, entry.id)
-		}, tt("poolMng.disable")), h("button", {
-			type: "button",
-			style: S.rosterBulk,
-			disabled: busyId !== null,
-			onClick: () => {
-				if (globalThis.confirm(tt("poolMng.deleteConfirm"))) act({
-					action: "delete",
+			}, h("div", { style: {
+				display: "flex",
+				gap: 8,
+				alignItems: "center",
+				flexWrap: "nowrap"
+			} }, h("span", {
+				style: {
+					...S.modelName,
+					flex: "none",
+					...textDim
+				},
+				title: entry.id
+			}, entry.label ?? entry.id), editingId === entry.id ? h("input", {
+				style: {
+					...S.input,
+					flex: "1 1 140px",
+					minWidth: 140,
+					height: 26,
+					fontSize: 12,
+					padding: "0 6px",
+					boxSizing: "border-box",
+					...textDim
+				},
+				value: noteDraft,
+				autoFocus: true,
+				placeholder: tt("poolMng.note"),
+				disabled: busyId !== null,
+				onChange: (event) => setNoteDraft(event.target.value),
+				onBlur: () => {
+					setEditingId(null);
+					setNoteDraft("");
+				},
+				onKeyDown: (event) => {
+					if (event.key === "Enter") {
+						event.preventDefault?.();
+						setNote(entry.id, noteDraft);
+					}
+				}
+			}) : h("span", {
+				style: {
+					...S.muted,
+					fontSize: 12,
+					cursor: "pointer",
+					flex: "0 1 auto",
+					overflow: "hidden",
+					textOverflow: "ellipsis",
+					whiteSpace: "nowrap",
+					...textDim
+				},
+				title: entry.note !== null && entry.note !== "" ? entry.note : tt("poolMng.note"),
+				onClick: () => {
+					setEditingId(entry.id);
+					setNoteDraft(entry.note ?? "");
+				}
+			}, entry.note !== null && entry.note !== "" ? entry.note : tt("poolMng.note")), editingId === entry.id ? h("button", {
+				type: "button",
+				style: {
+					...S.rosterBulk,
+					...textDim
+				},
+				disabled: busyId !== null,
+				onMouseDown: (event) => event.preventDefault?.(),
+				onClick: () => void setNote(entry.id, noteDraft)
+			}, tt("poolMng.saveName")) : null, h("span", { style: {
+				...S.modelBadge,
+				marginLeft: "auto",
+				...textDim,
+				...!entry.deleted && phaseColor[entry.phase] !== void 0 ? { color: phaseColor[entry.phase] } : {}
+			} }, entry.deleted ? tt("poolMng.deleted") : phaseLabel[entry.phase] ?? entry.phase), entry.deleted ? h("button", {
+				type: "button",
+				style: S.rosterBulk,
+				disabled: busyId !== null,
+				onClick: () => void act({
+					action: "restore",
 					id: entry.id
-				}, entry.id);
-			}
-		}, tt("poolMng.delete"))))))), error !== null ? h("p", {
+				}, entry.id)
+			}, tt("poolMng.restore")) : h("span", { style: {
+				display: "flex",
+				gap: 4
+			} }, entry.disabled ? h("button", {
+				type: "button",
+				style: S.rosterBulk,
+				disabled: busyId !== null,
+				onClick: () => void act({
+					action: "restore",
+					id: entry.id
+				}, entry.id)
+			}, tt("poolMng.restore")) : h("button", {
+				type: "button",
+				style: S.rosterBulk,
+				disabled: busyId !== null,
+				onClick: () => void act({
+					action: "disable",
+					id: entry.id
+				}, entry.id)
+			}, tt("poolMng.disable")), h("button", {
+				type: "button",
+				style: S.rosterBulkDanger,
+				disabled: busyId !== null,
+				onClick: () => {
+					if (globalThis.confirm(tt("poolMng.deleteConfirm"))) act({
+						action: "delete",
+						id: entry.id
+					}, entry.id);
+				}
+			}, tt("poolMng.delete")))));
+		})), error !== null ? h("p", {
 			style: S.formError,
 			role: "alert"
 		}, error) : null);
@@ -4027,7 +4058,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-10-29T01:54";
+		const CLIENT_BUILD = "2026-10-29T03:25";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			console.info(`[dsh-sensenova-suite] client build ${CLIENT_BUILD}`);

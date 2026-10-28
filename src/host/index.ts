@@ -521,6 +521,10 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
         const value = (await apiKeyStore.resolve().catch(() => ({ value: "" }))).value;
         return typeof value === "string" && value !== "";
       },
+      // add 查重的解析半边：resolvePoolKeys 本身按值去重、先到先得，
+      // 其首个持有者与池/面板的生效条目一致，正好是查重的判据。
+      findKeyHolder: async (value: string) =>
+        (await resolvePoolKeys()).find((entry) => entry.key === value)?.id ?? null,
       /** 面板改凭据后重解析池（加 key / 面板 key 保存与清除后调用，免重启入池）。 */
       refreshKeys: () => orchestrator.refreshKeys(),
       refresh: refreshPoolRecord

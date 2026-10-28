@@ -11,6 +11,7 @@
  */
 import { name } from "../host-config.ts";
 import { writeJson, refuseMethod, readJsonBodyOr400, withOrigin, redactedError } from "./http.ts";
+import { maskKey } from "../util.ts";
 import { traceLog } from "../trace-log.ts";
 import type { Wiring } from "../types.ts";
 
@@ -48,6 +49,8 @@ export interface PoolAdmin {
   effectiveConcurrency: () => Promise<number>;
   /** 面板默认 key 是否存在（编号占位 1）。 */
   hasPanelKey: () => Promise<boolean>;
+  /** 已持有这把 key 值的条目 id（面板 key 记为 default；无人持有 = null）。add 查重用。 */
+  findKeyHolder: (value: string) => Promise<string | null>;
   /** 状态文件刷新（写后让 params 的本地记录跟上）。 */
   refresh: () => Promise<void>;
   /** 面板改凭据后重解析池（加 key 后让新 key 立即入池，免重启）。 */
@@ -134,6 +137,21 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
         }
         // 添加面板 key：秘钥入凭据服务，清单追加（name = 备注，可为空）。
         if (body.value.action === "add" && typeof body.value.apiKey === "string" && body.value.apiKey.trim() !== "") {
+          const apiKey = body.value.apiKey.trim();
+          // 同值查重（2026-10-29「删一次后又冒出未入池行」定案）：池与面板都按值
+          // 去重、先到先得，同值新条目会成为看不见、不轮转的僵尸——删掉正身才
+          // 浮出来（相位恒「未入池」）。入池前直接拒；文案报脱敏名（与面板行首
+          // 显示的 maskKey 文字一致，扫一眼就能对上行），不报行上没有的 id。
+          const holder = await poolAdmin.findKeyHolder(apiKey);
+          if (holder !== null) {
+            writeJson(response, 200, {
+              ok: false,
+              error: holder === "default"
+                ? `这把 key 已是面板主 key（${maskKey(apiKey)}）`
+                : `这把 key 已在池里（${maskKey(apiKey)}）`
+            }, { "cache-control": "no-store" });
+            return;
+          }
           const record = await poolAdmin.store.read();
           // 编号把面板默认 key 计为 1（有 default 时从 2 起）。
           const usedNumbers = record.keys
@@ -144,7 +162,7 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
           const id = `key-${next}`;
           // name 字段现在是「备注」（面板填的）；缺省/空白 = 无备注。
           const note = typeof body.value.name === "string" ? body.value.name.trim() : "";
-          await poolAdmin.addKeySecret(id, body.value.apiKey.trim());
+          await poolAdmin.addKeySecret(id, apiKey);
           // 新 key 默认启用：restore 把复用的 id 从停用/删除名单一并摘掉
           // （编号复用会让曾删除的 key-<n> 新增后默认显示「已删除」——2026-10-25）。
           await poolAdmin.store.setKeys([...record.keys, { id, name: note }]);
@@ -201,6 +219,13 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
         await poolAdmin.apply(action, id);
         if (action === "delete" && id === "default") await poolAdmin.forgetPanelKey();
         await poolAdmin.refresh();
+        // 删除后同步重解析池（与 add 同一条纪律）：不重解析则被删 id 滞留
+        // idToKey，statusById（快照相位的来源）继续按旧映射报它的相位。
+        // 失败不推翻本次删除，日志留痕，下一次改动会再试。
+        if (action === "delete") {
+          await poolAdmin.refreshKeys()
+            .catch((error: unknown) => logger?.warn?.(`${name}: pool reseed failed after key delete`, error));
+        }
         writeJson(response, 200, { ok: true }, { "cache-control": "no-store" });
       } catch (error) {
         writeJson(response, 200, { ok: false, error: redactedError(error) }, { "cache-control": "no-store" });

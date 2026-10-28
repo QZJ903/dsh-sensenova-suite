@@ -36,6 +36,11 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
 
   const submit = useCallback(async (event?: { preventDefault?: () => void }) => {
     event?.preventDefault?.();
+    // 结果横幅与错误红字同屏就是矛盾（2026-10-29 真机：上一次 add 成功的
+    // 绿字「已保存」和本次查重拒绝的红字一起挂着）——提交开始即清上一次
+    // 的结果横幅；本次成功会在下方重新点亮。
+    setSaved(false);
+    setForgotten(false);
     // 前缀校验（2026-10-27 用户要求）：必须 sk- 开头——面板加错 key（整串
     // 粘错/带了空格外的杂质）会进池参与轮转，把限流与失败怪到好 key 头上。
     if (!/^sk-[A-Za-z0-9]/.test(apiKey.trim())) {
@@ -85,6 +90,10 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
   // Only a REFERENCE the panel stored can be forgotten: an environment
   // value has no panel-saved copy to clear, so the button would mislead.
   const canForget = llm?.hasApiKey === true && llm?.keySource === "credentials";
+  // 「配置了 key」看两处（2026-10-29 真机：sk- 框的保存进池、不写面板主 key，
+  // 只盯 hasApiKey 会给配置了池 key 的卡片永远催 key）：面板主 key 在，或池
+  // 里有条目，都算配置——催贴 key 的提示与官网注册链接都以这个为准。
+  const poolConfigured = Array.isArray(pool?.keys) && pool.keys.length > 0;
   // A configured key's editor sits inside the SectionCard's single fold: the
   // status block is what a working setup needs daily, while the paste-a-key
   // form is a maintenance action — one click away, not on screen. The card IS
@@ -143,7 +152,8 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
     // The official-site link only exists for the no-key state (sign-up
     // nudge). With a key configured the management link was noise — the
     // user reaches the portal from the platform console anyway (2026-10-27).
-    llm?.hasApiKey === true
+    // 「配置了」与催 key 提示同判：面板主 key 或池 key 任一在就不催。
+    (llm?.hasApiKey === true || poolConfigured)
       ? null
       : h("a", { href: SENSENOVA_SIGNUP_URL, target: "_blank", rel: "noreferrer", style: S.externalLink },
           tt("llm.keyRegisterHint"))
@@ -155,7 +165,7 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
     "form",
     { onSubmit: submit },
     keyEditor,
-    h(ProviderStatus, { llm, tt }),
+    h(ProviderStatus, { llm, tt, poolConfigured }),
     h(PoolManager, { pool: pool ?? null, onDone, tt })
   );
 }
@@ -260,6 +270,12 @@ export function PoolManager({ pool, onDone, tt }: {
     blocked: tt("poolMng.phaseBlocked"),
     absent: tt("poolMng.phaseAbsent")
   };
+  // 相位着色（2026-10-29 用户指定）：运行=绿、未入池=红——「能不能转/有没有病」
+  // 扫一眼就分；阻塞与已删除他没点名，维持默认灰。只覆盖 color，胶囊底不变。
+  const phaseColor: Record<string, string> = {
+    running: "var(--dsw-alias-state-success-primary)",
+    absent: "var(--dsw-alias-state-error-primary)"
+  };
 
   return h(
     "div",
@@ -287,21 +303,28 @@ export function PoolManager({ pool, onDone, tt }: {
       : h(
           "ul",
           { style: S.modelList, role: "list" },
-          keys.map((entry) => h(
+          keys.map((entry) => {
+            // 灰显分家（2026-10-29 用户指定）：停用行的「恢复」「删除」按钮要
+            // 常驻正常颜色——opacity 压在 li 上是整棵子树合成，子元素救不回来，
+            // 所以停用行改为逐元素压灰（textDim：脱敏名/备注/徽标），按钮不压；
+            // 已删除行他没让它变，维持整行灰（rowDim，含按钮）。
+            const rowDim = entry.deleted ? S.modelRowOff : {};
+            const textDim = entry.disabled && !entry.deleted ? S.modelRowOff : {};
+            return h(
             "li",
-            { key: entry.id, style: { ...S.modelRow, ...(entry.disabled || entry.deleted ? S.modelRowOff : {}) } },
+            { key: entry.id, style: { ...S.modelRow, ...rowDim } },
             h(
               "div",
               { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "nowrap" } },
               // key 脱敏名（无框大字）。
-              h("span", { style: { ...S.modelName, flex: "none" }, title: entry.id },
+              h("span", { style: { ...S.modelName, flex: "none", ...textDim }, title: entry.id },
                 entry.label ?? entry.id),
               // 备注紧跟 key、同一行（2026-10-27 用户拍板：不单独换行、不右对齐）。
               // 未编辑 = 有内容显示内容、空显示「备注」占位（点击进入编辑）；
               // 编辑 = 输入框内联。提交路径只有一条（setNote：失焦/回车/保存同源）。
               editingId === entry.id
                 ? h("input", {
-                    style: { ...S.input, flex: "1 1 140px", minWidth: 140, height: 26, fontSize: 12, padding: "0 6px", boxSizing: "border-box" },
+                    style: { ...S.input, flex: "1 1 140px", minWidth: 140, height: 26, fontSize: 12, padding: "0 6px", boxSizing: "border-box", ...textDim },
                     value: noteDraft,
                     autoFocus: true,
                     placeholder: tt("poolMng.note"),
@@ -325,19 +348,26 @@ export function PoolManager({ pool, onDone, tt }: {
                     }
                   })
                 : h("span", {
-                    style: { ...S.muted, fontSize: 12, cursor: "pointer", flex: "0 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+                    style: { ...S.muted, fontSize: 12, cursor: "pointer", flex: "0 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", ...textDim },
                     title: entry.note !== null && entry.note !== "" ? entry.note : tt("poolMng.note"),
                     onClick: () => { setEditingId(entry.id); setNoteDraft(entry.note ?? ""); }
                   }, entry.note !== null && entry.note !== "" ? entry.note : tt("poolMng.note")),
               editingId === entry.id
                 ? h("button", {
-                    type: "button", style: S.rosterBulk, disabled: busyId !== null,
+                    type: "button", style: { ...S.rosterBulk, ...textDim }, disabled: busyId !== null,
                     // mousedown 阻止默认：输入框不失焦，编辑器不会在点击前被收起。
                     onMouseDown: (event: { preventDefault?: () => void }) => event.preventDefault?.(),
                     onClick: () => void setNote(entry.id, noteDraft)
                   }, tt("poolMng.saveName"))
                 : null,
-              h("span", { style: { ...S.modelBadge, marginLeft: "auto" } },
+              h("span", {
+                style: {
+                  ...S.modelBadge,
+                  marginLeft: "auto",
+                  ...textDim,
+                  ...(!entry.deleted && phaseColor[entry.phase] !== undefined ? { color: phaseColor[entry.phase] } : {})
+                }
+              },
                 entry.deleted ? tt("poolMng.deleted") : phaseLabel[entry.phase] ?? entry.phase),
               entry.deleted
                 ? h("button", {
@@ -357,13 +387,14 @@ export function PoolManager({ pool, onDone, tt }: {
                           onClick: () => void act({ action: "disable", id: entry.id }, entry.id)
                         }, tt("poolMng.disable")),
                     h("button", {
-                      type: "button", style: S.rosterBulk, disabled: busyId !== null,
+                      type: "button", style: S.rosterBulkDanger, disabled: busyId !== null,
                       // 二次确认（2026-10-27 用户拍板）：删除连凭据本体一起清，误触即失。
                       onClick: () => { if (globalThis.confirm(tt("poolMng.deleteConfirm"))) void act({ action: "delete", id: entry.id }, entry.id); }
                     }, tt("poolMng.delete"))
                   )
             )
-          ))
+            );
+          })
         ),
     error !== null ? h("p", { style: S.formError, role: "alert" }, error) : null
   );

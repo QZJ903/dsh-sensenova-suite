@@ -197,6 +197,10 @@ export const S = {
   rosterTools: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 },
   rosterCount: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", fontVariantNumeric: "tabular-nums", marginLeft: "auto" },
   rosterBulk: { ...BUTTON, height: 32 },
+  // 池行「删除」的危险色变体（2026-10-29 用户指定）：红字红边常驻——停用行
+  // 也不压灰（textDim 不上按钮），破坏性操作一眼可辨。只换 color/border，
+  // 底与几何沿用 BUTTON 皮肤。
+  rosterBulkDanger: { ...BUTTON, height: 32, color: "var(--dsw-alias-state-error-primary)", borderColor: "var(--dsw-alias-state-error-primary)" },
   modelList: { display: "flex", flexDirection: "column", margin: 0, padding: 0, listStyle: "none" },
   // Head line over the parameter line: the divider separates rows without a
   // box, the padding keeps the whole row as the visual unit.
