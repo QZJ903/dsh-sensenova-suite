@@ -497,7 +497,6 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
       onThinkingToggle: () => {},
       visionIds: [], onVisionToggle: () => {},
       openThinkingId: "deepseek-v4-flash", onThinkingOpen: () => {},
-      onProtocolChange: () => {}
     });
     const thinkingTexts = texts(thinkingTree).join("\n");
     const levelBoxes = findAll(thinkingTree, (p) => p.type === "checkbox")
@@ -516,8 +515,9 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
         const rightAligned = findAll(thinkingTree, (props) => props.style?.marginLeft === "auto");
         return visionBox.length === 1 && rightAligned.length >= 1;
       })(), texts(thinkingTree).join("\n"));
-    check("the protocol control lives INSIDE the open panel on its own line",
-      findAll(thinkingTree, (props) => typeof props["aria-label"] === "string" && props["aria-label"].includes("协议")).length === 1,
+    // 协议选择已删除（2026-10-27 恒为 auto）：面板内不得再出现协议控件。
+    check("the protocol control is gone from the open panel",
+      findAll(thinkingTree, (props) => typeof props["aria-label"] === "string" && props["aria-label"].includes("协议")).length === 0,
       texts(thinkingTree).join("\n"));
     const unopened = treeOf(render.ModelRoster, {
       models: rich, enabledIds: [], tt: ttZh,

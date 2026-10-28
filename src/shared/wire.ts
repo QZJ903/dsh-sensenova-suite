@@ -132,8 +132,6 @@ export interface LlmData {
   visionCount?: number;
   /** Thinking effort the profile pins as DSH's "Default" (same constant the adapter dispatches). */
   thinkingDefault?: string;
-  /** 每模型协议覆盖（auto=未覆盖；面板"协议"列的数据源）。 */
-  modelProtocols?: Record<string, string>;
   models?: ModelData[];
   /** 全目录行（含出图模型）供多模态下拉自选；`models` 只含对话模型。 */
   allModels?: ModelData[];

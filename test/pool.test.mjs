@@ -211,7 +211,7 @@ try {
 // ── 思考档位首装默认（2026-10-27 用户拍板：按文档原生档位）──────────────────
 try {
   const { parsePoolPayload, POOL_STORE_VERSION } = await import("../src/host/pool-store.ts");
-  const base = { version: POOL_STORE_VERSION, disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {}, keys: [] };
+  const base = { version: POOL_STORE_VERSION, disabledIds: [], deletedIds: [], globalConcurrency: null, keys: [] };
   const fresh = parsePoolPayload(base);
   check("首装播种：已知模型按原生档位给默认集（deepseek-flash 原生无 medium）",
     JSON.stringify(fresh?.thinking["deepseek-flash"]) === JSON.stringify(["off", "low", "high", "max"])

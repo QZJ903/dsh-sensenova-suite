@@ -24,13 +24,15 @@
 export const QUOTA_RATE_RETRY_FLOOR_MS = 15_000;
 
 /**
- * 429001 分级探测退避档位（毫秒）——2026-09-04 定稿：不设长固定下限（60s/180s 均会把
- * 用户干锁在死等里），而是每次宿主重试各自重新探测，等待随连续 429001 次数递增
- * 3s → 5s → 10s → 15s 后封顶（每轮重置、不继承：任一成功即清零）。
+ * 429001 分级探测退避档位（毫秒）——不设长固定下限（60s/180s 均会把用户干锁在
+ * 死等里），而是每次宿主重试各自重新探测，等待随连续 429001 次数递增
+ * 3s → 5s → 10s → 15s → 20s → 25s → 30s 后封顶（每轮重置、不继承：任一成功即清零）。
+ * 2026-09-04 定稿 3–15s 四档；2026-10-27 用户拍板放宽到 3–30s 八档（多会话
+ * 反复耗干 TPM 桶的恢复窗口更长，探测节奏跟着放宽）。
  * 官方文档将 429 统一标注为 quota_exceeded_error 且建议「指数退避重试」，未公开数值；
  * 实测 key A 30k 请求 429001、key B 同刻通过 → per-key 限速差异，短探测 + 换 key 优先。
  */
-export const TPM_PROBE_BACKOFF_STEPS_MS: readonly number[] = [3_000, 5_000, 10_000, 15_000];
+export const TPM_PROBE_BACKOFF_STEPS_MS: readonly number[] = [3_000, 5_000, 10_000, 15_000, 20_000, 25_000, 30_000, 30_000];
 
 /** 池类 429 的响应体特征（Allocated quota exceeded，provider-config docs 实测形态）。 */
 const POOL_EXHAUSTED_MARKERS: readonly string[] = [

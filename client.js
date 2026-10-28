@@ -13,12 +13,13 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 
 //#endregion
 //#region src/client/const.ts
-	var NS, PANEL_ID, SNAPSHOT_PATH, ACCOUNT_PATH, PROVIDER_PATH, MODELS_PATH, POOL_PATH, SENSENOVA_SIGNUP_URL;
+	var NS, PANEL_ID, SNAPSHOT_PATH, ACCOUNT_PATH, API_KEY_PATH, PROVIDER_PATH, MODELS_PATH, POOL_PATH, SENSENOVA_SIGNUP_URL;
 	var init_const = __esmMin((() => {
 		NS = "dsh-sensenova-suite";
 		PANEL_ID = NS;
 		SNAPSHOT_PATH = `/api/${NS}/snapshot`;
 		ACCOUNT_PATH = `/api/${NS}/account`;
+		API_KEY_PATH = `/api/${NS}/api-key`;
 		PROVIDER_PATH = `/api/${NS}/provider`;
 		MODELS_PATH = `/api/${NS}/models`;
 		POOL_PATH = `/api/${NS}/pool`;
@@ -106,6 +107,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.save": "保存 API Key",
 			"llm.saving": "保存中…",
 			"llm.forget": "清除已保存的 API Key",
+			"llm.forgetConfirm": "确定清除已保存的 API Key？清除后需要重新粘贴才能继续使用。",
 			"llm.saved": "API Key 已保存在 DSH 凭据中；下次轮询自动拉取模型目录。",
 			"llm.forgotten": "已清除面板保存的 API Key（环境变量 SENSENOVA_API_KEY 不受影响）。",
 			"llm.empty": "请输入 sk- 开头的 API Key",
@@ -171,8 +173,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"mm.bridgePromptPlaceholder": "留空用内置默认（事实性转录、不猜测）",
 			"mm.catalogEmpty": "（目录暂无此模型）",
 			"mm.hint": "这里的设置是主要设置（存插件状态文件）；cordis.patch.yml 的同名键只在未设置时生效。改动即保存。",
-			"llm.protocol": "协议",
-			"llm.protocolAuto": "自动",
 			"poolMng.concurrent": "并发",
 			"poolMng.note": "备注",
 			"poolMng.saveName": "保存",
@@ -185,7 +185,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"poolMng.deleted": "已删除",
 			"poolMng.disable": "停用",
 			"poolMng.restore": "恢复",
-			"poolMng.delete": "删除"
+			"poolMng.delete": "删除",
+			"poolMng.deleteConfirm": "确定删除这把 key？凭据本体将一并删除，恢复需要重新粘贴。"
 		};
 		en = {
 			"panel.back": "Back to conversation",
@@ -264,6 +265,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.save": "Save API key",
 			"llm.saving": "Saving…",
 			"llm.forget": "Forget the saved API key",
+			"llm.forgetConfirm": "Forget the saved API key? You will need to paste it again to continue.",
 			"llm.saved": "API key stored in the DSH credentials; the next poll fetches the model catalog.",
 			"llm.forgotten": "Panel-saved API key cleared (an SENSENOVA_API_KEY environment value is left untouched).",
 			"llm.empty": "Enter an API key starting with sk-",
@@ -329,8 +331,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"mm.bridgePromptPlaceholder": "empty = built-in default (factual, no guessing)",
 			"mm.catalogEmpty": " (no such model in the catalogue yet)",
 			"mm.hint": "Panel values here are PRIMARY (stored in the plugin state file); cordis.patch.yml defaults apply only to unset keys. Every change saves immediately.",
-			"llm.protocol": "Protocol",
-			"llm.protocolAuto": "auto",
 			"poolMng.concurrent": "Concurrency",
 			"poolMng.note": "note",
 			"poolMng.saveName": "save",
@@ -343,7 +343,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"poolMng.deleted": "deleted",
 			"poolMng.disable": "disable",
 			"poolMng.restore": "restore",
-			"poolMng.delete": "delete"
+			"poolMng.delete": "delete",
+			"poolMng.deleteConfirm": "Delete this key? Its credential is removed too; paste it again to restore."
 		};
 	}));
 
@@ -1802,7 +1803,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* only") earns no badge, and a figure the catalogue does not declare draws no
 	* segment - the list quotes facts, never guesses.
 	*/
-	function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }) {
+	function ModelRoster({ models, enabledIds, busy, tt, onToggle, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }) {
 		const list = Array.isArray(models) ? models : [];
 		const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
 		const THINKING_CHOICES = [
@@ -1918,31 +1919,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 					style: S.modelCheck,
 					"aria-label": `${label} 识图`,
 					onChange: onVisionToggle ? () => onVisionToggle(id, !visionOn) : void 0
-				}), tt("llm.rosterVision")) : null), h("div", { style: {
-					borderTop: "1px solid var(--dsw-alias-border-l1)",
-					margin: "2px 0"
-				} }), onProtocolChange !== void 0 ? h("label", { style: {
-					display: "flex",
-					gap: 8,
-					alignItems: "center",
-					fontSize: 12,
-					cursor: busy ? "default" : "pointer"
-				} }, h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, tt("llm.protocol")), h("select", {
-					style: {
-						...S.input,
-						width: "auto",
-						height: 26,
-						fontSize: 12,
-						padding: "0 6px"
-					},
-					value: String(modelProtocols?.[id] ?? "auto"),
-					disabled: busy === true,
-					"aria-label": `${label} 协议`,
-					onChange: (event) => onProtocolChange(id, event.target.value)
-				}, PROTOCOLS.map((option) => h("option", {
-					key: option,
-					value: option
-				}, option === "auto" ? tt("llm.protocolAuto") : option)))) : null) : null
+				}), tt("llm.rosterVision")) : null)) : null
 			});
 		}));
 	}
@@ -1960,16 +1937,11 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* up identical to the Host's value shows neither button.
 	*/
 	function ModelPicker({ llm, pool, onDone, tt }) {
-		const rawProtocols = llm?.modelProtocols ?? {};
 		const models = Array.isArray(llm?.models) ? llm.models : NO_MODELS;
 		const hostIds = Array.isArray(llm?.enabledModelIds) ? llm.enabledModelIds : NO_IDS;
 		const rawVision = Array.isArray(pool?.settings?.vision?.visionModels) ? pool.settings.vision.visionModels : [];
 		const rawThinking = typeof pool?.settings?.thinking === "object" && pool.settings.thinking !== null ? pool.settings.thinking : {};
 		const [inflight, setInflight] = useState({});
-		const hostProtocols = {
-			...rawProtocols,
-			...inflight.protocols?.values
-		};
 		const visionHost = inflight.vision?.values ?? rawVision;
 		const thinkingHost = {
 			...rawThinking,
@@ -1981,16 +1953,11 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		const [justSaved, setJustSaved] = useState(false);
 		const [notice, setNotice] = useState(null);
 		const [openThinkingId, setOpenThinkingId] = useState(null);
-		const [draftProtocols, setDraftProtocols] = useState({});
 		const [draftThinking, setDraftThinking] = useState({});
 		const [draftVision, setDraftVision] = useState({});
 		const touchedRef = useRef(false);
 		const hostKey = useMemo(() => JSON.stringify(hostIds), [hostIds]);
 		const dirty = useMemo(() => JSON.stringify(ids), [ids]) !== hostKey;
-		const effectiveProtocols = {
-			...hostProtocols,
-			...draftProtocols
-		};
 		const effectiveThinking = {
 			...thinkingHost,
 			...draftThinking
@@ -2001,18 +1968,13 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			else out.delete(id);
 			return [...out];
 		})();
-		const protocolsDirty = JSON.stringify(effectiveProtocols) !== JSON.stringify(hostProtocols);
 		const thinkingDirty = JSON.stringify(effectiveThinking) !== JSON.stringify(thinkingHost);
 		const visionDirty = JSON.stringify(effectiveVision.sort()) !== JSON.stringify([...visionHost].sort());
-		const anyDirty = dirty || protocolsDirty || thinkingDirty || visionDirty;
-		const snapKey = JSON.stringify([
-			rawThinking,
-			rawVision,
-			rawProtocols
-		]);
+		const anyDirty = dirty || thinkingDirty || visionDirty;
+		const snapKey = JSON.stringify([rawThinking, rawVision]);
 		useEffect(() => {
 			setInflight((current) => {
-				if (current.thinking === void 0 && current.vision === void 0 && current.protocols === void 0) return current;
+				if (current.thinking === void 0 && current.vision === void 0) return current;
 				const now = Date.now();
 				const next = { ...current };
 				const thinkingPart = next.thinking;
@@ -2023,11 +1985,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				const visionPart = next.vision;
 				if (visionPart !== void 0) {
 					if (JSON.stringify([...rawVision].sort()) === JSON.stringify([...visionPart.values].sort()) || now - visionPart.at > 3e4) delete next.vision;
-				}
-				const protocolsPart = next.protocols;
-				if (protocolsPart !== void 0) {
-					const sub = Object.fromEntries(Object.entries(rawProtocols).filter(([k]) => k in protocolsPart.values));
-					if (JSON.stringify(sub) === JSON.stringify(protocolsPart.values) || now - protocolsPart.at > 3e4) delete next.protocols;
 				}
 				return next;
 			});
@@ -2048,10 +2005,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 					...thinkingHost,
 					...draftThinking
 				}).filter(([, levels]) => Array.isArray(levels) && levels.length > 0));
-				const protocolsNext = {
-					...hostProtocols,
-					...draftProtocols
-				};
 				const posts = [];
 				if (dirty) posts.push(postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids }).then(() => {
 					touchedRef.current = false;
@@ -2082,16 +2035,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 						}
 					}));
 				}));
-				if (protocolsDirty) posts.push(postJsonOrThrow(MODELS_PATH, { modelProtocols: protocolsNext }).then(() => {
-					setDraftProtocols({});
-					setInflight((current) => ({
-						...current,
-						protocols: {
-							values: protocolsNext,
-							at: Date.now()
-						}
-					}));
-				}));
 				await Promise.all(posts);
 				setJustSaved(true);
 				onDone?.();
@@ -2106,9 +2049,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			dirty,
 			visionDirty,
 			thinkingDirty,
-			protocolsDirty,
 			visionHost,
-			hostProtocols,
 			draftVision,
 			draftThinking,
 			thinkingHost,
@@ -2174,17 +2115,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			tt,
 			openThinkingId,
 			onThinkingOpen: (id) => setOpenThinkingId(id),
-			modelProtocols: {
-				...hostProtocols,
-				...draftProtocols
-			},
-			onProtocolChange: (id, protocol) => {
-				setDraftProtocols((current) => ({
-					...current,
-					[id]: protocol
-				}));
-				setNotice(null);
-			},
 			onToggle: (id) => {
 				touchedRef.current = true;
 				setIds(toggleModelIn(ids, models.map((model) => String(model?.id ?? "")), id));
@@ -2231,7 +2161,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			onClick: () => {
 				touchedRef.current = false;
 				setIds(hostIds);
-				setDraftProtocols({});
 				setDraftThinking({});
 				setDraftVision({});
 				setNotice(null);
@@ -2253,7 +2182,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			role: "alert"
 		}, notice) : null));
 	}
-	var PROTOCOLS, NO_MODELS, NO_IDS;
+	var NO_MODELS, NO_IDS;
 	var init_model_picker = __esmMin((() => {
 		init_const();
 		init_format();
@@ -2262,12 +2191,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		init_models();
 		init_runtime();
 		init_styles();
-		PROTOCOLS = [
-			"auto",
-			"anthropic",
-			"responses",
-			"chat-completions"
-		];
 		NO_MODELS = [];
 		NO_IDS = [];
 	}));
@@ -2282,9 +2205,11 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		const [saved, setSaved] = useState(false);
 		const [forgotten, setForgotten] = useState(false);
 		const post = useCallback((payload) => postJson(POOL_PATH, payload), []);
+		/** 清除面板 key 走 API-KEY 路由（forget 分支在那里；POOL 路由不认识 forget）。 */
+		const postApiKey = useCallback((payload) => postJson(API_KEY_PATH, payload), []);
 		const submit = useCallback(async (event) => {
 			event?.preventDefault?.();
-			if (apiKey.trim() === "") {
+			if (!/^sk-[A-Za-z0-9]/.test(apiKey.trim())) {
 				setFormError(tt("llm.empty"));
 				return;
 			}
@@ -2318,7 +2243,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			setBusy(true);
 			setFormError(null);
 			try {
-				const body = await post({ forget: true });
+				const body = await postApiKey({ forget: true });
 				if (body?.ok !== true) {
 					setFormError(body?.error ?? tt("auth.network"));
 					return;
@@ -2377,7 +2302,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			type: "button",
 			style: S.button,
 			disabled: busy,
-			onClick: forget
+			onClick: () => {
+				if (globalThis.confirm(tt("llm.forgetConfirm"))) forget();
+			}
 		}, tt("llm.forget")) : null), forgotten ? h("p", {
 			style: {
 				...S.formNote,
@@ -2566,7 +2493,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			disabled: busyId !== null,
 			onChange: (event) => setNoteDraft(event.target.value),
 			onBlur: () => {
-				if (editingId === entry.id) setNote(entry.id, noteDraft);
+				setEditingId(null);
+				setNoteDraft("");
 			},
 			onKeyDown: (event) => {
 				if (event.key === "Enter") {
@@ -2593,6 +2521,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			type: "button",
 			style: S.rosterBulk,
 			disabled: busyId !== null,
+			onMouseDown: (event) => event.preventDefault?.(),
 			onClick: () => void setNote(entry.id, noteDraft)
 		}, tt("poolMng.saveName")) : null, h("span", { style: {
 			...S.modelBadge,
@@ -2628,10 +2557,12 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			type: "button",
 			style: S.rosterBulk,
 			disabled: busyId !== null,
-			onClick: () => void act({
-				action: "delete",
-				id: entry.id
-			}, entry.id)
+			onClick: () => {
+				if (globalThis.confirm(tt("poolMng.deleteConfirm"))) act({
+					action: "delete",
+					id: entry.id
+				}, entry.id);
+			}
 		}, tt("poolMng.delete"))))))), error !== null ? h("p", {
 			style: S.formError,
 			role: "alert"
@@ -3109,6 +3040,15 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			[key]: current[key] === false
 		}));
 		const saved = (section, key) => {
+			const pending = inflight[`${section}.${key}`];
+			if (pending !== void 0) {
+				if (Date.now() - pending.at > 3e4) setInflight((current) => {
+					const next = { ...current };
+					delete next[`${section}.${key}`];
+					return next;
+				});
+				else return pending.value;
+			}
 			const value = (settings[section] ?? {})[key];
 			return typeof value === "string" ? value : "";
 		};
@@ -3162,12 +3102,20 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		/** 文本草稿（key = section.key；常驻输入框用）。 */
 		const [drafts, setDrafts] = useState({});
 		const [focusedField, setFocusedField] = useState(null);
+		const [inflight, setInflight] = useState({});
 		const draftOf = (section, key) => drafts[`${section}.${key}`] ?? saved(section, key);
 		const setDraft = (section, key, value) => {
 			setDrafts((current) => ({
 				...current,
 				[`${section}.${key}`]: value
 			}));
+		};
+		const clearDraft = (section, key) => {
+			setDrafts((current) => {
+				const next = { ...current };
+				delete next[`${section}.${key}`];
+				return next;
+			});
 		};
 		/** 剥一层成对引号（资源管理器「复制文件地址」自带引号）+ 首尾空白。 */
 		const unquote = (raw) => raw.trim().replace(/^"(.*)"$/, "$1").trim();
@@ -3200,17 +3148,36 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 					...current,
 					[tool]: verdict
 				}));
-				setDraft(tool, "outputDir", saved(tool, "outputDir"));
+				clearDraft(tool, "outputDir");
 				return;
 			}
 			const next = unquote(raw);
-			setDraft(tool, "outputDir", next);
-			if (next !== saved(tool, "outputDir")) setKey(tool, "outputDir", next);
+			clearDraft(tool, "outputDir");
+			if (next !== saved(tool, "outputDir")) {
+				setInflight((current) => ({
+					...current,
+					[`${tool}.outputDir`]: {
+						value: next,
+						at: Date.now()
+					}
+				}));
+				setKey(tool, "outputDir", next);
+			}
 			clearDirError(tool);
 		};
 		const commitBridgePrompt = (raw) => {
 			const next = unquote(raw);
-			if (next !== saved("vision", "bridgePrompt")) setKey("vision", "bridgePrompt", next);
+			clearDraft("vision", "bridgePrompt");
+			if (next !== saved("vision", "bridgePrompt")) {
+				setInflight((current) => ({
+					...current,
+					"vision.bridgePrompt": {
+						value: next,
+						at: Date.now()
+					}
+				}));
+				setKey("vision", "bridgePrompt", next);
+			}
 		};
 		/** 常驻输入框：聚焦且有改动时在最右加「保存」；失焦/回车/保存同源提交。
 		* commit 无返回值——非法输入由 commit 自行恢复原值并设红字（行下方）。 */
@@ -3220,11 +3187,12 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			return h("div", null, h(Field, { label: opts.label }, h("span", { style: {
 				display: "flex",
 				gap: 4,
-				alignItems: "center"
+				alignItems: "center",
+				flex: 1
 			} }, h("input", {
 				style: {
 					...S.input,
-					flex: "1 1 auto"
+					flex: 1
 				},
 				value: draftOf(section, key),
 				placeholder: opts.placeholder,
@@ -3232,22 +3200,32 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				onFocus: () => setFocusedField(target),
 				onChange: (event) => setDraft(section, key, event.target.value),
 				onBlur: () => {
-					setFocusedField((current) => current === target ? null : current);
-					opts.commit(draftOf(section, key));
+					clearDraft(section, key);
+					setFocusedField(null);
 				},
 				onKeyDown: (event) => {
 					if (event.key === "Enter") {
 						event.preventDefault?.();
 						opts.commit(draftOf(section, key));
 						setFocusedField(null);
+						clearDraft(section, key);
 					}
 				}
-			}), showSave ? h("button", {
+			}), h("button", {
 				type: "button",
-				style: S.rosterBulk,
+				onMouseDown: (event) => event.preventDefault?.(),
+				style: {
+					...S.button,
+					flex: "none",
+					visibility: showSave ? "visible" : "hidden"
+				},
 				disabled: opts.busy,
-				onClick: () => opts.commit(draftOf(section, key))
-			}, tt("poolMng.saveName")) : null)), opts.error !== void 0 ? h("p", {
+				onClick: () => {
+					opts.commit(draftOf(section, key));
+					setFocusedField(null);
+					clearDraft(section, key);
+				}
+			}, tt("poolMng.saveName")))), opts.error !== void 0 ? h("p", {
 				style: S.formError,
 				role: "alert"
 			}, opts.error) : null);
@@ -4049,7 +4027,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-10-27T14:44";
+		const CLIENT_BUILD = "2026-10-29T01:54";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			console.info(`[dsh-sensenova-suite] client build ${CLIENT_BUILD}`);

@@ -41,6 +41,7 @@ import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './
 import { KNOWN_UNROUTABLE_MODELS } from './llm-models.ts';
 import { IMAGE_INPUT_MODALITIES, inputModalitiesFor } from './modality.ts';
 import { traceLog } from './trace-log.ts';
+import { maskKey } from './util.ts';
 
 /**
  * SenseNova 目录通常不披露上下文字段，这里用 131072 作为合理默认
@@ -66,7 +67,7 @@ const PROVIDER_RETRY_AFTER_CAP_MS = 60_000;
 /** 配额类 429 退避指导（providerRetryAfterMs）的绝对上限（毫秒）：与
  * PROVIDER_RETRY_AFTER_CAP_MS（即重试策略单次延迟上限）一致。宿主 dsh-llm-retry
  * （normal 模式）在 providerRetryAfterMs 超过单次延迟上限时会直接放弃重试，封顶
- * 对齐后保证任何采用值都会被宿主按指导延迟重试；不影响 TPM 分级档（3–15s）与
+ * 对齐后保证任何采用值都会被宿主按指导延迟重试；不影响 TPM 分级档（3–30s）与
  * code 8 固定档（15s）的正常取值。 */
 const QUOTA_RETRY_AFTER_CEILING_MS = 60_000;
 /** 配额类 429（code 8，rps/rpm exhausted）退避下限（毫秒）。2026-09-04 实测：速率桶补充 ≈1 个/14s，15s 覆盖一个完整补充周期。 */
@@ -145,12 +146,6 @@ export interface SensenovaAdapterDeps {
    * 额度标记语义在 wire 适配器上的落点。缺省 undefined = 不过滤。
    */
   catalogFilter?: () => { enabledIds: string[]; unavailableIds: string[] };
-  /**
-   * 每模型协议覆盖（dsh-sensenova-suite 扩展，可选）：面板"协议"列的运行期
-   * 读取——覆盖为具体协议时该模型从它起步（auto/未覆盖走决策表；运行期 400
-   * 兜底降级仍然生效）。缺省 undefined = 全部 auto。
-   */
-  protocolOverrides?: () => Record<string, string>;
   /**
    * 每模型可用思考档位（dsh-sensenova-suite 扩展点，可选）：从 pool.json
    * `thinking` 分区读取（{ modelId → ["off","low",...] }）。在读取边界
@@ -958,12 +953,12 @@ export class SensenovaAdapter extends LlmAdapter {
     return resolveRetryPolicy(
       {
         mode: 'normal',
-        // tune-sensenova-429-retry-budget：预算放大（10→100）。fix-sensenova-429-quota-retry
-        // 的 10 次 × 15s 档（约 2 分钟）实测不足以覆盖多会话共享 key 耗干 TPM 桶的恢复
-        // 窗口；100 次 × 15s 封顶档约 25 分钟，仍为有限预算（宿主按步骤边界重置计数，
-        // 此为单个 agent 步骤内预算），更长故障显式失败。分级档位维持 3–15s 封顶不变
+        // tune-sensenova-429-retry-budget：预算沿革 10 → 100 → 10（2026-10-27 用户
+        // 拍板回收 10 次——快速失败优于长挂）。配合 3–30s 八档探测梯，10 次 × 30s
+        // 封顶约 5 分钟仍为有限预算（宿主按步骤边界重置计数，此为单个 agent 步骤
+        // 内预算），更长故障显式失败。分级档位 3–30s 八档封顶
         // （保住恢复第一时间接上的探测灵敏度）。
-        maxRetries: 100,
+        maxRetries: 10,
         // suite：重试类别由 llm-retry 的单一决策模块给出（EMPTY/RATE_LIMIT/SERVER/
         // TIMEOUT/TRANSPORT 重试；QUOTA/ACCOUNT_QUOTA 池耗尽不硬重试——
         // contract.test 钉的就是这份决策，这里恢复它的运行时读者）。
@@ -1141,12 +1136,6 @@ export class SensenovaAdapter extends LlmAdapter {
       anthropicUnsupported: this.anthropicUnsupported,
     });
     let wire: WireKind = plan.wire;
-    // 面板协议覆盖（suite 扩展）：覆盖为具体协议时作为起始 wire（决策表被
-    // 用户选择压过）；覆盖为 auto/未设置时维持决策表结果。
-    const override = this.deps.protocolOverrides?.()[options.model];
-    if (override === 'anthropic' || override === 'responses' || override === 'chat-completions') {
-      wire = override;
-    }
     // 图片桥（2026-10-27）：换图与否由「可看图」勾选集判定（vision.visionModels，
     // 换图器内部结合 bridgeMode）——勾选的模型图片原样进请求，未勾选的换成
     // 转述观察文本。换图发生在请求边界，session 与用户侧界面保持原图原文。
@@ -1275,6 +1264,9 @@ export class SensenovaAdapter extends LlmAdapter {
         if (attempt.ok) {
           response = attempt;
           // 请求成功：429001 分级探测计数归零（下次再限流从最短档 3s 重新探测）。
+          if (this.tpmHitCounts.get(options.sessionId) !== undefined) {
+            traceLog(`[dsh-sensenova-suite] 429 恢复: model=${options.model} key=${maskKey(apiKey)} 连续限流结束，探测档归零`);
+          }
           this.tpmHitCounts.delete(options.sessionId);
           this.deps.reportOutcome?.(apiKey, 'success');
           break; // 额度随 response 保留，由外层 finally 在流结束后释放
@@ -1339,6 +1331,11 @@ export class SensenovaAdapter extends LlmAdapter {
           dynamicFloorMs = TPM_PROBE_BACKOFF_STEPS_MS[Math.min(hits, TPM_PROBE_BACKOFF_STEPS_MS.length - 1)];
           this.tpmHitCounts.set(options.sessionId, hits + 1);
         }
+        // 429 诊断（2026-10-27）：限流本身此前全程静默——「为什么慢了」「key 是不是
+        // 被限」无从判断。每次 429 一行：模型/key/分类/本档退避；30s 级退避下量可控。
+        traceLog(`[dsh-sensenova-suite] 429 model=${options.model} key=${maskKey(apiKey)} ` +
+          `kind=${pool429 ? "pool" : classified.quota ? classified.kind : "rate"} ` +
+          `退避=${dynamicFloorMs !== undefined ? `${Math.round(dynamicFloorMs / 1000)}s` : retryAfterMs !== undefined ? `${Math.round(retryAfterMs / 1000)}s(retry-after)` : "宿主默认"}`);
         // 配额类 429 且开关开启：轮换到下一把本请求未试过的 key（tried 集合做单次
         // 请求内防乒乓——每次宿主重试都会清空 tried、重新探测各 key，因此配额恢复
         // 或另一把 key 空闲时下一次重试即可切过去；不再用跨请求环回 Set，那会把
@@ -1359,12 +1356,16 @@ export class SensenovaAdapter extends LlmAdapter {
             release = undefined;
             apiKey = next;
             rotations += 1;
+            traceLog(`[dsh-sensenova-suite] 429 换 key: model=${options.model} → 新 key（粘性已更新，已轮换 ${rotations}/${connection.accountCount}）`);
             if (quotaRotate) {
               this.quotaStickyKeys.set(options.sessionId, next); // 粘住新 key
               this.tpmHitCounts.delete(options.sessionId); // 新 key 配额新鲜，探测档位归零
             }
             continue;
           }
+        }
+        if (attempt.status === 429) {
+          traceLog(`[dsh-sensenova-suite] 429 换无可换: model=${options.model} 已试 ${rotations}/${connection.accountCount} 把，交宿主重试层（预算内自动重试）`);
         }
         release();
         release = undefined;

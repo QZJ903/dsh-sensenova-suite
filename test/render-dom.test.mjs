@@ -611,7 +611,6 @@ function typeInto(input, value) {
   const noteAffordance = () => [...m.host.querySelectorAll("span")].find((el) => el.textContent === "poolMng.note");
   const noteInput = () => [...m.host.querySelectorAll("input")].find((el) => el.placeholder === "poolMng.note");
   const saveButton = () => [...m.host.querySelectorAll("button")].find((el) => el.textContent === "poolMng.saveName");
-  console.error(`[note-debug] host len=${m.host.innerHTML.length} noteSpan=${noteAffordance() !== undefined} body=${m.host.innerHTML.slice(0, 200)}`);
 
   check("note: 未编辑显示「备注」占位", noteAffordance() !== undefined);
 
@@ -619,11 +618,11 @@ function typeInto(input, value) {
   act(() => noteAffordance().dispatchEvent(new win.MouseEvent("click", { bubbles: true })));
   check("note: 点击后内联输入框出现", noteInput() !== undefined && noteInput() !== null);
   typeInto(noteInput(), "hello");
-  // React 的 onBlur 挂在 focusout（冒泡）上——派发非冒泡 blur 不会触发它。
+  // 失焦不提交（2026-10-29 与保存目录统一：只认保存按钮/回车）——
+  // React 的 onBlur 挂在 focusout（冒泡）上，派发它验证无 POST 产生。
   act(() => noteInput().dispatchEvent(new win.FocusEvent("focusout", { bubbles: true })));
-  const renameA = postCalls.find((c) => c.body?.action === "rename");
-  check("note: 失焦提交发出 rename 且携带输入内容",
-    renameA !== undefined && renameA.body.name === "hello" && renameA.body.id === "key-2",
+  check("note: 失焦不提交（落库唯一路径是保存按钮/回车）",
+    !postCalls.some((c) => c.body?.action === "rename"),
     JSON.stringify(postCalls.map((c) => c.body)));
 
   // 路径 B：保存按钮（mousedown 先触发 blur 的真实次序——用户假设的失效点）。
@@ -637,6 +636,36 @@ function typeInto(input, value) {
   check("note: 保存按钮路径提交 name=输入内容（blur 先行也不丢字）",
     renameB !== undefined && renameB.body.name === "second",
     JSON.stringify(postCalls.map((c) => c.body)));
+  m.unmount();
+}
+
+// ── §M. sk- 前缀校验（2026-10-27 报障「粘贴 sk- 开头的 api key 没有校验」）──
+// 非 sk- 输入提交 → 红字（llm.empty）+ 不发 POST；sk- 开头正常放行。
+{
+  const postCalls = [];
+  win.fetch = (path, init) => {
+    postCalls.push({ path: String(path), body: init?.body ? JSON.parse(String(init.body)) : null });
+    return Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+  };
+  const poolEmpty = { keys: [] };
+  const m = mount(React.createElement(panel.components.ApiKeyForm, { pool: poolEmpty, onDone: () => {}, tt, bare: true }));
+  const keyInput = [...m.host.querySelectorAll('input')].find((el) => el.placeholder === 'llm.placeholder');
+  const formEl = m.host.querySelector('form');
+  const submitForm = async () => {
+    await act(async () => { formEl.dispatchEvent(new win.Event('submit', { bubbles: true, cancelable: true })); });
+    await act(async () => { await Promise.resolve(); });
+  };
+  typeInto(keyInput, 'not-a-key');
+  await submitForm();
+  check('sk- 校验: 非 sk- 输入提交 → 红字 llm.empty 且无 POST',
+    m.host.querySelector('p[role="alert"]')?.textContent === 'llm.empty' && postCalls.length === 0,
+    "alert=" + (m.host.querySelector('p[role="alert"]')?.textContent ?? 'none') + " posts=" + postCalls.length);
+  typeInto(keyInput, 'sk-abc123');
+  await submitForm();
+  const added = postCalls.find((c) => c.body?.action === 'add');
+  check('sk- 校验: sk- 开头正常放行 add',
+    added !== undefined && added.body.apiKey === 'sk-abc123',
+    JSON.stringify(postCalls));
   m.unmount();
 }
 

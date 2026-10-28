@@ -3,7 +3,6 @@
  * picker around it.
  */
 import { MODELS_PATH, POOL_PATH } from "./const.ts";
-const PROTOCOLS = ["auto", "anthropic", "responses", "chat-completions"] as const;
 import { errorText, format, tokenSize } from "./format.ts";
 import { postJsonOrThrow } from "./http.ts";
 import { ModelRow } from "./model-row.ts";
@@ -47,15 +46,13 @@ const NO_IDS: string[] = [];
  * only") earns no badge, and a figure the catalogue does not declare draws no
  * segment - the list quotes facts, never guesses.
  */
-export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }: {
+export function ModelRoster({ models, enabledIds, busy, tt, onToggle, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }: {
   models: ModelData[];
   enabledIds: unknown;
   busy: boolean | undefined;
   tt: Tt;
   onToggle?: (id: string) => void;
   /** 每模型协议覆盖（缺省 = auto）；面板"协议"列的数据源。 */
-  modelProtocols?: Record<string, string>;
-  onProtocolChange?: (id: string, protocol: string) => void;
   /** 用户勾选的「可识图」模型 id 集合（含草稿）；缺省 = 空（不显示识图勾选）。 */
   visionIds?: string[];
   /** 勾选/取消某模型的识图能力（写本地草稿；保存时 POST vision.visionModels）。 */
@@ -192,25 +189,9 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
                     : undefined
                 }),
                 tt("llm.rosterVision"))
-              : null),
-            // 分隔线：档位行与协议行之间。
-            h("div", { style: { borderTop: "1px solid var(--dsw-alias-border-l1)", margin: "2px 0" } }),
-            // 协议并入面板：一行 label + 下拉（auto/三协议），与档位同属「保存才生效」。
-            onProtocolChange !== undefined
-              ? h("label", {
-                  style: { display: "flex", gap: 8, alignItems: "center", fontSize: 12, cursor: busy ? "default" : "pointer" },
-                },
-                h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, tt("llm.protocol")),
-                h("select", {
-                  style: { ...S.input, width: "auto", height: 26, fontSize: 12, padding: "0 6px" },
-                  value: String(modelProtocols?.[id] ?? "auto"),
-                  disabled: busy === true,
-                  "aria-label": `${label} 协议`,
-                  onChange: (event: { target: { value: string } }) => onProtocolChange(id, event.target.value)
-                }, PROTOCOLS.map((option) => h("option", { key: option, value: option },
-                  option === "auto" ? tt("llm.protocolAuto") : option))))
               : null)
-          : null
+    )
+  : null
       });
     })
   );
@@ -235,7 +216,6 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   onDone?: () => void;
   tt: Tt;
 }): unknown {
-  const rawProtocols = llm?.modelProtocols ?? {};
   const models = Array.isArray(llm?.models) ? llm.models : NO_MODELS;
   const hostIds = Array.isArray(llm?.enabledModelIds) ? llm.enabledModelIds : NO_IDS;
   // 用户勾选的「可识图」模型原始快照（存在 vision.visionModels）。
@@ -253,9 +233,7 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   const [inflight, setInflight] = useState<{
     thinking?: { values: Record<string, string[]>; at: number };
     vision?: { values: string[]; at: number };
-    protocols?: { values: Record<string, string>; at: number };
   }>({});
-  const hostProtocols = { ...rawProtocols, ...inflight.protocols?.values };
   const visionHost = inflight.vision?.values ?? rawVision;
   const thinkingHost = { ...rawThinking, ...inflight.thinking?.values };
   const [ids, setIds] = useState<string[]>(() => hostIds.slice());
@@ -271,7 +249,6 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   // 当前展开思考面板的模型（一次只开一个；null = 全收起）。
   const [openThinkingId, setOpenThinkingId] = useState<string | null>(null);
   // 协议草稿（模型 → 协议；即改即存已废，改的是草稿，按保存才落库）。
-  const [draftProtocols, setDraftProtocols] = useState<Record<string, string>>({});
   // 思考面板草稿（模型 → 档位集；与 vision 草稿一起按保存才落库）。
   const [draftThinking, setDraftThinking] = useState<Record<string, string[]>>({});
   // 可看图草稿（模型 → 是否勾选；与思考草稿一起按保存才落库）。
@@ -294,7 +271,6 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   // 生效值 ≠ 宿主值才算未保存；草稿为空（未编辑过）时生效值恒等于宿主值 → 干净。
   // 直接比较草稿与宿主是错的：宿主已有配置（如 0.1.1 即改即存时代留下的 thinking）
   // 而草稿为空时会被误判为已修改，保存脚常驻、点了又没效果。
-  const effectiveProtocols = { ...hostProtocols, ...draftProtocols };
   const effectiveThinking = { ...thinkingHost, ...draftThinking };
   const effectiveVision = (() => {
     const out = new Set(visionHost);
@@ -304,15 +280,14 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
     }
     return [...out];
   })();
-  const protocolsDirty = JSON.stringify(effectiveProtocols) !== JSON.stringify(hostProtocols);
   const thinkingDirty = JSON.stringify(effectiveThinking) !== JSON.stringify(thinkingHost);
   const visionDirty = JSON.stringify(effectiveVision.sort()) !== JSON.stringify([...visionHost].sort());
-  const anyDirty = dirty || protocolsDirty || thinkingDirty || visionDirty;
+  const anyDirty = dirty || thinkingDirty || visionDirty;
   // 覆盖层摘除：快照追平在途写入（或 30s 兜底）即放手，显示与基座交还快照。
-  const snapKey = JSON.stringify([rawThinking, rawVision, rawProtocols]);
+  const snapKey = JSON.stringify([rawThinking, rawVision]);
   useEffect(() => {
     setInflight((current) => {
-      if (current.thinking === undefined && current.vision === undefined && current.protocols === undefined) return current;
+      if (current.thinking === undefined && current.vision === undefined) return current;
       const now = Date.now();
       const next: typeof current = { ...current };
       const thinkingPart = next.thinking;
@@ -323,11 +298,6 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
       const visionPart = next.vision;
       if (visionPart !== undefined) {
         if (JSON.stringify([...rawVision].sort()) === JSON.stringify([...visionPart.values].sort()) || now - visionPart.at > 30_000) delete next.vision;
-      }
-      const protocolsPart = next.protocols;
-      if (protocolsPart !== undefined) {
-        const sub = Object.fromEntries(Object.entries(rawProtocols).filter(([k]) => k in protocolsPart.values));
-        if (JSON.stringify(sub) === JSON.stringify(protocolsPart.values) || now - protocolsPart.at > 30_000) delete next.protocols;
       }
       return next;
     });
@@ -372,7 +342,6 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
       const thinkingNext = Object.fromEntries(
         Object.entries({ ...thinkingHost, ...draftThinking }).filter(([, levels]) => Array.isArray(levels) && levels.length > 0)
       );
-      const protocolsNext = { ...hostProtocols, ...draftProtocols };
       const posts: Promise<unknown>[] = [];
       if (dirty) {
         posts.push(postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids }).then(() => { touchedRef.current = false; }));
@@ -393,13 +362,6 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
             setInflight((current) => ({ ...current, thinking: { values: thinkingNext, at: Date.now() } }));
           }));
       }
-      if (protocolsDirty) {
-        posts.push(postJsonOrThrow(MODELS_PATH, { modelProtocols: protocolsNext })
-          .then(() => {
-            setDraftProtocols({});
-            setInflight((current) => ({ ...current, protocols: { values: protocolsNext, at: Date.now() } }));
-          }));
-      }
       await Promise.all(posts);
       setJustSaved(true);
       onDone?.();
@@ -410,7 +372,7 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
     }
     // 闭包依赖：载荷按当前草稿/宿主构造，任一组变化都得出新闭包。
     // （本仓无 eslint；panel.test F6 纪律——将来启用 lint 需补 exhaustive-deps。）
-  }, [busy, ids, dirty, visionDirty, thinkingDirty, protocolsDirty, visionHost, hostProtocols, draftVision, draftThinking, thinkingHost, onDone, tt]);
+  }, [busy, ids, dirty, visionDirty, thinkingDirty, visionHost, draftVision, draftThinking, thinkingHost, onDone, tt]);
 
   const needle = query.trim().toLowerCase();
   // `models` holds its identity between renders - it comes straight off the
@@ -503,12 +465,6 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
                 tt,
                 openThinkingId,
                 onThinkingOpen: (id: string | null) => setOpenThinkingId(id),
-                modelProtocols: { ...hostProtocols, ...draftProtocols },
-                onProtocolChange: (id: string, protocol: string) => {
-                  // 协议草稿（保存时与其它草稿一起落库；不再即改即存）。
-                  setDraftProtocols((current) => ({ ...current, [id]: protocol }));
-                  setNotice(null);
-                },
                 // One row is toggled against the WHOLE roster, not the
                 // filtered view, so an edit survives a later change of the
                 // search box.
@@ -569,7 +525,6 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
                     // picker may follow the Host again from here on.
                     touchedRef.current = false;
                     setIds(hostIds);
-                    setDraftProtocols({});
                     setDraftThinking({});
                     setDraftVision({});
                     setNotice(null);

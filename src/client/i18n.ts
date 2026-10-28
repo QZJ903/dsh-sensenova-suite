@@ -143,6 +143,7 @@ export const zh = {
   "llm.save": "保存 API Key",
   "llm.saving": "保存中…",
   "llm.forget": "清除已保存的 API Key",
+  "llm.forgetConfirm": "确定清除已保存的 API Key？清除后需要重新粘贴才能继续使用。",
   "llm.saved": "API Key 已保存在 DSH 凭据中；下次轮询自动拉取模型目录。",
   "llm.forgotten": "已清除面板保存的 API Key（环境变量 SENSENOVA_API_KEY 不受影响）。",
   "llm.empty": "请输入 sk- 开头的 API Key",
@@ -210,8 +211,6 @@ export const zh = {
   "mm.bridgePromptPlaceholder": "留空用内置默认（事实性转录、不猜测）",
   "mm.catalogEmpty": "（目录暂无此模型）",
   "mm.hint": "这里的设置是主要设置（存插件状态文件）；cordis.patch.yml 的同名键只在未设置时生效。改动即保存。",
-  "llm.protocol": "协议",
-  "llm.protocolAuto": "自动",
   "poolMng.concurrent": "并发",
   "poolMng.note": "备注",
   "poolMng.saveName": "保存",
@@ -225,6 +224,7 @@ export const zh = {
   "poolMng.disable": "停用",
   "poolMng.restore": "恢复",
   "poolMng.delete": "删除",
+  "poolMng.deleteConfirm": "确定删除这把 key？凭据本体将一并删除，恢复需要重新粘贴。",
   // Zero multiplier: a statement about the model, not a rate of zero.
   // NOT `llm.rosterRateTitle`: that one says the rate is the operator's own
   // pseudo figure ("非官方"). This one IS the gateway catalogue's own field,
@@ -325,6 +325,7 @@ export const en: typeof zh = {
   "llm.save": "Save API key",
   "llm.saving": "Saving…",
   "llm.forget": "Forget the saved API key",
+  "llm.forgetConfirm": "Forget the saved API key? You will need to paste it again to continue.",
   "llm.saved": "API key stored in the DSH credentials; the next poll fetches the model catalog.",
   "llm.forgotten": "Panel-saved API key cleared (an SENSENOVA_API_KEY environment value is left untouched).",
   "llm.empty": "Enter an API key starting with sk-",
@@ -390,8 +391,6 @@ export const en: typeof zh = {
   "mm.bridgePromptPlaceholder": "empty = built-in default (factual, no guessing)",
   "mm.catalogEmpty": " (no such model in the catalogue yet)",
   "mm.hint": "Panel values here are PRIMARY (stored in the plugin state file); cordis.patch.yml defaults apply only to unset keys. Every change saves immediately.",
-  "llm.protocol": "Protocol",
-  "llm.protocolAuto": "auto",
   "poolMng.concurrent": "Concurrency",
   "poolMng.note": "note",
   "poolMng.saveName": "save",
@@ -405,6 +404,7 @@ export const en: typeof zh = {
   "poolMng.disable": "disable",
   "poolMng.restore": "restore",
   "poolMng.delete": "delete",
+  "poolMng.deleteConfirm": "Delete this key? Its credential is removed too; paste it again to restore.",
 };
 
 export type { Tt };

@@ -96,6 +96,8 @@ export const SUITES = Object.freeze([
   { name: "pool-route.test.mjs", kind: "suite", note: "pool management routes (rename/note persistence)" },
   { name: "vision-image.test.mjs", kind: "suite", note: "image tools + vision relay" },
   { name: "trace-log.test.mjs", kind: "suite", note: "diagnostic file log" },
+  { name: "savedir-flow.test.mjs", kind: "suite", note: "save-dir button flow (DOM, real react)" },
+  { name: "savedir-logic.test.mjs", kind: "suite", note: "save-dir row structure (standin)" },
   { name: "host-range.test.mjs", kind: "suite", note: "peer range × version universe alignment (golden, zero install)" },
 
   // ── the five gate files. Not *.test.mjs, so the three-way roster pin

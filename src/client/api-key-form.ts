@@ -7,7 +7,7 @@
  * is NEVER populated from the snapshot — the Host only reports whether one
  * exists.
  */
-import { POOL_PATH, SENSENOVA_SIGNUP_URL } from "./const.ts";
+import { POOL_PATH, API_KEY_PATH, SENSENOVA_SIGNUP_URL } from "./const.ts";
 import { postJson, postJsonOrThrow } from "./http.ts";
 import { h, useCallback, useState } from "./runtime.ts";
 import type { Tt } from "./runtime.ts";
@@ -31,12 +31,14 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
 
   // 上面的表单现在直接进 key 池（POST /pool {action:add}）——唯一入口。
   const post = useCallback((payload: Record<string, unknown>) => postJson(POOL_PATH, payload), []);
+  /** 清除面板 key 走 API-KEY 路由（forget 分支在那里；POOL 路由不认识 forget）。 */
+  const postApiKey = useCallback((payload: Record<string, unknown>) => postJson(API_KEY_PATH, payload), []);
 
   const submit = useCallback(async (event?: { preventDefault?: () => void }) => {
     event?.preventDefault?.();
-    // A whitespace check, not a prefix check: the platform owns the key
-    // format, and rejecting a shape it later changes would lock users out.
-    if (apiKey.trim() === "") {
+    // 前缀校验（2026-10-27 用户要求）：必须 sk- 开头——面板加错 key（整串
+    // 粘错/带了空格外的杂质）会进池参与轮转，把限流与失败怪到好 key 头上。
+    if (!/^sk-[A-Za-z0-9]/.test(apiKey.trim())) {
       setFormError(tt("llm.empty"));
       return;
     }
@@ -64,7 +66,7 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
     setBusy(true);
     setFormError(null);
     try {
-      const body = await post({ forget: true });
+      const body = await postApiKey({ forget: true });
       if (body?.ok !== true) {
         setFormError(body?.error ?? tt("auth.network"));
         return;
@@ -123,7 +125,12 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
         busy ? tt("llm.saving") : tt("llm.save")
       ),
       canForget
-        ? h("button", { type: "button", style: S.button, disabled: busy, onClick: forget }, tt("llm.forget"))
+        ? h("button", {
+            type: "button", style: S.button, disabled: busy,
+            // 二次确认（2026-10-27 用户拍板）：清除是本面板最重的破坏性操作
+            // （清凭据本体 + 目录缓存 + 池槽），误触一次就得重新找 key。
+            onClick: () => { if (globalThis.confirm(tt("llm.forgetConfirm"))) void forget(); }
+          }, tt("llm.forget"))
         : null
     ),
     forgotten
@@ -300,7 +307,13 @@ export function PoolManager({ pool, onDone, tt }: {
                     placeholder: tt("poolMng.note"),
                     disabled: busyId !== null,
                     onChange: (event: { target: { value: string } }) => setNoteDraft(event.target.value),
-                    onBlur: () => { if (editingId === entry.id) void setNote(entry.id, noteDraft); },
+                    // 失焦 = 放弃编辑：收起编辑器、草稿作废（显示回到已存备注）——
+                    // 不提交。落库唯一路径是「保存」按钮/回车；按钮 onMouseDown
+                    // preventDefault（点按钮不失焦），取消不会误伤按钮通路。
+                    onBlur: () => {
+                      setEditingId(null);
+                      setNoteDraft("");
+                    },
                     onKeyDown: (event: { key: string; preventDefault?: () => void }) => {
                       // 回车保存备注；必须 preventDefault，否则会冒泡到外层
                       // form 的 onSubmit（填 key 的表单），把空的 apiKey 提交并报
@@ -319,6 +332,8 @@ export function PoolManager({ pool, onDone, tt }: {
               editingId === entry.id
                 ? h("button", {
                     type: "button", style: S.rosterBulk, disabled: busyId !== null,
+                    // mousedown 阻止默认：输入框不失焦，编辑器不会在点击前被收起。
+                    onMouseDown: (event: { preventDefault?: () => void }) => event.preventDefault?.(),
                     onClick: () => void setNote(entry.id, noteDraft)
                   }, tt("poolMng.saveName"))
                 : null,
@@ -343,7 +358,8 @@ export function PoolManager({ pool, onDone, tt }: {
                         }, tt("poolMng.disable")),
                     h("button", {
                       type: "button", style: S.rosterBulk, disabled: busyId !== null,
-                      onClick: () => void act({ action: "delete", id: entry.id }, entry.id)
+                      // 二次确认（2026-10-27 用户拍板）：删除连凭据本体一起清，误触即失。
+                      onClick: () => { if (globalThis.confirm(tt("poolMng.deleteConfirm"))) void act({ action: "delete", id: entry.id }, entry.id); }
                     }, tt("poolMng.delete"))
                   )
             )

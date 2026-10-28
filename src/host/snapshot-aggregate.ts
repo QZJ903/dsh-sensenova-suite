@@ -195,14 +195,12 @@ export async function buildSnapshotBody({
 }): Promise<SnapshotData> {
   const providerState = publisher.state;
   const resolveApiKey = async () => (await apiKeyStore.resolve()).value;
-  // 池诊断 + 模型协议覆盖：一次取用（pool 块与 llm 块共源，不会各说各话）。
+  // 池诊断：一次取用（pool 块与 llm 块共源，不会各说各话）。
   let poolDiag: import("../shared/wire.ts").PoolDiagData | null = null;
-  let modelProtocols: Record<string, string> = {};
   if (typeof poolSnapshot === "function") {
     try {
-      const raw = await poolSnapshot() as import("../shared/wire.ts").PoolDiagData & { modelProtocols?: Record<string, string> };
+      const raw = await poolSnapshot() as import("../shared/wire.ts").PoolDiagData;
       poolDiag = raw;
-      modelProtocols = raw.modelProtocols ?? {};
     } catch {
       // 池快照失败不拖垮面板。
     }
@@ -465,8 +463,6 @@ export async function buildSnapshotBody({
     // adapter profile pins this constant, the panel quotes it — same source,
     // so the two cannot drift.
     thinkingDefault: DEFAULT_REASONING_EFFORT,
-    // 每模型协议覆盖（面板"协议"列的数据源；缺省 = auto）。
-    modelProtocols,
     // The panel roster: every chat model this catalogue can offer, each tagged
     // with whether its quota pool is currently exhausted, plus the curated
     // allow-list. An empty allow-list means "no filter". Every row also carries

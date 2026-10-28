@@ -7,7 +7,6 @@
  *
  * 优先级：面板保存值 > patch 配置默认。`globalConcurrency` 未保存时回落配置；
  * `disabledIds` / `deletedIds` 在配置之上做减法（配置里有的账号也可能被停用）；
- * `modelProtocols` 完全面板所有（配置无此键）。
  *
  * 完整性沿用 catalog-store：版本化载荷 + 临时文件原子改名 + owner-only 目录 +
  * 「不认识的版本一律读作未设置」——损坏或降级的文件代价是一次重新设置，绝不是崩溃。
@@ -72,7 +71,6 @@ export interface PoolStoreRecord {
   /** 面板保存的全局并发数；null = 跟随配置。 */
   globalConcurrency: number | null;
   /** 模型 → 协议（auto | anthropic | responses | chat-completions）。 */
-  modelProtocols: Record<string, string>;
   /** 面板添加的 key 清单（秘钥本体在凭据服务；此处只存 id 与名称）。 */
   keys: PoolKeyEntry[];
   /** 多模态面板设置（仅存面板改过的键）。 */
@@ -90,7 +88,7 @@ export interface PoolStoreRecord {
 export function emptyPoolRecord(): PoolStoreRecord {
   return {
     version: POOL_STORE_VERSION,
-    disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {},
+    disabledIds: [], deletedIds: [], globalConcurrency: null,
     keys: [],
     toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}, thinking: {}
   };
@@ -103,15 +101,6 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
   if (source.version !== POOL_STORE_VERSION) return null;
   const ids = (value: unknown): string[] =>
     Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && id !== "") : [];
-  const protocols: Record<string, string> = {};
-  if (typeof source.modelProtocols === "object" && source.modelProtocols !== null && !Array.isArray(source.modelProtocols)) {
-    for (const [key, value] of Object.entries(source.modelProtocols as Record<string, unknown>)) {
-      if (typeof key === "string" && key !== "" && typeof value === "string"
-        && ["auto", "anthropic", "responses", "chat-completions"].includes(value)) {
-        protocols[key] = value;
-      }
-    }
-  }
   const concurrency = typeof source.globalConcurrency === "number" && Number.isFinite(source.globalConcurrency)
     ? Math.max(0, Math.floor(source.globalConcurrency))
     : null;
@@ -173,7 +162,6 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     disabledIds: ids(source.disabledIds),
     deletedIds: ids(source.deletedIds),
     globalConcurrency: concurrency,
-    modelProtocols: protocols,
     keys: keyList,
     toolsEnabled: readTools(source.toolsEnabled),
     text2img: readImage(source.text2img),
@@ -314,8 +302,6 @@ export function createFilePoolStore(options: StoreOptions = {}) {
         version: POOL_STORE_VERSION,
         disabledIds: record.disabledIds,
         deletedIds: record.deletedIds,
-        globalConcurrency: record.globalConcurrency,
-        modelProtocols: record.modelProtocols,
         // keys 必须带上：漏掉它会让每次分区保存把 key 清单清空
         // （2026-10-24 实测：加完 key 再改一个多模态设置，key 就消失了）。
         keys: record.keys,
@@ -329,14 +315,6 @@ export function createFilePoolStore(options: StoreOptions = {}) {
       if (parsed === null) return;
       await apply(parsed);
     },
-    /** 设置/清除一个模型的协议覆盖（"auto" 即清除）。 */
-    async setModelProtocol(modelId: string, protocol: string | null): Promise<void> {
-      const record = await seen();
-      const protocols = { ...record.modelProtocols };
-      if (protocol === null || protocol === "auto") delete protocols[modelId];
-      else protocols[modelId] = protocol;
-            await apply({ ...record, modelProtocols: protocols });
-    }
   };
 }
 

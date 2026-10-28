@@ -39,6 +39,7 @@
  */
 export const ARTIFACT_CONSUMERS = new Map([
   ["render-dom.test.mjs", "client.js"],
+  ["savedir-flow.test.mjs", "client.js"],
   ["e2e-gate.mjs", "lib/index.js"]
 ]);
 

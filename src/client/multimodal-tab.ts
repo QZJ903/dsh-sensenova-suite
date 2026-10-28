@@ -57,6 +57,18 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   const toggleCard = (key: string) => setOpenCards((current) => ({ ...current, [key]: current[key] === false }));
 
   const saved = (section: string, key: string): string => {
+    const pending = inflight[`${section}.${key}`];
+    if (pending !== undefined) {
+      if (Date.now() - pending.at > 30_000) {
+        setInflight((current) => {
+          const next = { ...current };
+          delete next[`${section}.${key}`];
+          return next;
+        });
+      } else {
+        return pending.value;
+      }
+    }
     const bag = (settings as Record<string, Record<string, unknown>>)[section] ?? {};
     const value = bag[key];
     return typeof value === "string" ? value : "";
@@ -120,9 +132,20 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   /** 文本草稿（key = section.key；常驻输入框用）。 */
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [focusedField, setFocusedField] = useState<string | null>(null);
+  // 提交成功的乐观覆盖（POST 已确认、快照未回显的窗口里 saved() 读提交值）：
+  // 显示与「再次保存」的基座都不闪旧值；快照追平或 30s 后回落（同 ModelPicker
+  // 的 inflight 设计）。修「按一次保存显示空白，再按一次才正常」。
+  const [inflight, setInflight] = useState<Record<string, { value: string; at: number }>>({});
   const draftOf = (section: string, key: string): string => drafts[`${section}.${key}`] ?? saved(section, key);
   const setDraft = (section: string, key: string, value: string) => {
     setDrafts((current) => ({ ...current, [`${section}.${key}`]: value }));
+  };
+  const clearDraft = (section: string, key: string) => {
+    setDrafts((current) => {
+      const next = { ...current };
+      delete next[`${section}.${key}`];
+      return next;
+    });
   };
 
   /** 剥一层成对引号（资源管理器「复制文件地址」自带引号）+ 首尾空白。 */
@@ -156,17 +179,24 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
     const verdict = validateOutputDir(raw);
     if (verdict !== null) {
       setDirErrors((current) => ({ ...current, [tool]: verdict }));
-      setDraft(tool, "outputDir", saved(tool, "outputDir"));
+      clearDraft(tool, "outputDir");
       return;
     }
     const next = unquote(raw);
-    setDraft(tool, "outputDir", next);
-    if (next !== saved(tool, "outputDir")) setKey(tool, "outputDir", next);
+    clearDraft(tool, "outputDir");
+    if (next !== saved(tool, "outputDir")) {
+      setInflight((current) => ({ ...current, [`${tool}.outputDir`]: { value: next, at: Date.now() } }));
+      setKey(tool, "outputDir", next);
+    }
     clearDirError(tool);
   };
   const commitBridgePrompt = (raw: string): void => {
     const next = unquote(raw);
-    if (next !== saved("vision", "bridgePrompt")) setKey("vision", "bridgePrompt", next);
+    clearDraft("vision", "bridgePrompt");
+    if (next !== saved("vision", "bridgePrompt")) {
+      setInflight((current) => ({ ...current, "vision.bridgePrompt": { value: next, at: Date.now() } }));
+      setKey("vision", "bridgePrompt", next);
+    }
   };
 
   /** 常驻输入框：聚焦且有改动时在最右加「保存」；失焦/回车/保存同源提交。
@@ -180,23 +210,29 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   }) => {
     const target = `${section}.${key}`;
     const showSave = focusedField === target && draftOf(section, key) !== saved(section, key);
+    // 横排单行（2026-10-29 用户拍板：label 与输入框同一行，不转行）；输入框
+    // flex:1 吃满 label 右侧全部剩余宽度——与 sk- 框最大等宽。
     return h(
       "div",
       null,
       h(
         Field,
         { label: opts.label },
-        h("span", { style: { display: "flex", gap: 4, alignItems: "center" } },
+        h("span", { style: { display: "flex", gap: 4, alignItems: "center", flex: 1 } },
           h("input", {
-            style: { ...S.input, flex: "1 1 auto" },
+            style: { ...S.input, flex: 1 },
             value: draftOf(section, key),
             placeholder: opts.placeholder,
             disabled: opts.busy,
             onFocus: () => setFocusedField(target),
             onChange: (event: { target: { value: string } }) => setDraft(section, key, event.target.value),
+            // 失焦 = 放弃编辑：清草稿，输入框恢复成已保存真值——不提交，也不让
+            // 未保存的草稿留在框里冒充已保存（2026-10-29 用户点破的假象）。
+            // 落库唯一路径是「保存」按钮/回车；按钮 onMouseDown preventDefault
+            // （点按钮不让输入框失焦），所以这里的恢复不会误伤按钮通路。
             onBlur: () => {
-              setFocusedField((current) => (current === target ? null : current));
-              opts.commit(draftOf(section, key));
+              clearDraft(section, key);
+              setFocusedField(null);
             },
             onKeyDown: (event: { key: string; preventDefault?: () => void }) => {
               // 回车提交；preventDefault 防冒泡外层 form（同 key 备注的 2026-10-25 坑）。
@@ -204,15 +240,23 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
                 event.preventDefault?.();
                 opts.commit(draftOf(section, key));
                 setFocusedField(null);
+                clearDraft(section, key);
               }
             }
           }),
-          showSave
-            ? h("button", {
-                type: "button", style: S.rosterBulk, disabled: opts.busy,
-                onClick: () => opts.commit(draftOf(section, key))
-              }, tt("poolMng.saveName"))
-            : null)
+          // 按钮常驻渲染（flex:none 占位，输入框宽度稳定不跳），聚焦 + 有改动时可见。
+          h("button", {
+            type: "button",
+            // mousedown 阻止默认：输入框不失焦，blur 的恢复草稿不会抢在点击前发生。
+            onMouseDown: (event: { preventDefault?: () => void }) => event.preventDefault?.(),
+            style: { ...S.button, flex: "none", visibility: showSave ? "visible" : "hidden" },
+            disabled: opts.busy,
+            onClick: () => {
+              opts.commit(draftOf(section, key));
+              setFocusedField(null);
+              clearDraft(section, key);
+            }
+          }, tt("poolMng.saveName")))
       ),
       opts.error !== undefined ? h("p", { style: S.formError, role: "alert" }, opts.error) : null
     );

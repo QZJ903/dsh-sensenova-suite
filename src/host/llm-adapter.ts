@@ -27,8 +27,6 @@ import type { KeyOrchestrator } from "./key-orchestrator.ts";
 export interface PoolFacade {
   /** 编排层本体（选 key / 轮换 / 上报 / 全局槽）。 */
   orchestrator: KeyOrchestrator;
-  /** 每模型协议覆盖（面板"协议"列；闭包读取，保存即生效）。 */
-  protocolOverrides: () => Record<string, string>;
   /** 每模型可用思考档位（面板"思考档位"勾选；pool.json `thinking` 分区）。 */
   thinkingOverrides: () => Record<string, string[]>;
   /** 图片桥换图器（vision/bridge.ts createImageSwapper 的产物；缺省 = 不换）。 */
@@ -142,8 +140,6 @@ export function createAdapterFactory(pool: PoolFacade) {
       ...(pool.resolveImageAccess !== undefined ? { resolveImageAccess: pool.resolveImageAccess } : {}),
       // 可看图勾选集实时读：申报边界 + 请求期注记的唯一真源（见 adapter Deps）。
       ...(pool.visionModelIds !== undefined ? { visionModelIds: pool.visionModelIds } : {}),
-      // 每模型协议覆盖（面板"协议"列；每次请求读取）。
-      protocolOverrides: () => pool.protocolOverrides(),
       // 每模型可用思考档位（面板"思考档位"勾选；存 pool.json thinking 分区）。
       thinkingOverrides: () => pool.thinkingOverrides(),
     });
