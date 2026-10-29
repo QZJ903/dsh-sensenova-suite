@@ -13,6 +13,7 @@
 import { LlmError, errorChain } from '@deepseek-ai/dsh-llm';
 import type { FinishReason, StreamChunk } from '@deepseek-ai/dsh-llm';
 import { ToolCallId } from '../brand.ts';
+import { traceLog } from '../trace-log.ts';
 import { mapResponsesUsage } from './usage.ts';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -248,9 +249,12 @@ export async function* parseResponsesSse(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | undefined,
   idleTimeoutMs: number,
+  model?: string,
+  sessionId?: string,
 ): AsyncIterable<StreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  let bytes = 0;
   const state: ResponsesSseState = { open: new Map(), indexByItemId: new Map(), sawContent: false, finished: false };
   let buffer = '';
   let finished = false;
@@ -278,6 +282,7 @@ export async function* parseResponsesSse(
       disarmWatchdog();
       const { done, value } = read;
       if (done) break;
+      bytes += value.byteLength;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
@@ -310,6 +315,9 @@ export async function* parseResponsesSse(
     }
     if (!finished) {
       // 流断尾（无终止事件）：闭合已开块并按 stop 收口；全程无内容视为空响应。
+      // 收口是宽限（responses 协议不强制终止事件），但必须留痕——否则一次平台
+      // 掐流在诊断日志里与正常结束无法区分。
+      traceLog(`[dsh-sensenova-suite] responses 流断尾 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B 未见终止事件，按 stop 收口`);
       for (const chunk of closeAllOpen(state)) yield chunk;
       if (!state.sawContent) {
         throw new LlmError('llm-sensenova: SenseNova returned an empty response；SenseNova 返回了空响应，重试通常可恢复', 'EMPTY_RESPONSE');
@@ -317,14 +325,24 @@ export async function* parseResponsesSse(
       yield { type: 'finish', reason: { kind: 'stop' } };
     }
   } catch (error) {
+    // 流级失败每个落一行（trace-log 是桌面端唯一排障出口：宿主 stdout 被主进程
+    // 接管，聊天里看到的断尾/停摆/中途失败必须在诊断文件里有对应行）。
+    // 超壳 abort（用户离开、重试层换请求）是我们自己的取消，不落。
     if ((signal?.aborted && isTimeoutReason(signal.reason)) || isTimeoutReason(error)) {
+      traceLog(`[dsh-sensenova-suite] responses 流停摆/超时 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B → TIMEOUT`);
       throw new LlmError(
         `llm-sensenova: SenseNova stream stalled or timed out；SenseNova 流式响应停摆或超时（空闲/首字节超时，已释放并发额度），交宿主重试层处理`,
         'TIMEOUT',
         { cause: error },
       );
     }
-    if (signal?.aborted || error instanceof LlmError) throw error;
+    if (signal?.aborted) throw error;
+    if (error instanceof LlmError) {
+      // 空响应等自带消息的 LlmError：完整消息原样落盘。
+      traceLog(`[dsh-sensenova-suite] responses 流失败 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B: ${error.message}`);
+      throw error;
+    }
+    traceLog(`[dsh-sensenova-suite] responses 流中途失败 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B: ${errorChain(error)} → TRANSPORT`);
     throw new LlmError(`llm-sensenova: SenseNova stream failed: ${errorChain(error)}；SenseNova 流式响应中途失败`, 'TRANSPORT', { cause: error });
   } finally {
     disarmWatchdog();

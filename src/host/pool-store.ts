@@ -71,6 +71,7 @@ export interface PoolStoreRecord {
   /** 面板保存的全局并发数；null = 跟随配置。 */
   globalConcurrency: number | null;
   /** 模型 → 协议（auto | anthropic | responses | chat-completions）。 */
+  modelProtocols: Record<string, string>;
   /** 面板添加的 key 清单（秘钥本体在凭据服务；此处只存 id 与名称）。 */
   keys: PoolKeyEntry[];
   /** 多模态面板设置（仅存面板改过的键）。 */
@@ -88,7 +89,7 @@ export interface PoolStoreRecord {
 export function emptyPoolRecord(): PoolStoreRecord {
   return {
     version: POOL_STORE_VERSION,
-    disabledIds: [], deletedIds: [], globalConcurrency: null,
+    disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {},
     keys: [],
     toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}, thinking: {}
   };
@@ -104,6 +105,15 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
   const concurrency = typeof source.globalConcurrency === "number" && Number.isFinite(source.globalConcurrency)
     ? Math.max(0, Math.floor(source.globalConcurrency))
     : null;
+  const protocols: Record<string, string> = {};
+  if (typeof source.modelProtocols === "object" && source.modelProtocols !== null && !Array.isArray(source.modelProtocols)) {
+    for (const [key, value] of Object.entries(source.modelProtocols as Record<string, unknown>)) {
+      if (typeof key === "string" && key !== "" && typeof value === "string"
+        && ["auto", "anthropic", "responses", "chat-completions"].includes(value)) {
+        protocols[key] = value;
+      }
+    }
+  }
   // 多模态分区：白名单键 + 类型过滤（错型丢弃，不抛）。
   const boolOf = (value: unknown): boolean | undefined => (typeof value === "boolean" ? value : undefined);
   const strOf = (value: unknown): string | undefined => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
@@ -162,6 +172,7 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     disabledIds: ids(source.disabledIds),
     deletedIds: ids(source.deletedIds),
     globalConcurrency: concurrency,
+    modelProtocols: protocols,
     keys: keyList,
     toolsEnabled: readTools(source.toolsEnabled),
     text2img: readImage(source.text2img),
@@ -281,6 +292,14 @@ export function createFilePoolStore(options: StoreOptions = {}) {
       const record = await seen();
             await apply({ ...record, keys });
     },
+    /** 设置/清除一个模型的协议覆盖（"auto" 即清除）。 */
+    async setModelProtocol(modelId: string, protocol: string | null): Promise<void> {
+      const record = await seen();
+      const protocols = { ...record.modelProtocols };
+      if (protocol === null || protocol === "auto") delete protocols[modelId];
+      else protocols[modelId] = protocol;
+      await apply({ ...record, modelProtocols: protocols });
+    },
     async setSection(
       section: "toolsEnabled" | "text2img" | "img2img" | "vision" | "thinking",
       values: Record<string, unknown>
@@ -302,6 +321,7 @@ export function createFilePoolStore(options: StoreOptions = {}) {
         version: POOL_STORE_VERSION,
         disabledIds: record.disabledIds,
         deletedIds: record.deletedIds,
+        modelProtocols: record.modelProtocols,
         // keys 必须带上：漏掉它会让每次分区保存把 key 清单清空
         // （2026-10-24 实测：加完 key 再改一个多模态设置，key 就消失了）。
         keys: record.keys,

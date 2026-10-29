@@ -19,13 +19,20 @@ import type { Wiring } from "../types.ts";
 /** The model-roster route (docs/API.md). */
 export const MODELS_PATH = `/api/${name}/models`;
 
+/** 协议覆盖的最小存储面（pool-store 的子集；测试可替身）。 */
+interface ProtocolStore {
+  setModelProtocol(modelId: string, protocol: string | null): Promise<void>;
+}
+
 /**
  * Register the models route. Wiring subset: `settings`, `catalogStore`,
  * `providerStore`, `providerState`, `publishProvider`, and optionally
  * `poolStore`（协议覆盖的落盘处；缺省时协议保存被拒）.
  */
-export function registerModelsRoute(ctx: any, wiring: Pick<Wiring, "settings" | "catalogStore" | "providerStore" | "providerState" | "publishProvider">) {
+export function registerModelsRoute(ctx: any, wiring: Pick<Wiring, "settings" | "catalogStore" | "providerStore" | "providerState" | "publishProvider"> & { poolStore?: ProtocolStore; poolRefresh?: () => Promise<void> }) {
   const { settings, catalogStore, providerStore, providerState, publishProvider } = wiring;
+  const poolStore = wiring.poolStore;
+  const poolRefresh = wiring.poolRefresh;
 
   return ctx.webServer.register({
     kind: "exact",
@@ -54,6 +61,26 @@ export function registerModelsRoute(ctx: any, wiring: Pick<Wiring, "settings" | 
         }, { "cache-control": "no-store" });
       };
       try {
+        // 协议覆盖可单独提交；允许清单缺席被拒绝而不是读作"全量"（那会静默
+        // 把 offer 放大到整个目录）。
+        const hasProtocols = typeof body.value.modelProtocols === "object"
+          && body.value.modelProtocols !== null
+          && !Array.isArray(body.value.modelProtocols);
+        if (!Array.isArray(body.value.enabledModelIds) && !hasProtocols) {
+          writeJson(response, 400, { ok: false, error: "expected { enabledModelIds: string[] } or { modelProtocols }" },
+            { "cache-control": "no-store" });
+          return;
+        }
+        // 协议覆盖先行落盘（每模型一条；"auto"/null 即清除覆盖）。
+        if (hasProtocols && poolStore !== undefined) {
+          for (const [modelId, protocol] of Object.entries(body.value.modelProtocols as Record<string, unknown>)) {
+            if (typeof modelId !== "string" || modelId === "") continue;
+            await poolStore.setModelProtocol(modelId, typeof protocol === "string" ? protocol : null);
+          }
+        }
+        // 协议覆盖写盘后立刻刷新编排层的本地记录：快照的 modelProtocols 读的
+        // 是它，不刷新的话面板要等探测周期才看到自己的改动。
+        if (hasProtocols && typeof poolRefresh === "function") await poolRefresh();
         if (!Array.isArray(body.value.enabledModelIds)) {
           await answer();
           return;

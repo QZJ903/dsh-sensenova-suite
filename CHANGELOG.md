@@ -1,5 +1,27 @@
 # 更新日志（Changelog）
 
+## 0.1.31（2026-10-30）
+
+- **每模型协议覆盖回植（0.1.19 删除令回植，从 0.1.18 逐块移植）**：面板模型卡
+  新增「协议」列（自动/anthropic/responses/chat-completions），按模型把 wire
+  钉死或跟随全局链序；存 pool.json `modelProtocols` 分区（解析时四值白名单
+  过滤，"auto" 即清除），适配器每请求实时读取，保存即生效。决策链本体不变
+  （auto 仍 anthropic→responses→chat-completions）；anthropic 线不稳定的模型
+  组合（真机实测 kimi 空流、glm 偶发）由面板逐个拨到可用线。
+- **三线流级诊断留痕**：三个 SSE 解析器（anthropic/responses/chat-completions）
+  的流级失败每个落一行 traceLog——断尾、停摆/超时、中途失败、空响应，带
+  wire/model/已收字节数/完整原消息；responses 与 chat-completions 的宽限断尾
+  收口（无终止事件按 stop 收口）同样留痕，与正常结束可区分。聊天里看到的每条
+  流错误在诊断文件必有一一对应行；超壳 abort（用户离开、重试层换请求）不落。
+  背景：真机 0B 空 200 流（平台掐流新形状，400 降级判据接不住）此前全程无现场。
+- **诊断行带 sid 会话关联**：全部流级行与 429 行（429/恢复/换 key/换无可换/
+  wire 400）加 `sid=`——取 options.sessionId（粘性换 key 已依赖其跨宿主重试
+  稳定），同一逻辑请求的重试序列一眼可辨，跨会话并行请求不再混淆；同会话
+  先后请求靠时间戳区分。
+- duplication-gate：adapter↔sse-anthropic 同构骨架白名单 34→35（流级诊断行进
+  catch，三解析器刻意平行 +1 行）。
+- CLIENT_BUILD 行尾历史替换事故积累的分号清理为单分号。
+
 ## 0.1.30（2026-10-30）
 
 - **登录冷却按账号分钥（用户拍板）**：park 记在用户名上——B 号的密码错误不再

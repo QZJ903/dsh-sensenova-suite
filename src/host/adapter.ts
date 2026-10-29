@@ -147,6 +147,12 @@ export interface SensenovaAdapterDeps {
    */
   catalogFilter?: () => { enabledIds: string[]; unavailableIds: string[] };
   /**
+   * 每模型协议覆盖（dsh-sensenova-suite 扩展，可选）：面板"协议"列的运行期
+   * 读取——覆盖为具体协议时该模型从它起步（auto/未覆盖走决策表；运行期 400
+   * 兜底降级仍然生效）。缺省 undefined = 全部 auto。
+   */
+  protocolOverrides?: () => Record<string, string>;
+  /**
    * 每模型可用思考档位（dsh-sensenova-suite 扩展点，可选）：从 pool.json
    * `thinking` 分区读取（{ modelId → ["off","low",...] }）。在读取边界
    * （listModels/resolveModel/stream）经 withUserThinking 现算覆盖
@@ -692,12 +698,15 @@ async function* parseOpenAiSse(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | undefined,
   idleTimeoutMs: number,
+  model?: string,
+  sessionId?: string,
 ): AsyncIterable<StreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   const state = createSseState();
   let buffer = '';
   let finished = false;
+  let bytes = 0;
   // 流空闲看门狗（design D4，2026-09-04 实测：思考期渠道有空事件/心跳自然重置）：
   // 每次读到事件即重置计时；距上一事件 ≥ idleTimeoutMs 无任何 chunk/事件时以
   // TimeoutError 中断挂起的 read，走 finally 释放额度并在 catch 映射可重试 TIMEOUT。
@@ -726,6 +735,7 @@ async function* parseOpenAiSse(
       disarmWatchdog();
       const { done, value } = read;
       if (done) break;
+      bytes += value.byteLength;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
@@ -756,6 +766,9 @@ async function* parseOpenAiSse(
       }
     }
     if (!finished) {
+      // 流断尾（chat-completions 不强制终止事件）：按 stop 收口，但必须留痕——
+      // 否则一次平台掐流在诊断日志里与正常结束无法区分。
+      traceLog(`[dsh-sensenova-suite] chat-completions 流断尾 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B 未见终止事件，按 stop 收口`);
       const trailing = [...closeText(state), ...closeReasoning(state), ...closeToolCalls(state)];
       for (const chunk of trailing) yield chunk;
       if (!state.sawContent) {
@@ -767,14 +780,23 @@ async function* parseOpenAiSse(
   } catch (error) {
     // 连接超时 signal（与 fetch 共用）在流阶段触发时，reason 为 TimeoutError：
     // 同样按可重试 TIMEOUT 收口（宿主 signal abort 保持原样透传）。
+    // 流级失败每个落一行（trace-log 是桌面端唯一排障出口）；超壳 abort
+    // （用户离开、重试层换请求）是我们自己的取消，不落。
     if ((signal?.aborted && isTimeoutReason(signal.reason)) || isTimeoutReason(error)) {
+      traceLog(`[dsh-sensenova-suite] chat-completions 流停摆/超时 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B → TIMEOUT`);
       throw new LlmError(
         `llm-sensenova: SenseNova stream stalled or timed out；SenseNova 流式响应停摆或超时（空闲/首字节超时，已释放并发额度），交宿主重试层处理`,
         'TIMEOUT',
         { cause: error },
       );
     }
-    if (signal?.aborted || error instanceof LlmError) throw error;
+    if (signal?.aborted) throw error;
+    if (error instanceof LlmError) {
+      // 空响应等自带消息的 LlmError：完整消息原样落盘。
+      traceLog(`[dsh-sensenova-suite] chat-completions 流失败 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B: ${error.message}`);
+      throw error;
+    }
+    traceLog(`[dsh-sensenova-suite] chat-completions 流中途失败 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B: ${errorChain(error)} → TRANSPORT`);
     throw new LlmError(`llm-sensenova: SenseNova stream failed: ${errorChain(error)}；SenseNova 流式响应中途失败`, 'TRANSPORT', { cause: error });
   } finally {
     disarmWatchdog();
@@ -1136,6 +1158,12 @@ export class SensenovaAdapter extends LlmAdapter {
       anthropicUnsupported: this.anthropicUnsupported,
     });
     let wire: WireKind = plan.wire;
+    // 面板协议覆盖（suite 扩展）：覆盖为具体协议时作为起始 wire（决策表被
+    // 用户选择压过）；覆盖为 auto/未设置时维持决策表结果。
+    const override = this.deps.protocolOverrides?.()[options.model];
+    if (override === 'anthropic' || override === 'responses' || override === 'chat-completions') {
+      wire = override;
+    }
     // 图片桥（2026-10-27）：换图与否由「可看图」勾选集判定（vision.visionModels，
     // 换图器内部结合 bridgeMode）——勾选的模型图片原样进请求，未勾选的换成
     // 转述观察文本。换图发生在请求边界，session 与用户侧界面保持原图原文。
@@ -1265,7 +1293,7 @@ export class SensenovaAdapter extends LlmAdapter {
           response = attempt;
           // 请求成功：429001 分级探测计数归零（下次再限流从最短档 3s 重新探测）。
           if (this.tpmHitCounts.get(options.sessionId) !== undefined) {
-            traceLog(`[dsh-sensenova-suite] 429 恢复: model=${options.model} key=${maskKey(apiKey)} 连续限流结束，探测档归零`);
+            traceLog(`[dsh-sensenova-suite] 429 恢复 sid=${options.sessionId ?? "-"} model=${options.model} key=${maskKey(apiKey)} 连续限流结束，探测档归零`);
           }
           this.tpmHitCounts.delete(options.sessionId);
           this.deps.reportOutcome?.(apiKey, 'success');
@@ -1278,7 +1306,7 @@ export class SensenovaAdapter extends LlmAdapter {
         // 降级判据只认 invalid_request_error 形状，商汤自家错误形状不触发降级而
         // 直接漏到对话里；「平台拒绝的是哪个字段」只有 body 原文能回答。
         if (attempt.status === 400) {
-          traceLog(`[dsh-sensenova-suite] ${wire} wire 400 model "${options.model}" body: ${errText.slice(0, 400)}`);
+          traceLog(`[dsh-sensenova-suite] ${wire} wire 400 sid=${options.sessionId ?? "-"} model "${options.model}" body: ${errText.slice(0, 400)}`);
         }
         // §5.3 运行时不符兜底：现代协议（Anthropic / Responses）400 且
         // error.type=invalid_request_error → 记进程内 unsupported 集合 + 打日志，
@@ -1333,7 +1361,7 @@ export class SensenovaAdapter extends LlmAdapter {
         }
         // 429 诊断（2026-10-27）：限流本身此前全程静默——「为什么慢了」「key 是不是
         // 被限」无从判断。每次 429 一行：模型/key/分类/本档退避；30s 级退避下量可控。
-        traceLog(`[dsh-sensenova-suite] 429 model=${options.model} key=${maskKey(apiKey)} ` +
+        traceLog(`[dsh-sensenova-suite] 429 sid=${options.sessionId ?? "-"} model=${options.model} key=${maskKey(apiKey)} ` +
           `kind=${pool429 ? "pool" : classified.quota ? classified.kind : "rate"} ` +
           `退避=${dynamicFloorMs !== undefined ? `${Math.round(dynamicFloorMs / 1000)}s` : retryAfterMs !== undefined ? `${Math.round(retryAfterMs / 1000)}s(retry-after)` : "宿主默认"}`);
         // 配额类 429 且开关开启：轮换到下一把本请求未试过的 key（tried 集合做单次
@@ -1356,7 +1384,7 @@ export class SensenovaAdapter extends LlmAdapter {
             release = undefined;
             apiKey = next;
             rotations += 1;
-            traceLog(`[dsh-sensenova-suite] 429 换 key: model=${options.model} → 新 key（粘性已更新，已轮换 ${rotations}/${connection.accountCount}）`);
+            traceLog(`[dsh-sensenova-suite] 429 换 key sid=${options.sessionId ?? "-"} model=${options.model} → 新 key（粘性已更新，已轮换 ${rotations}/${connection.accountCount}）`);
             if (quotaRotate) {
               this.quotaStickyKeys.set(options.sessionId, next); // 粘住新 key
               this.tpmHitCounts.delete(options.sessionId); // 新 key 配额新鲜，探测档位归零
@@ -1365,7 +1393,7 @@ export class SensenovaAdapter extends LlmAdapter {
           }
         }
         if (attempt.status === 429) {
-          traceLog(`[dsh-sensenova-suite] 429 换无可换: model=${options.model} 已试 ${rotations}/${connection.accountCount} 把，交宿主重试层（预算内自动重试）`);
+          traceLog(`[dsh-sensenova-suite] 429 换无可换 sid=${options.sessionId ?? "-"} model=${options.model} 已试 ${rotations}/${connection.accountCount} 把，交宿主重试层（预算内自动重试）`);
         }
         release();
         release = undefined;
@@ -1380,10 +1408,10 @@ export class SensenovaAdapter extends LlmAdapter {
         throw new LlmError('llm-sensenova: SenseNova API returned no response body', 'PROVIDER_PROTOCOL_ERROR');
       }
       yield* wire === 'anthropic'
-        ? parseAnthropicSse(response.body, options.signal, streamIdleMs)
+        ? parseAnthropicSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId)
         : wire === 'responses'
-          ? parseResponsesSse(response.body, options.signal, streamIdleMs)
-          : parseOpenAiSse(response.body, options.signal, streamIdleMs);
+          ? parseResponsesSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId)
+          : parseOpenAiSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
     } finally {
       for (const cleanup of connectCleanups) cleanup();
       release?.();

@@ -19,6 +19,7 @@
 import { LlmError, errorChain } from '@deepseek-ai/dsh-llm';
 import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm';
 import { ToolCallId } from '../brand.ts';
+import { traceLog } from '../trace-log.ts';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -281,9 +282,12 @@ export async function* parseAnthropicSse(
   body: ReadableStream<Uint8Array>,
   signal: AbortSignal | undefined,
   idleTimeoutMs: number,
+  model?: string,
+  sessionId?: string,
 ): AsyncIterable<StreamChunk> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  let bytes = 0;
   const state: AnthropicSseState = {
     open: new Map(),
     usage: undefined,
@@ -319,6 +323,7 @@ export async function* parseAnthropicSse(
       disarmWatchdog();
       const { done, value } = read;
       if (done) break;
+      bytes += value.byteLength;
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
       buffer = lines.pop() ?? '';
@@ -361,14 +366,24 @@ export async function* parseAnthropicSse(
       };
     }
   } catch (error) {
+    // 流级失败每个落一行（trace-log 是桌面端唯一排障出口：宿主 stdout 被主进程
+    // 接管，聊天里看到的断尾/停摆/平台 error 事件必须在诊断文件里有对应行）。
+    // 超壳 abort（用户离开、重试层换请求）是我们自己的取消，不落。
     if ((signal?.aborted && isTimeoutReason(signal.reason)) || isTimeoutReason(error)) {
+      traceLog(`[dsh-sensenova-suite] anthropic 流停摆/超时 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B → TIMEOUT`);
       throw new LlmError(
         `llm-sensenova: SenseNova stream stalled or timed out；SenseNova 流式响应停摆或超时（空闲/首字节超时，已释放并发额度），交宿主重试层处理`,
         'TIMEOUT',
         { cause: error },
       );
     }
-    if (signal?.aborted || error instanceof LlmError) throw error;
+    if (signal?.aborted) throw error;
+    if (error instanceof LlmError) {
+      // 平台 error 事件 / 断尾 / 空响应都从这里过，完整消息原样落盘。
+      traceLog(`[dsh-sensenova-suite] anthropic 流失败 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B: ${error.message}`);
+      throw error;
+    }
+    traceLog(`[dsh-sensenova-suite] anthropic 流中途失败 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B: ${errorChain(error)} → TRANSPORT`);
     throw new LlmError(`llm-sensenova: SenseNova stream failed: ${errorChain(error)}；SenseNova 流式响应中途失败`, 'TRANSPORT', { cause: error });
   } finally {
     disarmWatchdog();

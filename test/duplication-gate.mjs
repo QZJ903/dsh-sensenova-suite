@@ -73,9 +73,10 @@ const WHITELIST = [
     cloneCount: 2
   },
   {
-    // 同上：anthropic 侧 SSE 解析器与 adapter 的循环骨架。
+    // 同上：anthropic 侧 SSE 解析器与 adapter 的循环骨架。2026-10-30 流级失败
+    // 诊断行（traceLog）进 catch，三解析器刻意平行，骨架 +1 行。
     files: ["adapter.ts", "wire/sse-anthropic.ts"],
-    maxLines: 34,
+    maxLines: 35,
     cloneCount: 2
   },
 

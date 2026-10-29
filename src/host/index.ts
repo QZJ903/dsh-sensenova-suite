@@ -239,7 +239,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // params 需要同步读，所以本地持一份记录：本路由的每次写后刷新 + 探测时钟兜底刷新
   // （外部进程直改状态文件的可见性延迟 ≤ 一个探测周期，可接受）。
   const poolStore = createFilePoolStore({ profile, logger: ctx.logger });
-  let poolRecord: import("./pool-store.ts").PoolStoreRecord = { version: 1, disabledIds: [], deletedIds: [], globalConcurrency: null, keys: [], toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}, thinking: {} };
+  let poolRecord: import("./pool-store.ts").PoolStoreRecord = { version: 1, disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {}, keys: [], toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}, thinking: {} };
   let reregisterImageTools: (() => Promise<void>) | undefined;
   // 发布签名引用（publisher 在下方才创建，TDZ 规避同 reregisterImageTools 模式）。
   let publishSignature: { signature: string } | undefined;
@@ -344,7 +344,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       },
       loadImage: loadImageAttachment,
     });
-    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, thinkingOverrides: () => poolRecord.thinking, visionSwapper: imageSwapper as (messages: unknown, context: { model: string }) => Promise<unknown>, resolveImageAccess, visionModelIds: () => poolRecord.vision?.visionModels ?? [] }) };
+    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, protocolOverrides: () => poolRecord.modelProtocols, thinkingOverrides: () => poolRecord.thinking, visionSwapper: imageSwapper as (messages: unknown, context: { model: string }) => Promise<unknown>, resolveImageAccess, visionModelIds: () => poolRecord.vision?.visionModels ?? [] }) };
   });
   const publisher = createProviderPublisher({
     settings,
@@ -547,6 +547,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
         keys,
         poolGrid: orchestrator.snapshot().poolGrid,
         inflight: orchestrator.snapshot().inflight,
+        modelProtocols: poolRecord.modelProtocols,
         globalConcurrency: effectiveConcurrency(),
         // 多模态面板设置（已保存值；面板以此渲染控件初值）。
         settings: {

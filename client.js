@@ -111,6 +111,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.keyField": "API Key",
 			"llm.placeholder": "粘贴 sk- 开头的 API Key",
 			"llm.save": "保存 API Key",
+			"llm.protocol": "协议",
+			"llm.protocolAuto": "自动",
 			"llm.saving": "保存中…",
 			"llm.saved": "API Key 已保存在 DSH 凭据中；下次轮询自动拉取模型目录。",
 			"llm.empty": "请输入 sk- 开头的 API Key",
@@ -276,6 +278,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.keyField": "API key",
 			"llm.placeholder": "Paste your sk- API key",
 			"llm.save": "Save API key",
+			"llm.protocol": "Protocol",
+			"llm.protocolAuto": "auto",
 			"llm.saving": "Saving…",
 			"llm.saved": "API key stored in the DSH credentials; the next poll fetches the model catalog.",
 			"llm.empty": "Enter an API key starting with sk-",
@@ -1913,9 +1917,15 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* only") earns no badge, and a figure the catalogue does not declare draws no
 	* segment - the list quotes facts, never guesses.
 	*/
-	function ModelRoster({ models, enabledIds, busy, tt, onToggle, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }) {
+	function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }) {
 		const list = Array.isArray(models) ? models : [];
 		const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
+		const PROTOCOLS = [
+			"auto",
+			"anthropic",
+			"responses",
+			"chat-completions"
+		];
 		const THINKING_CHOICES = [
 			"off",
 			"low",
@@ -2032,7 +2042,31 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 					style: S.modelCheck,
 					"aria-label": `${label} 识图`,
 					onChange: onVisionToggle ? () => onVisionToggle(id, !visionOn) : void 0
-				}), tt("llm.rosterVision")) : null)) : null
+				}), tt("llm.rosterVision")) : null), h("div", { style: {
+					borderTop: "1px solid var(--dsw-alias-border-l1)",
+					margin: "2px 0"
+				} }), onProtocolChange !== void 0 ? h("label", { style: {
+					display: "flex",
+					gap: 8,
+					alignItems: "center",
+					fontSize: 12,
+					cursor: busy ? "default" : "pointer"
+				} }, h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, tt("llm.protocol")), h("select", {
+					style: {
+						...S.input,
+						width: "auto",
+						height: 26,
+						fontSize: 12,
+						padding: "0 6px"
+					},
+					value: String(modelProtocols?.[id] ?? "auto"),
+					disabled: busy === true,
+					"aria-label": `${label} 协议`,
+					onChange: (event) => onProtocolChange(id, event.target.value)
+				}, PROTOCOLS.map((option) => h("option", {
+					key: option,
+					value: option
+				}, option === "auto" ? tt("llm.protocolAuto") : option)))) : null) : null
 			});
 		}));
 	}
@@ -2054,11 +2088,16 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		const hostIds = Array.isArray(llm?.enabledModelIds) ? llm.enabledModelIds : NO_IDS;
 		const rawVision = Array.isArray(pool?.settings?.vision?.visionModels) ? pool.settings.vision.visionModels : [];
 		const rawThinking = typeof pool?.settings?.thinking === "object" && pool.settings.thinking !== null ? pool.settings.thinking : {};
+		const rawProtocols = llm?.modelProtocols ?? {};
 		const [inflight, setInflight] = useState({});
 		const visionHost = inflight.vision?.values ?? rawVision;
 		const thinkingHost = {
 			...rawThinking,
 			...inflight.thinking?.values
+		};
+		const hostProtocols = {
+			...rawProtocols,
+			...inflight.protocols?.values
 		};
 		const [ids, setIds] = useState(() => hostIds.slice());
 		const [busy, setBusy] = useState(false);
@@ -2083,11 +2122,21 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		})();
 		const thinkingDirty = JSON.stringify(effectiveThinking) !== JSON.stringify(thinkingHost);
 		const visionDirty = JSON.stringify(effectiveVision.sort()) !== JSON.stringify([...visionHost].sort());
-		const anyDirty = dirty || thinkingDirty || visionDirty;
-		const snapKey = JSON.stringify([rawThinking, rawVision]);
+		const [draftProtocols, setDraftProtocols] = useState({});
+		const effectiveProtocols = {
+			...hostProtocols,
+			...draftProtocols
+		};
+		const protocolsDirty = JSON.stringify(effectiveProtocols) !== JSON.stringify(hostProtocols);
+		const anyDirty = dirty || protocolsDirty || thinkingDirty || visionDirty;
+		const snapKey = JSON.stringify([
+			rawThinking,
+			rawVision,
+			rawProtocols
+		]);
 		useEffect(() => {
 			setInflight((current) => {
-				if (current.thinking === void 0 && current.vision === void 0) return current;
+				if (current.thinking === void 0 && current.vision === void 0 && current.protocols === void 0) return current;
 				const now = Date.now();
 				const next = { ...current };
 				const thinkingPart = next.thinking;
@@ -2098,6 +2147,11 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				const visionPart = next.vision;
 				if (visionPart !== void 0) {
 					if (JSON.stringify([...rawVision].sort()) === JSON.stringify([...visionPart.values].sort()) || now - visionPart.at > 3e4) delete next.vision;
+				}
+				const protocolsPart = next.protocols;
+				if (protocolsPart !== void 0) {
+					const sub = Object.fromEntries(Object.entries(rawProtocols).filter(([k]) => k in protocolsPart.values));
+					if (JSON.stringify(sub) === JSON.stringify(protocolsPart.values) || now - protocolsPart.at > 3e4) delete next.protocols;
 				}
 				return next;
 			});
@@ -2118,6 +2172,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 					...thinkingHost,
 					...draftThinking
 				}).filter(([, levels]) => Array.isArray(levels) && levels.length > 0));
+				const protocolsNext = {
+					...hostProtocols,
+					...draftProtocols
+				};
 				const posts = [];
 				if (dirty) posts.push(postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids }).then(() => {
 					touchedRef.current = false;
@@ -2148,6 +2206,16 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 						}
 					}));
 				}));
+				if (protocolsDirty) posts.push(postJsonOrThrow(MODELS_PATH, { modelProtocols: protocolsNext }).then(() => {
+					setDraftProtocols({});
+					setInflight((current) => ({
+						...current,
+						protocols: {
+							values: protocolsNext,
+							at: Date.now()
+						}
+					}));
+				}));
 				await Promise.all(posts);
 				setJustSaved(true);
 				onDone?.();
@@ -2162,7 +2230,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			dirty,
 			visionDirty,
 			thinkingDirty,
+			protocolsDirty,
 			visionHost,
+			hostProtocols,
 			draftVision,
 			draftThinking,
 			thinkingHost,
@@ -2228,6 +2298,17 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			tt,
 			openThinkingId,
 			onThinkingOpen: (id) => setOpenThinkingId(id),
+			modelProtocols: {
+				...hostProtocols,
+				...draftProtocols
+			},
+			onProtocolChange: (id, protocol) => {
+				setDraftProtocols((current) => ({
+					...current,
+					[id]: protocol
+				}));
+				setNotice(null);
+			},
 			onToggle: (id) => {
 				touchedRef.current = true;
 				setIds(toggleModelIn(ids, models.map((model) => String(model?.id ?? "")), id));
@@ -2274,6 +2355,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			onClick: () => {
 				touchedRef.current = false;
 				setIds(hostIds);
+				setDraftProtocols({});
 				setDraftThinking({});
 				setDraftVision({});
 				setNotice(null);
@@ -4150,7 +4232,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-10-30T05:10";
+		const CLIENT_BUILD = "2026-10-30T07:46";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			try {

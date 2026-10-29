@@ -46,7 +46,7 @@ const NO_IDS: string[] = [];
  * only") earns no badge, and a figure the catalogue does not declare draws no
  * segment - the list quotes facts, never guesses.
  */
-export function ModelRoster({ models, enabledIds, busy, tt, onToggle, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }: {
+export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }: {
   models: ModelData[];
   enabledIds: unknown;
   busy: boolean | undefined;
@@ -54,6 +54,8 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, visionIds,
   onToggle?: (id: string) => void;
   /** 每模型协议覆盖（缺省 = auto）；面板"协议"列的数据源。 */
   /** 用户勾选的「可识图」模型 id 集合（含草稿）；缺省 = 空（不显示识图勾选）。 */
+  modelProtocols?: Record<string, string>;
+  onProtocolChange?: (id: string, protocol: string) => void;
   visionIds?: string[];
   /** 勾选/取消某模型的识图能力（写本地草稿；保存时 POST vision.visionModels）。 */
   onVisionToggle?: (id: string, on: boolean) => void;
@@ -68,7 +70,8 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, visionIds,
 }): unknown {
   const list = Array.isArray(models) ? models : [];
   const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
-  const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
+const PROTOCOLS = ["auto", "anthropic", "responses", "chat-completions"] as const;
+const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
   return h(
     "ul",
     { style: S.modelList, role: "list" },
@@ -192,9 +195,25 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, visionIds,
                     : undefined
                 }),
                 tt("llm.rosterVision"))
+              : null),
+            // 分隔线：档位行与协议行之间。
+            h("div", { style: { borderTop: "1px solid var(--dsw-alias-border-l1)", margin: "2px 0" } }),
+            // 协议并入面板：一行 label + 下拉（auto/三协议），与档位同属「保存才生效」。
+            onProtocolChange !== undefined
+              ? h("label", {
+                  style: { display: "flex", gap: 8, alignItems: "center", fontSize: 12, cursor: busy ? "default" : "pointer" },
+                },
+                h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, tt("llm.protocol")),
+                h("select", {
+                  style: { ...S.input, width: "auto", height: 26, fontSize: 12, padding: "0 6px" },
+                  value: String(modelProtocols?.[id] ?? "auto"),
+                  disabled: busy === true,
+                  "aria-label": `${label} 协议`,
+                  onChange: (event: { target: { value: string } }) => onProtocolChange(id, event.target.value)
+                }, PROTOCOLS.map((option) => h("option", { key: option, value: option },
+                  option === "auto" ? tt("llm.protocolAuto") : option))))
               : null)
-    )
-  : null
+          : null
       });
     })
   );
@@ -228,6 +247,7 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   const rawThinking = typeof pool?.settings?.thinking === "object" && pool.settings.thinking !== null
     ? (pool.settings.thinking as Record<string, string[]>)
     : {};
+  const rawProtocols = llm?.modelProtocols ?? {};
   // 保存成功的在途写入覆盖层（2026-10-27）：POST 已确认、快照未回显的窗口里，
   // 显示与**下一次保存的载荷基座**都必须看到已写入的值——否则连存两次时第二次
   // 拿旧快照打包，把第一次的写入整段冲掉（thinking 带回旧档位、vision 用旧
@@ -236,9 +256,11 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   const [inflight, setInflight] = useState<{
     thinking?: { values: Record<string, string[]>; at: number };
     vision?: { values: string[]; at: number };
+    protocols?: { values: Record<string, string>; at: number };
   }>({});
   const visionHost = inflight.vision?.values ?? rawVision;
   const thinkingHost = { ...rawThinking, ...inflight.thinking?.values };
+  const hostProtocols = { ...rawProtocols, ...inflight.protocols?.values };
   const [ids, setIds] = useState<string[]>(() => hostIds.slice());
   // 思考/看图/协议的「本地显示」永远 = 宿主快照 + 草稿，不设宿主镜像 state：
   // 快照轮询可能晚到（面板先挂载、宿主值后到），镜像 state 锁在 mount 时的旧值
@@ -285,12 +307,15 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   })();
   const thinkingDirty = JSON.stringify(effectiveThinking) !== JSON.stringify(thinkingHost);
   const visionDirty = JSON.stringify(effectiveVision.sort()) !== JSON.stringify([...visionHost].sort());
-  const anyDirty = dirty || thinkingDirty || visionDirty;
+  const [draftProtocols, setDraftProtocols] = useState<Record<string, string>>({});
+  const effectiveProtocols = { ...hostProtocols, ...draftProtocols };
+  const protocolsDirty = JSON.stringify(effectiveProtocols) !== JSON.stringify(hostProtocols);
+  const anyDirty = dirty || protocolsDirty || thinkingDirty || visionDirty;
   // 覆盖层摘除：快照追平在途写入（或 30s 兜底）即放手，显示与基座交还快照。
-  const snapKey = JSON.stringify([rawThinking, rawVision]);
+  const snapKey = JSON.stringify([rawThinking, rawVision, rawProtocols]);
   useEffect(() => {
     setInflight((current) => {
-      if (current.thinking === undefined && current.vision === undefined) return current;
+      if (current.thinking === undefined && current.vision === undefined && current.protocols === undefined) return current;
       const now = Date.now();
       const next: typeof current = { ...current };
       const thinkingPart = next.thinking;
@@ -301,6 +326,11 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
       const visionPart = next.vision;
       if (visionPart !== undefined) {
         if (JSON.stringify([...rawVision].sort()) === JSON.stringify([...visionPart.values].sort()) || now - visionPart.at > 30_000) delete next.vision;
+      }
+      const protocolsPart = next.protocols;
+      if (protocolsPart !== undefined) {
+        const sub = Object.fromEntries(Object.entries(rawProtocols).filter(([k]) => k in protocolsPart.values));
+        if (JSON.stringify(sub) === JSON.stringify(protocolsPart.values) || now - protocolsPart.at > 30_000) delete next.protocols;
       }
       return next;
     });
@@ -345,6 +375,7 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
       const thinkingNext = Object.fromEntries(
         Object.entries({ ...thinkingHost, ...draftThinking }).filter(([, levels]) => Array.isArray(levels) && levels.length > 0)
       );
+      const protocolsNext = { ...hostProtocols, ...draftProtocols };
       const posts: Promise<unknown>[] = [];
       if (dirty) {
         posts.push(postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids }).then(() => { touchedRef.current = false; }));
@@ -365,6 +396,13 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
             setInflight((current) => ({ ...current, thinking: { values: thinkingNext, at: Date.now() } }));
           }));
       }
+      if (protocolsDirty) {
+        posts.push(postJsonOrThrow(MODELS_PATH, { modelProtocols: protocolsNext })
+          .then(() => {
+            setDraftProtocols({});
+            setInflight((current) => ({ ...current, protocols: { values: protocolsNext, at: Date.now() } }));
+          }));
+      }
       await Promise.all(posts);
       setJustSaved(true);
       onDone?.();
@@ -375,7 +413,7 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
     }
     // 闭包依赖：载荷按当前草稿/宿主构造，任一组变化都得出新闭包。
     // （本仓无 eslint；panel.test F6 纪律——将来启用 lint 需补 exhaustive-deps。）
-  }, [busy, ids, dirty, visionDirty, thinkingDirty, visionHost, draftVision, draftThinking, thinkingHost, onDone, tt]);
+  }, [busy, ids, dirty, visionDirty, thinkingDirty, protocolsDirty, visionHost, hostProtocols, draftVision, draftThinking, thinkingHost, onDone, tt]);
 
   const needle = query.trim().toLowerCase();
   // `models` holds its identity between renders - it comes straight off the
@@ -468,6 +506,12 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
                 tt,
                 openThinkingId,
                 onThinkingOpen: (id: string | null) => setOpenThinkingId(id),
+                modelProtocols: { ...hostProtocols, ...draftProtocols },
+                onProtocolChange: (id: string, protocol: string) => {
+                  // 协议草稿（保存时与其它草稿一起落库）。
+                  setDraftProtocols((current) => ({ ...current, [id]: protocol }));
+                  setNotice(null);
+                },
                 // One row is toggled against the WHOLE roster, not the
                 // filtered view, so an edit survives a later change of the
                 // search box.
@@ -528,6 +572,7 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
                     // picker may follow the Host again from here on.
                     touchedRef.current = false;
                     setIds(hostIds);
+                    setDraftProtocols({});
                     setDraftThinking({});
                     setDraftVision({});
                     setNotice(null);
