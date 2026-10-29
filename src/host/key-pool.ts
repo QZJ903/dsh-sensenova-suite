@@ -35,7 +35,8 @@ export interface KeyPoolParams {
   probeBackoffFactor: number
   /** 探测间隔上限毫秒（默认 60000）。 */
   probeMaxMs: number
-  /** 池容量上限（默认 10；超出的 key 不被追踪）。 */
+  /** 池容量上限（2026-10-29 放开：999 ≈ 实际不限。上游 freeapi 默认 10，出自作者
+   * 实测 2 账号×5 把；超出的 key 仍被忽略——防呆上界保留，代码路径零漂移）。 */
   capacity: number
 }
 
@@ -45,7 +46,7 @@ export const DEFAULT_KEY_POOL_PARAMS: Readonly<KeyPoolParams> = Object.freeze({
   probeInitialMs: 15_000,
   probeBackoffFactor: 2,
   probeMaxMs: 60_000,
-  capacity: 10,
+  capacity: 999,
 })
 
 /** 池内一把 key 的运行状态。 */

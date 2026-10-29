@@ -41,6 +41,31 @@ export const RECORD_ID = "sensenova-console";
 export const THROTTLE_ID = "sensenova-console-throttle";
 
 /**
+ * 多账号清单记录（2026-10-29 方案 C；同日槽位制改清单制——「账号不限数量」用
+ * 槽位制实现会把枚举成本钉在扫描上限上，单记录数组一次读全拿）。
+ *
+ * 活动账号仍在 {@link RECORD_ID} 单槽，活动身份 = `USERNAME_REF`——下游
+ * （续期/配额/目录）零改动。`ACCOUNT_RECORD_PREFIX` 是槽位制的遗产：仅用于
+ * 一次性收编迁移（0.1.27 曾以 `<prefix><n>` 存过侧槽）。
+ */
+export const ACCOUNTS_RECORD_ID = "sensenova-console-accounts";
+/** 账号清单记录形状版本；不兼容变更时递增。 */
+export const ACCOUNTS_RECORD_VERSION = 1;
+/** 槽位制遗产：收编迁移扫描 1..N 号侧槽（0.1.27 的容量即 5）。 */
+export const LEGACY_ACCOUNT_SLOTS = 5;
+export const ACCOUNT_RECORD_PREFIX = "sensenova-console-account-";
+
+/**
+ * 账号身份/密码的凭据 ref 名（原属 account.ts；2026-10-29 多账号侧槽需要引用它们，
+ * 上移到常量块斩断 account↔accounts 的循环 import。account.ts 原地 re-export 保持
+ * 既有 import 路径不变）。密码落盘策略见 accounts.ts 头注（方案 C，用户拍板）。
+ */
+export const USERNAME_REF = "SENSENOVA_USERNAME";
+// SENSENOVA_PASSWORD 的 env 密码通道已随 2026-10-29 方案 C 退役：清单天生落盘
+// 多账号密码，env 只能装一个号，没有存在价值（用户拍板）。账号.ts 的重登密码
+// 只查清单。
+
+/**
  * The namespace this plugin used before the rename.
  *
  * Read for MIGRATION ONLY: an account and grant saved under the old name must
@@ -48,4 +73,5 @@ export const THROTTLE_ID = "sensenova-console-throttle";
  * refresh token that is still good. Nothing is ever written here again; each
  * legacy record is adopted once and deleted.
  */
-export const LEGACY_SCOPE = "dsh-llm-rate-panel";
+// LEGACY_SCOPE（dsh-llm-rate-panel 改名时代的 grant/throttle 收编迁移）已随
+// 2026-10-29「无存量用户，迁移代码是纯负债」拍板整体退役。

@@ -65,13 +65,6 @@ function check(name, pass, detail) {
 // byte-freeze. Registering a NEW entry requires a reason in the comment.
 const WHITELIST = [
   {
-    // token-store.ts's legacy facade vs token-store/state.ts — the facade
-    // re-exports the split module's context builder; scheduled to shrink as
-    // the TOKEN-STORE-SPLIT migration completes.
-    files: ["token-store.ts", "token-store/state.ts"],
-    maxLines: 14
-  },
-  {
     // wire/adapter 自带同构骨架（协议实现间结构平行、行为已实战验证）：SSE 事件
     // 循环与三段超时/建连清理在 adapter 与两个 sse-* 解析器间相同。重构 wire 内部
     // 不在维护范围——改它们等于重写已验证协议层，白名单以行数上限封住继续增殖。

@@ -12,6 +12,7 @@
  */
 
 import { CODE } from "../codes.ts";
+import { vaultPasswordFor } from "./accounts.ts";
 import { str, verbatim, pluginError } from "../util.ts";
 import type { StoreContextWiring, TokenStoreState, StoredGrant } from "./state.ts";
 
@@ -28,9 +29,10 @@ import type { StoreContextWiring, TokenStoreState, StoredGrant } from "./state.t
  */
 const credentialRef = (name: string) => name;
 
-/** Where the account lives. The password is NEVER persisted. */
-export const USERNAME_REF = "SENSENOVA_USERNAME";
-export const PASSWORD_REF = "SENSENOVA_PASSWORD";
+// 身份/密码的 ref 名上移到 constants.ts（多账号侧槽要引用，斩断循环 import）；
+// 本块自用 + 原地 re-export 保持既有 import 路径。密码落盘策略已随方案 C 反转。
+import { USERNAME_REF } from "./constants.ts";
+export { USERNAME_REF };
 
 /**
  * The account's identity: the stored username, with the environment as a
@@ -51,39 +53,28 @@ export async function readUsername(wiring: StoreContextWiring, _state: TokenStor
 }
 
 /**
- * The account to log in with: a stored (or environment) username and an
- * ENVIRONMENT password.
- *
- * The password is never persisted. `SENSENOVA_PASSWORD` in the environment
- * is its only durable source, and that is an explicit opt-in: without an env
- * password the panel simply asks again when the refresh token dies.
+ * The account to log in with: the stored (or environment) username and the
+ * vault password (multi-account list, plan C — the env password channel is
+ * retired: a single env slot cannot serve a multi-account vault).
  * @returns {Promise<{username: string, password: string, source: string}|undefined>}
  */
 export async function readAccount(wiring: StoreContextWiring, state: TokenStoreState): Promise<{ username: string; password: string; source: string } | undefined> {
-  const { backend, env } = wiring;
   const username = await readUsername(wiring, state);
-  // One-time sweep: a previous version stored the password in the
-  // credentials service. The new policy keeps no password at rest, so a
-  // legacy value is removed on first contact (the environment remains the
-  // opt-in path). Best-effort: a read-only service keeps the old value
-  // until the user re-saves, which still cannot leak it anywhere new.
-  if (!state.passwordSwept) {
-    state.passwordSwept = true;
-    await backend().unset(credentialRef(PASSWORD_REF)).catch(() => {});
-  }
-  const password = verbatim(env[PASSWORD_REF], "");
-  if (username === "" || password.trim() === "") return undefined;
-  return { username, password, source: "env" };
+  if (username === "") return undefined;
+  // 重登密码只来自账号清单（2026-10-29 方案 C；env 密码通道同日退役——清单
+  // 天生落盘多账号密码，env 单槽无存在价值）。清单没有 = 面板再要账号。
+  const password = await vaultPasswordFor(wiring, username);
+  if (password !== "") return { username, password, source: "vault" };
+  return undefined;
 }
 
 /**
  * Log in with an account and return a self-renewing grant.
  *
  * The account is taken EXPLICITLY when the caller just typed it (the panel
- * save path: the password lives in that call's closure and is never
- * written anywhere), and read back from the environment otherwise (the
- * auto-recovery path after a dead refresh token, opt-in via
- * `SENSENOVA_PASSWORD`).
+ * save path: the password lives in that call's closure and is written to
+ * the account list on success), and read back from the account list
+ * otherwise (the auto-recovery path after a dead refresh token — plan C).
  *
  * The grant read BEFORE the sign-in is named as the one this login
  * supersedes. It has to be read first: the token pair only arrives after the
@@ -126,6 +117,5 @@ export async function loginFromAccount(
 export async function forgetAccount(wiring: StoreContextWiring, state: TokenStoreState): Promise<void> {
   const { backend } = wiring;
   await backend().unset(credentialRef(USERNAME_REF));
-  await backend().unset(credentialRef(PASSWORD_REF));
   state.cached = null;
 }

@@ -12,7 +12,6 @@
 
 import { readJwtExpiry } from "../sensenova-auth.ts";
 import { verbatim, obj, num, numOrNull } from "../util.ts";
-import { LEGACY_SCOPE, RECORD_ID } from "./constants.ts";
 import type { StoredGrant, StoreContextWiring, TokenStoreState } from "./state.ts";
 
 /** Bumped if the stored payload shape ever changes incompatibly. */
@@ -50,43 +49,10 @@ export function parseGrant(record: unknown): StoredGrant | undefined {
  * @param {object} wiring - the store context wiring.
  * @param {object} state - the store context state.
  */
-export async function readStored(wiring: StoreContextWiring, state: TokenStoreState): Promise<StoredGrant | undefined> {
+export async function readStored(wiring: StoreContextWiring): Promise<StoredGrant | undefined> {
   const { backend, key } = wiring;
   try {
-    const current = parseGrant(await backend().readRecord(key));
-    if (current !== undefined) return current;
-    return await adoptLegacyGrant(wiring, state);
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Take over a grant a previous version saved under the old namespace.
- *
- * Runs once, when the record under the current name is absent. The legacy
- * record is re-written at the current address and deleted, so the next read
- * is a plain lookup; a grant that is still good must not be abandoned to the
- * "please log in again" path just because this plugin was renamed.
- * @returns {Promise<object|undefined>} the adopted grant, or undefined.
- */
-export async function adoptLegacyGrant(wiring: StoreContextWiring, _state: TokenStoreState): Promise<StoredGrant | undefined> {
-  const { backend, key, credentialKey } = wiring;
-  try {
-    const legacyKey = credentialKey(LEGACY_SCOPE, RECORD_ID);
-    const grant = parseGrant(await backend().readRecord(legacyKey));
-    if (grant === undefined) return undefined;
-    await backend().modifyRecord(key, () => Promise.resolve({
-      kind: "grant",
-      payload: {
-        version: GRANT_VERSION,
-        accessToken: grant.accessToken,
-        refreshToken: grant.refreshToken,
-        expiresAt: grant.expiresAt ?? null
-      }
-    }));
-    await backend().deleteRecord(legacyKey).catch(() => {});
-    return grant;
+    return parseGrant(await backend().readRecord(key));
   } catch {
     return undefined;
   }
@@ -110,6 +76,22 @@ export async function adoptLegacyGrant(wiring: StoreContextWiring, _state: Token
  * @returns {Promise<{accessToken: string, refreshToken: string, expiresAt: number|null}>}
  *   the grant now in effect — ours, or the newer one we deferred to.
  */
+/**
+ * The on-disk envelope of one grant record: `{ kind, payload }`——活动槽与
+ * 多账号侧槽（accounts.ts）共用同一形状，避免两处手抄漂移。
+ */
+export function grantEnvelope(grant: StoredGrant): { kind: string; payload: Record<string, unknown> } {
+  return {
+    kind: "grant",
+    payload: {
+      version: GRANT_VERSION,
+      accessToken: grant.accessToken,
+      refreshToken: grant.refreshToken,
+      expiresAt: grant.expiresAt
+    }
+  };
+}
+
 export async function storeGrant(
   wiring: StoreContextWiring,
   state: TokenStoreState,

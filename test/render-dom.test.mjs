@@ -140,13 +140,28 @@ if (registration === undefined) {
   process.exit(1);
 }
 
-// The same one-package rule `client-surface.js` enforces: anything the client
-// starts importing must fail HERE first, against the real artifact this time.
+// The same two-package rule `client-surface.js` enforces: react + the host UI
+// kit (the delete-confirm Modal's home). Anything else the client starts
+// importing must fail HERE first, against the real artifact this time. The
+// kit stand-in renders title/description/footer/children as real DOM so a
+// future DOM-level confirm-flow test can drive it.
+const modalProps = [];
+const primitivesStandin = {
+  Modal: (props) => {
+    modalProps.push(props);
+    return React.createElement(
+      "div",
+      { "data-modal-open": String(props.open === true) },
+      props.title, props.description, props.footer, props.children
+    );
+  }
+};
 const materialized = registration.factory((specifier) => {
   if (specifier === "react") return React;
+  if (specifier === "@deepseek-ai/dsh-client-ui-primitives") return primitivesStandin;
   throw new Error(
     `render-dom: the shipped bundle required "${specifier}", which this loader does not provide. ` +
-    "The shipped bundle must stay dependency-free apart from react."
+    "The shipped bundle must stay dependency-free apart from react and the host UI kit."
   );
 });
 check("the materialized artifact carries the Host half (inject/apply)",
@@ -666,6 +681,52 @@ function typeInto(input, value) {
   check('sk- 校验: sk- 开头正常放行 add',
     added !== undefined && added.body.apiKey === 'sk-abc123',
     JSON.stringify(postCalls));
+  m.unmount();
+}
+
+// ── §N. 删除确认流换宿主 Modal（2026-10-29：原生 confirm → primitives.Modal）──
+// 点行内删除 → Modal 桩收到 open=true、确认文案上屏、无 POST；取消/确认两条路
+// 由各自验证（确认发 POST {action:delete}，取消/遮罩不发）。-kit 缺席的回落
+// 路径由 pool-route 源码级钉住（clientModal()===null 走原生 confirm）。
+{
+  const postCalls = [];
+  win.fetch = (path, init) => {
+    postCalls.push({ path: String(path), body: init?.body ? JSON.parse(String(init.body)) : null });
+    return Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+  };
+  const pool = {
+    keys: [{ id: "key-2", label: "sk-cM······A9S", note: null, phase: "running", disabled: false, deleted: false }]
+  };
+  const m = mount(React.createElement(panel.components.ApiKeyForm, { pool, onDone: () => {}, tt, bare: true }));
+
+  const rowDeleteButton = () => [...m.host.querySelectorAll("button")]
+    .find((el) => el.textContent === "poolMng.delete" && !el.closest('[data-modal-open="true"]'));
+  const modalSurface = () => m.host.querySelector('[data-modal-open="true"]');
+  const inModal = (text) => [...(modalSurface()?.querySelectorAll("button") ?? [])]
+    .find((el) => el.textContent === text);
+  const click = (el) => act(() => el.dispatchEvent(new win.MouseEvent("click", { bubbles: true })));
+
+  await click(rowDeleteButton());
+  check("删除确认: 点行内删除 → Modal 打开且确认文案上屏、无 POST",
+    modalSurface() !== null
+      && modalSurface().textContent.includes("poolMng.deleteConfirm")
+      && inModal("poolMng.cancel") !== undefined && inModal("poolMng.delete") !== undefined
+      && postCalls.length === 0,
+    `modal=${modalSurface()?.textContent.slice(0, 80) ?? "none"} posts=${postCalls.length}`);
+
+  // 取消路径：无 POST、弹窗收起。
+  await click(inModal("poolMng.cancel"));
+  check("删除确认: 取消 → 弹窗收起且无 POST",
+    modalSurface() === null && postCalls.length === 0,
+    `modal=${modalSurface() !== null} posts=${postCalls.length}`);
+
+  // 确认路径：POST {action:delete, id}、弹窗收起。
+  await click(rowDeleteButton());
+  await click(inModal("poolMng.delete"));
+  const deleted = postCalls.find((c) => c.body?.action === "delete");
+  check("删除确认: 确认 → POST delete 正确 id 且弹窗收起",
+    deleted !== undefined && deleted.body.id === "key-2" && modalSurface() === null,
+    `posts=${JSON.stringify(postCalls.map((c) => c.body))}`);
   m.unmount();
 }
 

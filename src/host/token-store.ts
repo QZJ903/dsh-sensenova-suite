@@ -34,10 +34,10 @@
  *   left open overnight from spending an attempt every minute on a password
  *   nobody has corrected.
  *
- * Account login is a one-time bootstrap: put the account in the environment
- * (`SENSENOVA_USERNAME` / `SENSENOVA_PASSWORD`) and the store logs in on the
- * first use, then keeps itself alive from the refresh token alone. The
- * password is never persisted by this module.
+ * Account login happens through the panel (or, historically, an env
+ * bootstrap whose password channel is retired on 2026-10-29 — plan C stores
+ * every account's password in the multi-account vault, so a dead refresh
+ * token re-signs in from the vault without anyone typing anything).
  *
  * Structure: this file is the FACADE — `createTokenStore` builds the shared
  * context via `createStoreContext` (`./token-store/state.ts`) and delegates to
@@ -50,14 +50,15 @@
  */
 
 import { CODE } from "./codes.ts";
-import { str, obj, verbatim, pluginError } from "./util.ts";
+import { str, obj, num, verbatim, pluginError } from "./util.ts";
 import { name as RECORD_SCOPE } from "./host-config.ts";
 import { createStoreContext } from "./token-store/state.ts";
-import { RECORD_ID, THROTTLE_ID, LEGACY_SCOPE } from "./token-store/constants.ts";
+import { RECORD_ID, THROTTLE_ID } from "./token-store/constants.ts";
 import type { AuthLike, ThrottleStore, StoredGrant } from "./token-store/state.ts";
 import {
   readStored as readStoredImpl,
   storeGrant,
+  grantEnvelope,
   purgeGrant as purgeGrantImpl,
   isFresh as isFreshImpl
 } from "./token-store/grant.ts";
@@ -75,10 +76,18 @@ import {
   readAccount as readAccountImpl,
   loginFromAccount as loginFromAccountImpl,
   forgetAccount as forgetAccountImpl,
-  USERNAME_REF,
-  PASSWORD_REF
+  USERNAME_REF
 } from "./token-store/account.ts";
 import { renewWithRefresh as renewWithRefreshImpl } from "./token-store/renewal.ts";
+import {
+  listAccountViews,
+  listVaultEntries,
+  readVaultEntry,
+  writeVaultEntries,
+  removeAccountRecord,
+  upsertAccount,
+  vaultPasswordFor
+} from "./token-store/accounts.ts";
 import { acquire as acquireImpl } from "./token-store/acquire.ts";
 
 /**
@@ -130,27 +139,31 @@ export function createTokenStore(options: {
   env?: Record<string, string | undefined>;
   skewMs?: number;
   throttleStore?: ThrottleStore;
+  /** 账号清单存储（方案 C，插件状态文件自持）；缺省 = 清单功能降级为空。 */
+  accountsStore?: import("./token-store/state.ts").AccountsStore;
   now?: () => number;
   onTrace?: (hops: unknown[], error: unknown) => void;
   credentialKey: (scope: string, id: string) => string;
 }) {
   const { wiring, state } = createStoreContext(options);
-  const { env, backend, ephemeral } = wiring;
+  const { backend, ephemeral } = wiring;
   const { rejected } = state;
 
   /** One-line delegations to the extracted blocks. */
-  const readStored = () => readStoredImpl(wiring, state);
+  const readStored = () => readStoredImpl(wiring);
   const store = (accessToken: string, refreshToken: string, expiresAt: number, replacing?: string) => storeGrant(wiring, state, accessToken, refreshToken, expiresAt, replacing);
   const purgeGrant = (accessToken?: string) => purgeGrantImpl(wiring, state, accessToken);
   const isFresh = (token: StoredGrant | null | undefined, at?: number) => isFreshImpl(wiring, state, token, at);
-  const readThrottle = () => readThrottleImpl(wiring, state);
-  const clearThrottle = () => clearThrottleImpl(wiring, state);
-  const writeThrottle = (error: unknown, previousAttempt?: number) => writeThrottleImpl(wiring, state, error, previousAttempt);
+  const readThrottle = (username: string) => readThrottleImpl(wiring, username);
+  const clearThrottle = (username: string) => clearThrottleImpl(wiring, username);
+  const writeThrottle = (username: string, error: unknown) => writeThrottleImpl(wiring, username, error);
   const throttleError = (held: import("./token-store/state.ts").HeldThrottle, cause?: Error) => throttleErrorImpl(held, cause);
   const inForceWaitMs = (held: import("./token-store/state.ts").HeldThrottle | null) => inForceWaitMsImpl(wiring, held);
   const readUsername = () => readUsernameImpl(wiring, state);
   const readAccount = () => readAccountImpl(wiring, state);
   const loginFromAccount = (explicit?: { username: string; password: string }) => loginFromAccountImpl(wiring, state, explicit, readStored, store);
+  /** 多账号侧槽（2026-10-29 方案 C）：清单/落槽/切换/移除，一行委托同其余块。 */
+  const listAccounts = async () => listAccountViews(wiring, await readUsername());
   const renewWithRefresh = (stored: StoredGrant | undefined) => renewWithRefreshImpl(wiring, state, stored, store);
   const acquire = () => acquireImpl(wiring, state, {
     readThrottle, clearThrottle,
@@ -219,28 +232,29 @@ export function createTokenStore(options: {
      * @param {{username: string, password: string}} account - the credentials.
      * @returns {Promise<void>}
      */
-    async saveAccount(account: { username: string; password: string }) {
+    async saveAccount(account: { username: string; password: string }, opts?: { activate?: boolean }) {
       const username = str(account?.username, "");
       const password = verbatim(account?.password, "");
+      const activate = opts?.activate !== false;
       if (username === "" || password.trim() === "") {
         throw pluginError(CODE.MISSING_CREDENTIALS, "a username and a password are both required");
       }
-      // Persist first, then log in: if the write is rejected (a read-only
-      // environment shadows the reference) the user is told before any login
-      // attempt, instead of being left with a token that dies at restart.
-      // The password is deliberately NOT part of the write: `SENSENOVA_PASSWORD`
-      // in the environment is the only durable source (an explicit opt-in for
-      // auto-recovery after a dead refresh token), so no plaintext password
-      // ever sits in the credentials document.
-      await backend().set(credentialRef(USERNAME_REF), username);
-      // The password may differ from the one that produced the current grant.
-      state.cached = null;
+
+      if (activate) {
+        // Persist first, then log in: if the write is rejected (a read-only
+        // environment shadows the reference) the user is told before any login
+        // attempt, instead of being left with a token that dies at restart.
+        await backend().set(credentialRef(USERNAME_REF), username);
+        // The password may differ from the one that produced the current grant.
+        state.cached = null;
+      }
       rejected.clear();
       // A deliberate resubmit is the user acting on what the panel told them,
-      // so it clears the throttle — otherwise a corrected password would be
-      // refused by this store's own timer. It is the ONE path that does:
-      // every automatic route into `acquire` is still blocked.
-      await clearThrottle();
+      // so it clears THIS account's throttle — otherwise a corrected password
+      // would be refused by this store's own timer. It is the ONE path that
+      // does: every automatic route into `acquire` is still blocked, and
+      // other accounts' parks are untouched（分钥的本意）.
+      await clearThrottle(username);
       // De-dupe with any sign-in the poll loop has already started (the
       // `inflight` `getToken` set): two sign-ins at once is the lockout the
       // throttle exists to prevent, and a manual submit must not run alongside
@@ -255,6 +269,25 @@ export function createTokenStore(options: {
       // others await it — so the panel shows one "signing in…", never a stampede.
       state.saveInflight ??= (async () => {
         try {
+          if (!activate) {
+            // 添加模式（2026-10-29 方案 A 定稿）：登录一次只为**验证凭据**——
+            // 打错的密码当场红字报平台原话，坏条目不进清单。验证拿到的令牌快照
+            // 随条目落清单（之后切到它多半秒切），**活动槽/身份/内存令牌一概
+            // 不动**（密码登录开新会话，不轮换当前号的刷新令牌，会话无损）。
+            const { auth: authApi, onTrace: trace, now: clock } = wiring;
+            const result = await authApi.login({ username, password }, { onTrace: trace });
+            await upsertAccount(wiring, {
+              username,
+              password,
+              grant: {
+                accessToken: result.accessToken,
+                refreshToken: result.refreshToken,
+                expiresAt: clock() + num(result.expiresIn, 10800) * 1000
+              }
+            });
+            state.lastError = null;
+            return;
+          }
           // The typed account is handed over directly: the password lives only
           // in this closure, so the env-based `readAccount` must not be asked
           // for it here.
@@ -266,6 +299,14 @@ export function createTokenStore(options: {
           // `login_rejected` would keep the header claiming "needs login" long
           // after the account works.
           state.lastError = null;
+          // 方案 C：登录成功即把 {username, password, grant 快照} 落进侧槽——
+          // 这是「一键切换」的本体（readAccount 的 vault 回退从这里拿密码重登）。
+          // 密码落盘是用户拍板：sk- key 与活动 grant 本就明文同住凭据文档，密码同级。
+          const storedGrant = await readStored();
+          if (storedGrant === undefined) {
+            throw new Error("login succeeded but no grant could be read back; the side slot was not written");
+          }
+          await upsertAccount(wiring, { username, password, grant: storedGrant });
         } catch (error) {
           // A deliberate submit is the one path allowed to spend an attempt, but
           // a REFUSED one must still be recorded. This call's caller reads
@@ -273,7 +314,8 @@ export function createTokenStore(options: {
           // panel reports "no wait, nothing for the user to do" — so the next
           // poll walks straight into another attempt with the same bad password,
           // which is exactly what the park exists to prevent.
-          if (obj(error).code !== CODE.NOT_CONFIGURED) await writeThrottle(error);
+          // 登录模式的拒绝记在「正在登录的这个号」名下（多账号分钥）。
+          if (obj(error).code !== CODE.NOT_CONFIGURED) await writeThrottle(username, error);
           throw error;
         }
       })();
@@ -302,6 +344,76 @@ export function createTokenStore(options: {
     },
 
     /**
+     * 已存账号清单（无密码）：槽号/用户名/是否有令牌快照/是否当前。
+     * 面板账号卡的列表与切换按钮的数据源。
+     */
+    async listAccounts() {
+      return listAccounts();
+    },
+
+    /**
+     * 一键切换账号（方案 C）：当前 grant 快照回写它的槽 → 目标槽 grant 装上
+     * 活动槽 → USERNAME_REF 换人 → 内存作废 → **当场要一次令牌**。冷账号的
+     * 刷新令牌多半已死，级联（refresh 失败 → invalidate → acquire）会用槽里
+     * 的存档密码自动重登——切换的成败在这一个调用里给答案，失败原样抛出
+     * （路由带 code/retryAfterMs/trace 上屏），切换本身保持生效（可再切走）。
+     */
+    async switchAccount(id: string) {
+      // 与在途登录/续期互斥（同 getToken/saveAccount 的纪律）：等它们落定再动记录，
+      // 否则切换与轮换交叉读写同一份 grant。它们的失败与切换无关，吞掉。
+      if (state.saveInflight !== null) {
+        try { await state.saveInflight; } catch { /* proceed with the switch */ }
+      }
+      if (state.inflight !== null) {
+        try { await state.inflight; } catch { /* proceed with the switch */ }
+      }
+      const target = await readVaultEntry(wiring, str(id, "").trim());
+      if (target === undefined) {
+        throw pluginError(CODE.NOT_CONFIGURED, "no stored account with that username");
+      }
+      const currentUsername = await readUsername();
+      const currentGrant = await readStored();
+      // 旧会话回写它的清单条目（快照保命）：切失败时靠它一键切回。
+      const accounts = await listVaultEntries(wiring);
+      if (currentUsername !== "" && currentGrant !== undefined && currentUsername !== target.username) {
+        const mine = accounts.find((entry) => entry.username === currentUsername);
+        if (mine !== undefined) mine.grant = currentGrant;
+        else accounts.push({ username: currentUsername, password: "", grant: currentGrant });
+      }
+      if (target.grant !== null) {
+        // 快照路径：装上目标快照 → 身份换人 → 当场取令牌验货（快照死了会走
+        // 存档密码重登；仍失败则 park 记在目标号名下，旧会话已回写可切回）。
+        await wiring.backend().modifyRecord(wiring.key, () => grantEnvelope(target.grant as StoredGrant));
+        await wiring.backend().set(USERNAME_REF, target.username);
+        state.cached = null;
+        state.lastError = null;
+        await this.getToken();
+      } else {
+        // 无快照目标（理论不该有——添加模式已验证并落快照；防御路径）：
+        // **先登录成功才动会话**——失败时旧令牌与身份原样保留（2026-10-30
+        // 用户实测教训：先删后登会让人挂在新号的失败上，旧号被顶掉）。
+        await loginFromAccountImpl(wiring, state, { username: target.username, password: target.password }, readStored, store);
+        await wiring.backend().set(USERNAME_REF, target.username);
+        state.lastError = null;
+      }
+      await writeVaultEntries(wiring, accounts);
+    },
+
+    /**
+     * 移除一个存档账号。**移除的就是当前登录账号 = 退出登录语义**（2026-10-29
+     * 用户拍板 B）：孤儿会话不允许存在——清单条目、活动令牌记录、身份引用一并
+     * 清除，面板回到登录态；其余账号的存档不受影响。移除非当前号时活动会话不动。
+     */
+    async removeAccount(id: string) {
+      await removeAccountRecord(wiring, id);
+      const target = str(id, "").trim();
+      if (target !== "" && target === await readUsername()) {
+        await forgetAccountImpl(wiring, state); // 身份引用 + 内存令牌
+        await purgeGrant();                      // 活动令牌记录（无参 = 无条件删）
+      }
+    },
+
+    /**
      * A description of the store for the panel: whether a token is held, when
      * it expires, and the last failure. No secret is included.
      */
@@ -312,27 +424,22 @@ export function createTokenStore(options: {
       // persisted (the environment is its only durable source), so whether an
       // account is present must not depend on a password being available —
       // otherwise the panel's "clear the saved account" affordance would
-      // vanish the moment no env password exists.
+      // vanish the moment no vault password exists.
       const username = await readUsername();
-      // Read the throttle here too, so a second Host process shows the same
-      // countdown rather than inviting an attempt that would be refused.
-      const held = state.throttle ?? await readThrottle();
+      // 读当前活动账号的 park（多账号分钥）：面板显示的倒计时/需要改密码，
+      // 都是「现在在台上的这个号」的账；切号后下一次快照自动跟人。
+      const held = await readThrottle(username);
       return {
         // "configured" means the panel can get a token: either it already has
         // one, or an account is stored to obtain the next one.
         configured: stored !== undefined || account !== undefined,
+        // 已存账号清单（方案 C，无密码）：账号卡的切换列表。每次 state() 现扫
+        // 侧槽（≤5 次记录读，凭据服务本地文档，可忽略）。
+        accounts: await listAccounts(),
         hasAccount: username !== "",
-        // Whether the environment carries the auto-recovery password
-        // (`SENSENOVA_PASSWORD`). A boolean ONLY — the value never leaves the
-        // store: the panel uses this to say "a dead refresh token re-signs in
-        // automatically (or needs a manual re-login)". Absent or blank means
-        // not armed, and the next dead refresh will surface the account form.
-        // Verbatim + a trim of the instruction's own COPY: the blankness test
-        // needs it, but reading the value through `str()` first would make the
-        // store the one place that quietly rewrites a credential (util.ts
-        // `verbatim`) — and a rewritten credential fails downstream with a 401
-        // nothing points back to this line.
-        autoRecoverArmed: verbatim(env[PASSWORD_REF], "").trim() !== "",
+        // 当前活动账号在清单里是否有存档密码（2026-10-29 方案 C）：面板脚注
+        // 三岔的判据——有 = 死令牌自动重登；无 = 令牌死了面板再要账号。
+        vaultPasswordArmed: await vaultPasswordFor(wiring, username) !== "",
         hasRefreshToken: verbatim(stored?.refreshToken, "").trim() !== "",
         expiresAt: stored?.expiresAt ?? null,
         // Why the panel should ask for an account: nothing works yet.
@@ -357,9 +464,7 @@ export function createTokenStore(options: {
 export {
   RECORD_SCOPE,
   RECORD_ID,
-  LEGACY_SCOPE,
   USERNAME_REF,
-  PASSWORD_REF,
   THROTTLE_ID,
   DEFAULT_LOGIN_BACKOFF_MS,
   MAX_LOGIN_BACKOFF_MS

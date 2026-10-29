@@ -481,6 +481,47 @@ check("empty token yields null expiry", readJwtExpiry("") === null);
       let retryAfterMs;
       try { await mod.createAuth().login({ username: "u", password: "p" }); } catch (error) { retryAfterMs = error?.retryAfterMs; }
       check("a Retry-After header is read as seconds", retryAfterMs === 600_000, String(retryAfterMs));
+
+    // ── 凭据形拒绝的消息里带「条件式锁定警告」时，不得把警告当成生效窗口 ──
+    // （2026-10-30 真机：平台错密码响应原文 "The account will be locked for
+    // 15 minutes after 4 attempts" 是对未来错误的警告，被解析成 10-15 分钟
+    // 假冷却——网站能登=平台没锁，锁的是面板自己的按钮。）
+    {
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = async (url) => {
+        const target = String(url);
+        if (target.includes("jwks.json")) {
+          return new Response(JSON.stringify({ keys: [{ ...jwk, kid: "public:hydra.openid.id-token", use: "sig" }] }),
+            { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (target.includes("/oauth2/auth")) {
+          return new Response("", { status: 302, headers: { location: "https://platform.sensenova.cn/login?login_challenge=chal", "set-cookie": "oauth2_authentication_csrf=abc; Path=/" } });
+        }
+        if (target.includes("iam.sensecoreapi.cn")) {
+          return new Response(JSON.stringify({
+            code: 3, message: "InvalidArgument",
+            details: [
+              { "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "incorrectUsernameOrPassword", domain: "iam", metadata: {} },
+              { "@type": "type.googleapis.com/google.rpc.LocalizedMessage", locale: "*", message: "Wrong account or password, please check the input. The account will be locked for 15 minutes after 4 attempts" }
+            ]
+          }), { status: 400, headers: { "content-type": "application/json" } });
+        }
+        return new Response("{}", { status: 500, headers: { "content-type": "application/json" } });
+      };
+      try {
+        const mod = await import(`../src/host/sensenova-auth.ts?warn=${Date.now()}-${Math.random()}`);
+        let retryAfterMs;
+        let detail;
+        try { await mod.createAuth().login({ username: "u", password: "p" }); } catch (error) { retryAfterMs = error?.retryAfterMs; detail = error?.detail; }
+        check("条件式锁定警告不变成冷却（retryAfterMs 不出）", retryAfterMs === undefined, String(retryAfterMs));
+        check("条件式警告原文走 detail（用户看得到 4 次警告）",
+          typeof detail === "string" && detail.includes("locked for 15 minutes after 4 attempts"), String(detail).slice(0, 120));
+      } catch (error) {
+        fail("conditional lockout warning", error);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+    }
     } catch (error) {
       fail("a Retry-After header is read as seconds", error);
     } finally {

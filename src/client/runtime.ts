@@ -86,6 +86,35 @@ function reactApi(): ReactApi {
   return api;
 }
 
+/**
+ * The host UI kit seam — the ONE bundle beyond react the shipped client may
+ * require (`@deepseek-ai/dsh-client-ui-primitives`，平台 seed 表九键之一).
+ *
+ * Same `loaderRequire` discipline as react: a parameter call, so the bundler
+ * never tries to resolve the kit and the require survives the bundle
+ * untouched. The kit is first-party (the plugins page's own uninstall confirm
+ * is built on its Modal), but an OLDER Host may not register it —
+ * `provideClientPrimitives(null)` marks that case, and every consumer falls
+ * back to its own vehicle. The CONFIRMATION RULE (删除必须二次确认) never
+ * depends on the kit being present.
+ */
+export interface PrimitivesApi {
+  /** The host modal: open/onClose/title/description/footer；portal/ESC/遮罩由宿主带。 */
+  Modal: (props: Record<string, unknown>) => unknown;
+}
+
+let primitives: PrimitivesApi | null = null;
+
+/** Hand the loader-provided UI kit to the rest of the client; null = 该宿主没有。 */
+export function provideClientPrimitives(value: unknown): void {
+  primitives = (typeof value === "object" && value !== null ? (value as PrimitivesApi) : null);
+}
+
+/** The host Modal, or null when this Host's module table lacks the kit. */
+export function clientModal(): ((props: Record<string, unknown>) => unknown) | null {
+  return primitives?.Modal ?? null;
+}
+
 export const h: H = (type, props, ...children) => reactApi().createElement(type, props, ...children);
 
 export const useState: ReactApi["useState"] = (initial) => reactApi().useState(initial);

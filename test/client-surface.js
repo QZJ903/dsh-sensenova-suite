@@ -59,10 +59,12 @@ win.__ModuleLoader__ = {
 /**
  * What the factory's `require` may hand out.
  *
- * The shipped bundle requires exactly one package (`react`); anything else
- * throws loudly, so a future import added to the client fails here first —
- * a browser module table would resolve it, this one will not say yes by
- * accident.
+ * The shipped bundle requires exactly two packages: `react` and the host UI
+ * kit (`@deepseek-ai/dsh-client-ui-primitives` — the delete-confirm Modal's
+ * home; a first-party host bundle, absent from this repo by the peer-free
+ * discipline). Anything else throws loudly, so a future import added to the
+ * client fails here first — a browser module table would resolve it, this one
+ * will not say yes by accident.
  */
 const React = Object.freeze({
   createElement: h,
@@ -83,6 +85,17 @@ const React = Object.freeze({
 // `runtime.ts` and then restore this one — the seam is a plain assignment, so
 // handing it back is the whole contract.
 export const reactStandin = React;
+
+// The UI-kit stand-in: the Modal records its props and renders a plain div —
+// suites that need to assert the confirm flow read `primitivesCalls`, suites
+// that render through it get a visible surface.
+const primitivesCalls = [];
+export const primitivesStandin = Object.freeze({
+  Modal: (props) => {
+    primitivesCalls.push(props);
+    return h("div", { "data-modal-open": String(props.open === true) }, props.title, props.description, props.footer, props.children);
+  }
+});
 
 await import("../src/client/index.ts");
 
@@ -105,9 +118,10 @@ if (registration === undefined) {
  */
 const materialized = registration.factory((specifier) => {
   if (specifier === "react") return React;
+  if (specifier === "@deepseek-ai/dsh-client-ui-primitives") return primitivesStandin;
   throw new Error(
     `client-surface: the client bundle required "${specifier}", which this loader does not provide. ` +
-      "The shipped bundle must stay dependency-free apart from react."
+      "The shipped bundle must stay dependency-free apart from react and the host UI kit."
   );
 });
 export const surface = Object.freeze(/** @type {object} */ (materialized.panel ?? materialized));

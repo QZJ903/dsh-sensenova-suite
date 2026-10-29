@@ -14,14 +14,16 @@
  * plugin's own file, where a malformed value costs the plugin its throttle
  * and nothing else.
  *
+ * 冷却按账号分钥（2026-10-29 多账号）：park 记在用户名上——B 号的密码错误
+ * 不挡 A 号的重登。文件形态 v2 = `{ version: 2, parks: { "<用户名>": 冷却 } }`；
+ * v1（单记录）读作空——无存量用户，不做迁移（同一拍板）。
+ *
  * @module dsh-sensenova-suite/throttle-store
  */
-import { readFile, rename, rm } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { str, num, degrade } from "./util.ts";
 import { name } from "./host-config.ts";
-import { ensureStateDir, readStateJson, stateDir as pluginStateDir, createVersionedJsonWriter } from "./state-store.ts";
+import { readStateJson, stateDir as pluginStateDir, createVersionedJsonWriter } from "./state-store.ts";
 import type { HeldThrottle } from "./token-store/state.ts";
 
 /**
@@ -36,7 +38,7 @@ import type { HeldThrottle } from "./token-store/state.ts";
  * worst kind of duplicate — bumping one "in lockstep" with the other would
  * silently orphan every parked refusal already on disk.
  */
-const THROTTLE_FILE_VERSION = 1;
+const THROTTLE_FILE_VERSION = 2;
 
 /**
  * Every persisted shape THIS build can read: the current version plus any
@@ -44,12 +46,9 @@ const THROTTLE_FILE_VERSION = 1;
  * number here too — otherwise this build would refuse its own newest files.
  *
  * This is the ADR-006 write-side guard's whitelist, mirroring
- * `catalog-store.ts` / `provider-store.ts` / `provider-store.ts` /
- * `switch-store.ts` (78df0d1 → 3b4aea6): an on-disk version not in
- * this list was written by a NEWER build and must not be clobbered. The throttle
- * is the one store that patch missed, because the value it carries (a parked
- * wrong-password refusal) is the one the red line says must never be lost to a
- * cross-build overwrite. It carries the guard like the other five now — and
+ * `catalog-store.ts` / `provider-store.ts` / `switch-store.ts`: an on-disk
+ * version not in this list was written by a NEWER build and must not be
+ * clobbered. The throttle carries the guard like the other stores — and
  * unlike them it also REPORTS the refusal, because a throttle whose write
  * failed is silent until a second Host process walks into the lock.
  */
@@ -72,42 +71,41 @@ function throttleDir() {
   return pluginStateDir(name);
 }
 
-/**
- * The throttle file this plugin wrote before its rename.
- *
- * Read for MIGRATION ONLY: a parked refusal — a wrong password the user has
- * not yet corrected — must survive the rename, or the next Host start would
- * retry that password automatically and walk into a lock. The old file is
- * moved into place on first contact and never written again.
- * @returns {string} the legacy file path.
- */
-function legacyThrottleFile() {
-  const home = str(process.env.DSH_HOME, join(homedir(), ".dsh"));
-  return join(home, "state", "dsh-llm-rate-panel", "throttle.json");
+/** 文件载荷形状校验：v2 = `{ version: 2, parks: { "<用户名>": 冷却 } }`。 */
+function parseParks(raw: unknown, now: () => number): Map<string, HeldThrottle> {
+  const map = new Map<string, HeldThrottle>();
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return map;
+  const body = raw as { version?: unknown; parks?: unknown };
+  if (num(body.version, 0) !== THROTTLE_FILE_VERSION || body.parks === null || typeof body.parks !== "object" || Array.isArray(body.parks)) return map;
+  for (const [username, entry] of Object.entries(body.parks as Record<string, unknown>)) {
+    if (username === "" || entry === null || typeof entry !== "object") continue;
+    const held = entry as { code?: unknown; parked?: unknown; until?: unknown; attempt?: unknown };
+    const code = str(held.code, "");
+    if (code === "") continue;
+    const attempt = Math.max(1, Math.floor(num(held.attempt, 1)));
+    if (held.parked === true) {
+      map.set(username, { username, code, parked: true, until: null, attempt });
+      continue;
+    }
+    const until = num(held.until, NaN);
+    // A window that has closed is no longer a reason to refuse; the attempt
+    // count inside still feeds the next backoff doubling on rewrite.
+    if (!Number.isFinite(until) || until <= now()) continue;
+    map.set(username, { username, code, parked: false, until, attempt });
+  }
+  return map;
 }
 
-/**
- * Parse a persisted throttle, or `null` when it is absent, stale, or foreign.
- *
- * Anything unrecognised reads as "no throttle". That is the safe direction for
- * a *time* window — the worst case is one extra attempt — and the reason the
- * caller keeps parked refusals somewhere it can still see them.
- * @param {unknown} raw - the parsed file contents.
- * @param {() => number} now - clock source.
- * @returns {{code: string, parked: boolean, until: number|null, attempt: number}|null}
- */
-function parse(raw: unknown, now: () => number): HeldThrottle | null {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const body = raw as { version?: unknown; code?: unknown; parked?: unknown; until?: unknown; attempt?: unknown };
-  if (num(body.version, 0) !== THROTTLE_FILE_VERSION) return null;
-  const code = str(body.code, "");
-  if (code === "") return null;
-  const attempt = Math.max(1, Math.floor(num(body.attempt, 1)));
-  if (body.parked === true) return { code, parked: true, until: null, attempt };
-  const until = num(body.until, NaN);
-  // A window that has closed is no longer a reason to refuse.
-  if (!Number.isFinite(until) || until <= now()) return null;
-  return { code, parked: false, until, attempt };
+function parksPayload(parks: Map<string, HeldThrottle>): { version: number; parks: Record<string, Record<string, unknown>> } {
+  return {
+    version: THROTTLE_FILE_VERSION,
+    parks: Object.fromEntries([...parks].map(([user, park]) => [user, {
+      code: park.code,
+      parked: park.parked === true,
+      until: park.parked === true ? null : park.until,
+      attempt: park.attempt
+    }]))
+  };
 }
 
 /**
@@ -135,7 +133,7 @@ export interface ThrottleStoreOptions {
  * would read as "no throttle", which for a parked refusal means an automatic
  * retry of a password the user has not changed.
  * @param {ThrottleStoreOptions} [options] - wiring.
- * @returns {{read: Function, write: Function, clear: Function}} the store.
+ * @returns the store, keyed by username（多账号分钥）.
  */
 export function createFileThrottleStore(options: ThrottleStoreOptions = {}) {
   const { dir = throttleDir(), now = Date.now, logger } = options;
@@ -144,77 +142,38 @@ export function createFileThrottleStore(options: ThrottleStoreOptions = {}) {
   // (state-store.ts). A refusal is NOT silent: the guard's whole contract
   // (docs/ADR.md) is that a version this build does not know is refused, the
   // reason is recorded, and the reason reaches the caller — so `onRefuse`
-  // degrades through the same logger the other five stores use. (The store
-  // used to omit it on the grounds that it is "deliberately logger-less"; the
-  // shape test it cited pins the CALL SITE, not the absence of a signal, and
-  // a throttle is the one store whose missing write is invisible until a
-  // second Host process retries a password the user never fixed.)
-  const writeThrottle = createVersionedJsonWriter({
+  // degrades through the same logger the other five stores use.
+  const writeThrottleFile = createVersionedJsonWriter({
     file,
     versions: KNOWN_THROTTLE_VERSIONS,
     label: "throttle",
     onRefuse: (reason) => degrade(reason, null, logger, null)
   });
 
-  /**
-   * Move a throttle written before the rename into the current location.
-   *
-   * Runs once: a state already at the new address wins over one at the old. The
-   * old directory then holds nothing and is left to be swept with the Home.
-   * @returns {Promise<void>} resolves once any legacy state is in place.
-   */
-  let legacyAdopted = false;
-  async function adoptLegacyFile() {
-    if (legacyAdopted) return;
-    legacyAdopted = true;
-    try {
-      await ensureStateDir(dir);
-    } catch {
-      // A read-only Home: nothing can be moved, the current store stands.
-    }
-    try {
-      await readFile(file, "utf8");
-    } catch {
-      // The current file is absent — adopt the legacy one, if there is any.
-      try {
-        await rename(legacyThrottleFile(), file);
-      } catch {
-        // No legacy file, or the move failed: the current store stands.
-      }
-    }
-  }
-
   return {
-    async read() {
-      await adoptLegacyFile();
-      // Absent, unreadable, or not JSON reads as "no throttle" (`readStateJson`
-      // returns null): the safe direction for a time window.
-      return parse(await readStateJson(file), now);
+    /** 读某账号的冷却；过期窗口不算数（attempt 留在文件里喂下次倍增）。 */
+    async read(username: string) {
+      const parks = parseParks(await readStateJson(file), now);
+      return parks.get(username) ?? null;
     },
     /**
-     * Park a refusal on disk.
+     * Park a refusal on disk for one account.
+     *
+     * 读-合并-写：多账号各持各的 park，一次写只动自己的键。两个 Host 进程各写
+     * 各号时的丢失窗口与旧单记录形态同级（一次尝试多付一次），可接受。
      *
      * Reports whether the record REACHED the disk. A caller that keeps
      * honouring the wait in memory while the disk never learned about it is
-     * the failure this file exists to prevent: the whole point of the throttle
-     * is that a SECOND Host process on this machine must not retry the
-     * password the user has not fixed.
-     * @param {HeldThrottle} state - the throttle to park.
+     * the failure this file exists to prevent.
      * @returns {Promise<boolean>} true when the record reached the disk.
      */
-    async write(state: HeldThrottle) {
-      await adoptLegacyFile();
-      const body = {
-        version: THROTTLE_FILE_VERSION,
-        code: state.code,
-        parked: state.parked === true,
-        until: state.parked === true ? null : state.until,
-        attempt: state.attempt
-      };
+    async write(username: string, held: HeldThrottle) {
+      const parks = parseParks(await readStateJson(file), now);
+      parks.set(username, held);
       try {
         // `null` = written. A string = the ADR-006 guard refused the write and
         // returned its reason; `onRefuse` has already degraded that reason.
-        const refusal = await writeThrottle(body);
+        const refusal = await writeThrottleFile(parksPayload(parks));
         return refusal === null;
       } catch (error) {
         degrade("throttle: write failed", error, logger, null);
@@ -222,28 +181,21 @@ export function createFileThrottleStore(options: ThrottleStoreOptions = {}) {
       }
     },
     /**
-     * Drop the throttle from disk.
-     * @returns {Promise<boolean>} true when the file is gone (or never was).
+     * Drop ONE account's throttle from disk; other accounts' parks stay
+     * （分钥的本意）。An empty file is kept as-is.
+     * @returns {Promise<boolean>} true when the key is gone.
      */
-    async clear() {
-      let cleared = true;
+    async clear(username: string) {
+      const parks = parseParks(await readStateJson(file), now);
+      if (!parks.has(username)) return true;
+      parks.delete(username);
       try {
-        await rm(file, { force: true });
+        const refusal = await writeThrottleFile(parksPayload(parks));
+        return refusal === null;
       } catch (error) {
-        // `force: true` means an absent file does NOT throw, so this is a real
-        // failure: a refusal that outlives its clear parks the user forever.
         degrade("throttle: clear failed", error, logger, null);
-        cleared = false;
+        return false;
       }
-      // A legacy file that never got adopted must not resurrect the refusal it
-      // holds: a cleared throttle is cleared under both names.
-      try {
-        await rm(legacyThrottleFile(), { force: true });
-      } catch (error) {
-        degrade("throttle: clear failed (legacy)", error, logger, null);
-        cleared = false;
-      }
-      return cleared;
     }
   };
 }
@@ -256,24 +208,26 @@ export function createFileThrottleStore(options: ThrottleStoreOptions = {}) {
  * process does not walk into a lock the first is waiting out, which is a
  * claim about other processes and cannot be kept in memory.
  * @param {() => number} [now] - clock source.
- * @returns {{read: Function, write: Function, clear: Function}} the store.
+ * @returns the store, keyed by username.
  */
 export function createMemoryThrottleStore(now = Date.now) {
-  // The memory copy carries the version marker alongside the held shape; the
-  // file store writes the same pair, so `parse` can read either back.
-  let held: (HeldThrottle & { version: number }) | null = null;
+  const parks = new Map<string, HeldThrottle>();
   return {
-    async read() {
-      return parse(held, now);
+    async read(username: string) {
+      const held = parks.get(username);
+      if (held === undefined) return null;
+      // A window that has closed is no longer a reason to refuse.
+      if (held.parked !== true && held.until !== null && held.until <= now()) return null;
+      return held;
     },
-    async write(state: HeldThrottle) {
-      held = { version: THROTTLE_FILE_VERSION, ...state };
+    async write(username: string, held: HeldThrottle) {
+      parks.set(username, held);
       // Nothing can fail here, so the write reports success — the same shape
       // the file store reports for a write that landed.
       return true;
     },
-    async clear() {
-      held = null;
+    async clear(username: string) {
+      parks.delete(username);
       return true;
     }
   };

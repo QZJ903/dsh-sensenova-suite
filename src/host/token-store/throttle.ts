@@ -1,6 +1,6 @@
 /**
  * Block 4 of the token-store split: the sign-in refusal state machine.
- * Owns the throttle's read/write/clear, the local backoff doubling, the legacy
+ * Owns the throttle's read/write/clear and the local backoff doubling.
  * record adoption, and the refusal-shape error synthesis.
  *
  * No state of its own; operates on the shared context from `state.ts`.
@@ -13,9 +13,8 @@
  */
 
 import { isCredentialRefusal } from "../codes.ts";
-import { str, obj, num, numOrNull } from "../util.ts";
-import { LEGACY_SCOPE, THROTTLE_ID } from "./constants.ts";
-import type { StoreContextWiring, TokenStoreState, HeldThrottle } from "./state.ts";
+import { obj, numOrNull } from "../util.ts";
+import type { StoreContextWiring, HeldThrottle } from "./state.ts";
 
 /**
  * The first wait imposed on a refusal the platform gave no window for.
@@ -51,8 +50,6 @@ export const THROTTLE_MARKER = "signin-throttle";
  * name and the value with the file's version is exactly what made the two worth
  * separating.
  */
-const LEGACY_THROTTLE_PAYLOAD_VERSION = 1;
-
 /**
  * The refusal an in-force throttle stands for.
  *
@@ -101,61 +98,9 @@ export function localBackoffMs(attempt: number): number {
  * legitimately absent.
  * @returns {Promise<{code: string, parked: boolean, until: number|null, attempt: number}|null>}
  */
-export async function readThrottle(wiring: StoreContextWiring, state: TokenStoreState): Promise<HeldThrottle | null> {
+export async function readThrottle(wiring: StoreContextWiring, username: string): Promise<HeldThrottle | null> {
   const { throttleStore } = wiring;
-  const held = await throttleStore.read().catch(() => null);
-  if (held !== null) return held;
-  return adoptLegacyThrottle(wiring, state);
-}
-
-/**
- * Take over a throttle a previous version parked in the credentials service.
- *
- * Only ever reads. It matters because a parked refusal has no deadline: lose
- * it across a restart and the next poll retries a password the user has not
- * changed, which is how one wrong password becomes a locked account. So the
- * old record is adopted rather than dropped, then deleted so this runs once.
- * Both the current address and the pre-rename one are consulted, so a parked
- * state left under either name survives.
- * @returns {Promise<object|null>} the adopted throttle, or null.
- */
-export async function adoptLegacyThrottle(wiring: StoreContextWiring, _state: TokenStoreState): Promise<HeldThrottle | null> {
-  const { backend, THROTTLE_KEY, credentialKey, throttleStore, now } = wiring;
-  const candidates = [THROTTLE_KEY, credentialKey(LEGACY_SCOPE, THROTTLE_ID)];
-  for (const legacyKey of candidates) {
-    try {
-      // The record must be OURS: a grant, carrying the throttle marker. A
-      // record that is anything else — a console grant at this address, a
-      // hand-edited file, another plugin's data — reads as absent rather than
-      // being interpreted.
-      const record = obj(await backend().readRecord(legacyKey));
-      if (record.kind !== "grant") continue;
-      const payload = obj(record.payload);
-      if (payload.marker !== THROTTLE_MARKER) continue;
-      if (num(payload.version) !== LEGACY_THROTTLE_PAYLOAD_VERSION) continue;
-      const code = str(payload.code, "");
-      if (code === "") continue;
-      const attempt = num(payload.attempt, 1);
-      const until = numOrNull(payload.until);
-      const adopted = payload.parked === true
-        ? { code, parked: true, until: null, attempt }
-        : { code, parked: false, until, attempt };
-      // A window that has closed is no longer a reason to refuse.
-      if (adopted.parked !== true && (until === null || until <= now())) continue;
-      // The copy only moves once the new one is on disk: the legacy record is
-      // the ONLY copy of a parked refusal, and a write that never landed must
-      // not be allowed to delete it (the next start would then find nothing
-      // to adopt and retry the password the user has not fixed).
-      const persisted = await throttleStore.write(adopted).catch(() => false);
-      if (persisted !== false) {
-        await backend().deleteRecord(legacyKey).catch(() => {});
-      }
-      return adopted;
-    } catch {
-      continue;
-    }
-  }
-  return null;
+  return throttleStore.read(username).catch(() => null);
 }
 
 /**
@@ -179,52 +124,38 @@ export async function adoptLegacyThrottle(wiring: StoreContextWiring, _state: To
  *   the throttle now in force, or `null` when nothing was written because the
  *   error carried no code to park.
  */
-export async function writeThrottle(wiring: StoreContextWiring, state: TokenStoreState, error: unknown, previousAttempt?: number): Promise<HeldThrottle | null> {
+export async function writeThrottle(wiring: StoreContextWiring, username: string, error: unknown): Promise<HeldThrottle | null> {
   const { throttleStore, now } = wiring;
   const code = obj(error).code;
   if (typeof code !== "string") {
-    // No code, no parking: see the module note above. The attempt counter is
+    // No code, no parking: see the module note above. The attempt ladder is
     // left alone too — a surprise is not a refusal, and it must not reset the
     // backoff ladder a real refusal had been climbing.
-    return state.throttle;
+    return await readThrottle(wiring, username);
   }
   const parked = isCredentialRefusal(code);
   // A window the platform stated is taken at its word; only a window we
-  // invented is capped.
+  // invented is capped. The attempt ladder lives in THIS account's park
+  // （多账号分钥：B 连错两次的倍增不串到 A 的第一次失败上）。
   const stated = numOrNull(obj(error).retryAfterMs);
-  state.consecutiveRefusals = num(previousAttempt, state.consecutiveRefusals) + 1;
-  const attempt = state.consecutiveRefusals;
+  const previous = await readThrottle(wiring, username);
+  const attempt = Math.max(1, (previous?.attempt ?? 0) + 1);
   const until = parked
     ? null
     : now() + (stated === null ? localBackoffMs(attempt) : Math.max(stated, 0));
-  state.throttle = { code, parked, until, attempt };
-  // This plugin's own file, not the credentials service: a throttle is not a
-  // credential, and the only two record kinds that service admits are.
-  // The store owns the signal: it degrades a refused or failed write through
-  // the logger it was built with (ADR-006 requires the reason to be recorded,
-  // not swallowed). What is left here is only to keep the panel alive if the
-  // store itself throws — this process still honours the wait in memory.
-  await throttleStore.write(state.throttle).catch(() => false);
-  return state.throttle;
+  const held: HeldThrottle = { username, code, parked, until, attempt };
+  await throttleStore.write(username, held).catch(() => false);
+  return held;
 }
 
 /**
- * Drop the throttle, so the next sign-in is allowed to try.
+ * Drop ONE account's throttle, so the next sign-in for it is allowed to try.
+ * Other accounts' parks are untouched（分钥的本意）.
  * @returns {Promise<void>}
  */
-export async function clearThrottle(wiring: StoreContextWiring, state: TokenStoreState): Promise<void> {
-  const { throttleStore, backend, THROTTLE_KEY, credentialKey } = wiring;
-  state.throttle = null;
-  // As with the write: the store reports a failed removal through its own
-  // logger, so the swallow here is only about not breaking the panel.
-  await throttleStore.clear().catch(() => false);
-  // Discarded records from a previous version, if any are still around. They
-  // are never written again, so this is housekeeping rather than a state
-  // change. Both the current address and the pre-rename one are swept.
-  await Promise.all([
-    backend().deleteRecord(THROTTLE_KEY).catch(() => {}),
-    backend().deleteRecord(credentialKey(LEGACY_SCOPE, THROTTLE_ID)).catch(() => {})
-  ]);
+export async function clearThrottle(wiring: StoreContextWiring, username: string): Promise<void> {
+  const { throttleStore } = wiring;
+  await throttleStore.clear(username).catch(() => false);
 }
 
 /**

@@ -69,6 +69,7 @@ export const SUITES = Object.freeze([
   //    against disk; the five gate files below are exempt there, as e2e-gate
   //    has been since it stopped being a *.test.mjs) ───────────────────────
   { name: "auth.test.mjs", kind: "suite", note: "login / PKCE / JWE / throttle classification" },
+  { name: "account-vault.test.mjs", kind: "suite", note: "multi-account vault (plan C): slots, one-click switch, capacity" },
   { name: "store.test.mjs", kind: "suite", note: "token store behaviour (peer-dependent)" },
   { name: "store-baseline.test.mjs", kind: "suite", note: "frozen behaviour frames — zero drift allowed" },
   { name: "routes.test.mjs", kind: "suite", note: "the HTTP route family" },

@@ -107,7 +107,8 @@ export interface ModelData {
 export interface AuthData {
   configured?: boolean;
   hasAccount?: boolean;
-  autoRecoverArmed?: boolean;
+  /** 当前活动账号在清单里有存档密码（方案 C）：脚注「自动重登」承诺的判据。 */
+  vaultPasswordArmed?: boolean;
   hasRefreshToken?: boolean;
   /** SECONDS since the epoch — the access token's own expiry (`retryAfterMs` below is the exception that really is milliseconds). */
   expiresAt?: number | null;
@@ -116,6 +117,8 @@ export interface AuthData {
   retryAfterMs?: number | null;
   needsUserAction?: boolean;
   error?: string | null;
+  /** 多账号侧槽清单（2026-10-29 方案 C）：槽号/用户名/是否有令牌快照/是否当前。无密码。 */
+  accounts?: Array<{ id: string; username: string; hasGrant: boolean; active: boolean }>;
 }
 
 /** The `llm` block: key presence, registration state, and the roster. */

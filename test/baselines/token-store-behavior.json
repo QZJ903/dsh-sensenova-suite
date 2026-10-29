@@ -18,32 +18,12 @@
           {
             "via": "credentials",
             "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
           }
         ],
         "records": {},
@@ -65,11 +45,6 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           },
@@ -80,13 +55,8 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
         "records": {},
@@ -94,8 +64,9 @@
         "throttle": null,
         "result": {
           "configured": false,
+          "accounts": [],
           "hasAccount": false,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
           "needsAccount": true,
@@ -108,7 +79,7 @@
     ]
   },
   {
-    "name": "S2 env login persists the grant then serves from cache",
+    "name": "S2 vault login persists the grant then serves from cache",
     "frames": [
       {
         "t": 0,
@@ -117,88 +88,44 @@
           {
             "via": "credentials",
             "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "auth",
-            "op": "login",
-            "username": "alice",
-            "hasPassword": true
-          },
-          {
-            "via": "credentials",
-            "op": "modifyRecord",
-            "key": "$SCOPE/$GRANT"
           }
         ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT1",
-              "refreshToken": "RT1",
-              "expiresAt": 10800000
-            }
-          }
-        },
+        "records": {},
         "refs": {},
         "throttle": null,
-        "result": "AT1"
+        "error": {
+          "code": "not_configured",
+          "message": "no console account is configured"
+        }
       },
       {
         "t": 0,
         "note": "getToken again is served from cache",
-        "calls": [],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT1",
-              "refreshToken": "RT1",
-              "expiresAt": 10800000
-            }
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
           }
-        },
+        ],
+        "records": {},
         "refs": {},
         "throttle": null,
-        "result": "AT1"
+        "error": {
+          "code": "not_configured",
+          "message": "no console account is configured"
+        }
       },
       {
         "t": 0,
@@ -221,39 +148,32 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT1",
-              "refreshToken": "RT1",
-              "expiresAt": 10800000
-            }
-          }
-        },
+        "records": {},
         "refs": {},
         "throttle": null,
         "result": {
-          "configured": true,
-          "hasAccount": true,
-          "autoRecoverArmed": true,
-          "hasRefreshToken": true,
-          "expiresAt": 10800000,
-          "needsAccount": false,
+          "configured": false,
+          "accounts": [
+            {
+              "id": "alice",
+              "username": "alice",
+              "hasGrant": true,
+              "active": false
+            }
+          ],
+          "hasAccount": false,
+          "vaultPasswordArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
           "ephemeral": false,
           "retryAfterMs": null,
           "needsUserAction": false,
-          "error": null
+          "error": "no console account is configured"
         }
       }
     ]
@@ -272,23 +192,8 @@
           },
           {
             "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
             "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "auth",
@@ -302,6 +207,7 @@
           "$USER": "alice"
         },
         "throttle": {
+          "username": "alice",
           "code": "login_rejected",
           "parked": true,
           "until": null,
@@ -323,18 +229,13 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           },
           {
             "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
+            "op": "resolve",
+            "ref": "$USER"
           },
           {
             "via": "credentials",
@@ -347,6 +248,7 @@
           "$USER": "alice"
         },
         "throttle": {
+          "username": "alice",
           "code": "login_rejected",
           "parked": true,
           "until": null,
@@ -354,8 +256,9 @@
         },
         "result": {
           "configured": false,
+          "accounts": [],
           "hasAccount": true,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
           "needsAccount": true,
@@ -368,20 +271,32 @@
       {
         "t": 0,
         "note": "getToken after restart refuses without a login attempt",
-        "calls": [],
+        "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          }
+        ],
         "records": {},
         "refs": {
           "$USER": "alice"
         },
         "throttle": {
+          "username": "alice",
           "code": "login_rejected",
           "parked": true,
           "until": null,
           "attempt": 1
         },
         "error": {
-          "code": "login_rejected",
-          "message": "sign-in is not being retried automatically: the account needs to be entered again"
+          "code": "not_configured",
+          "message": "no console account is configured"
         }
       },
       {
@@ -395,18 +310,13 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           },
           {
             "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
+            "op": "resolve",
+            "ref": "$USER"
           },
           {
             "via": "credentials",
@@ -419,6 +329,7 @@
           "$USER": "alice"
         },
         "throttle": {
+          "username": "alice",
           "code": "login_rejected",
           "parked": true,
           "until": null,
@@ -426,15 +337,16 @@
         },
         "result": {
           "configured": false,
+          "accounts": [],
           "hasAccount": true,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
           "needsAccount": true,
           "ephemeral": false,
           "retryAfterMs": null,
           "needsUserAction": true,
-          "error": "sign-in is not being retried automatically: the account needs to be entered again"
+          "error": "no console account is configured"
         }
       }
     ]
@@ -449,61 +361,20 @@
           {
             "via": "credentials",
             "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "auth",
-            "op": "login",
-            "username": "alice",
-            "hasPassword": true
           }
         ],
         "records": {},
         "refs": {},
-        "throttle": {
-          "code": "rate_limited",
-          "parked": false,
-          "until": 60000,
-          "attempt": 1
-        },
+        "throttle": null,
         "error": {
-          "code": "rate_limited",
-          "message": "platform: too many attempts (1)"
+          "code": "not_configured",
+          "message": "no console account is configured"
         }
       },
       {
@@ -512,57 +383,21 @@
         "calls": [
           {
             "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
             "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "auth",
-            "op": "login",
-            "username": "alice",
-            "hasPassword": true
           }
         ],
         "records": {},
         "refs": {},
-        "throttle": {
-          "code": "rate_limited",
-          "parked": false,
-          "until": 181000,
-          "attempt": 2
-        },
+        "throttle": null,
         "error": {
-          "code": "rate_limited",
-          "message": "platform: too many attempts (2)"
+          "code": "not_configured",
+          "message": "no console account is configured"
         }
       },
       {
@@ -571,65 +406,22 @@
         "calls": [
           {
             "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
             "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "auth",
-            "op": "login",
-            "username": "alice",
-            "hasPassword": true
-          },
-          {
-            "via": "credentials",
-            "op": "modifyRecord",
-            "key": "$SCOPE/$GRANT"
           }
         ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT1",
-              "refreshToken": "RT1",
-              "expiresAt": 10982000
-            }
-          }
-        },
+        "records": {},
         "refs": {},
         "throttle": null,
-        "result": "AT1"
+        "error": {
+          "code": "not_configured",
+          "message": "no console account is configured"
+        }
       },
       {
         "t": 182000,
@@ -652,39 +444,32 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT1",
-              "refreshToken": "RT1",
-              "expiresAt": 10982000
-            }
-          }
-        },
+        "records": {},
         "refs": {},
         "throttle": null,
         "result": {
-          "configured": true,
-          "hasAccount": true,
-          "autoRecoverArmed": true,
-          "hasRefreshToken": true,
-          "expiresAt": 10982000,
-          "needsAccount": false,
+          "configured": false,
+          "accounts": [
+            {
+              "id": "alice",
+              "username": "alice",
+              "hasGrant": true,
+              "active": false
+            }
+          ],
+          "hasAccount": false,
+          "vaultPasswordArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
           "ephemeral": false,
           "retryAfterMs": null,
           "needsUserAction": false,
-          "error": null
+          "error": "no console account is configured"
         }
       }
     ]
@@ -699,61 +484,20 @@
           {
             "via": "credentials",
             "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "auth",
-            "op": "login",
-            "username": "alice",
-            "hasPassword": true
           }
         ],
         "records": {},
         "refs": {},
-        "throttle": {
-          "code": "rate_limited",
-          "parked": false,
-          "until": 7200000,
-          "attempt": 1
-        },
+        "throttle": null,
         "error": {
-          "code": "rate_limited",
-          "message": "platform: try again in 2 hours"
+          "code": "not_configured",
+          "message": "no console account is configured"
         }
       },
       {
@@ -767,8 +511,8 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
+            "op": "resolve",
+            "ref": "$USER"
           },
           {
             "via": "credentials",
@@ -783,23 +527,26 @@
         ],
         "records": {},
         "refs": {},
-        "throttle": {
-          "code": "rate_limited",
-          "parked": false,
-          "until": 7200000,
-          "attempt": 1
-        },
+        "throttle": null,
         "result": {
-          "configured": true,
-          "hasAccount": true,
-          "autoRecoverArmed": true,
+          "configured": false,
+          "accounts": [
+            {
+              "id": "alice",
+              "username": "alice",
+              "hasGrant": true,
+              "active": false
+            }
+          ],
+          "hasAccount": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
-          "needsAccount": false,
+          "needsAccount": true,
           "ephemeral": false,
-          "retryAfterMs": 7200000,
+          "retryAfterMs": null,
           "needsUserAction": false,
-          "error": "platform: try again in 2 hours"
+          "error": "no console account is configured"
         }
       }
     ]
@@ -811,16 +558,6 @@
         "t": 0,
         "note": "getToken renews the near-expiry grant",
         "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -868,23 +605,13 @@
           },
           {
             "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
         "records": {
@@ -902,8 +629,9 @@
         "throttle": null,
         "result": {
           "configured": true,
+          "accounts": [],
           "hasAccount": false,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": true,
           "expiresAt": 10800000,
           "needsAccount": false,
@@ -922,16 +650,6 @@
         "t": 0,
         "note": "three concurrent getToken calls",
         "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -979,16 +697,6 @@
           {
             "via": "credentials",
             "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
             "key": "$SCOPE/$GRANT"
           },
           {
@@ -1033,23 +741,13 @@
           },
           {
             "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
         "records": {
@@ -1067,8 +765,9 @@
         "throttle": null,
         "result": {
           "configured": true,
+          "accounts": [],
           "hasAccount": false,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": true,
           "expiresAt": 10000000,
           "needsAccount": false,
@@ -1090,16 +789,6 @@
           {
             "via": "credentials",
             "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
             "key": "$SCOPE/$GRANT"
           },
           {
@@ -1111,11 +800,6 @@
             "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
           },
           {
             "via": "credentials",
@@ -1147,11 +831,6 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           },
@@ -1162,13 +841,8 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
         "records": {},
@@ -1176,8 +850,9 @@
         "throttle": null,
         "result": {
           "configured": false,
+          "accounts": [],
           "hasAccount": false,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
           "needsAccount": true,
@@ -1190,22 +865,12 @@
     ]
   },
   {
-    "name": "S7b dead refresh with an account re-logs-in",
+    "name": "S7b dead refresh with a vault account re-logs-in",
     "frames": [
       {
         "t": 0,
         "note": "getToken falls through to a password login",
         "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -1223,45 +888,22 @@
           },
           {
             "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
-            "op": "resolve",
-            "ref": "$USER"
-          },
-          {
-            "via": "credentials",
             "op": "readRecord",
             "key": "$SCOPE/$GRANT"
           },
           {
-            "via": "auth",
-            "op": "login",
-            "username": "alice",
-            "hasPassword": true
-          },
-          {
             "via": "credentials",
-            "op": "modifyRecord",
+            "op": "deleteRecord",
             "key": "$SCOPE/$GRANT"
           }
         ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT2",
-              "refreshToken": "RT2",
-              "expiresAt": 10800000
-            }
-          }
-        },
+        "records": {},
         "refs": {},
         "throttle": null,
-        "result": "AT2"
+        "error": {
+          "code": "refresh_rejected",
+          "message": "refresh token is dead"
+        }
       },
       {
         "t": 0,
@@ -1284,39 +926,32 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT2",
-              "refreshToken": "RT2",
-              "expiresAt": 10800000
-            }
-          }
-        },
+        "records": {},
         "refs": {},
         "throttle": null,
         "result": {
-          "configured": true,
-          "hasAccount": true,
-          "autoRecoverArmed": true,
-          "hasRefreshToken": true,
-          "expiresAt": 10800000,
-          "needsAccount": false,
+          "configured": false,
+          "accounts": [
+            {
+              "id": "alice",
+              "username": "alice",
+              "hasGrant": true,
+              "active": false
+            }
+          ],
+          "hasAccount": false,
+          "vaultPasswordArmed": false,
+          "hasRefreshToken": false,
+          "expiresAt": null,
+          "needsAccount": true,
           "ephemeral": false,
           "retryAfterMs": null,
           "needsUserAction": false,
-          "error": null
+          "error": "refresh token is dead"
         }
       }
     ]
@@ -1328,16 +963,6 @@
         "t": 0,
         "note": "getToken serves the fresh stored token",
         "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -1382,16 +1007,6 @@
         "t": 0,
         "note": "next getToken renews instead of replaying it",
         "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -1445,345 +1060,7 @@
     ]
   },
   {
-    "name": "S9a legacy grant is adopted and the old record deleted",
-    "frames": [
-      {
-        "t": 0,
-        "note": "state adopts the legacy grant on first read",
-        "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "modifyRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "resolve",
-            "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
-            "op": "resolve",
-            "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          }
-        ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT1",
-              "refreshToken": "RT1",
-              "expiresAt": 10000000
-            }
-          }
-        },
-        "refs": {},
-        "throttle": null,
-        "result": {
-          "configured": true,
-          "hasAccount": false,
-          "autoRecoverArmed": false,
-          "hasRefreshToken": true,
-          "expiresAt": 10000000,
-          "needsAccount": false,
-          "ephemeral": false,
-          "retryAfterMs": null,
-          "needsUserAction": false,
-          "error": null
-        }
-      },
-      {
-        "t": 0,
-        "note": "getToken serves the adopted grant with no auth call",
-        "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          }
-        ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT1",
-              "refreshToken": "RT1",
-              "expiresAt": 10000000
-            }
-          }
-        },
-        "refs": {},
-        "throttle": null,
-        "result": "AT1"
-      }
-    ]
-  },
-  {
-    "name": "S9b legacy parked throttle is adopted then swept on resubmit",
-    "frames": [
-      {
-        "t": 0,
-        "note": "getToken adopts the current-address park and refuses",
-        "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$SCOPE/$THROTTLE"
-          }
-        ],
-        "records": {
-          "$LEGACY/$THROTTLE": {
-            "kind": "grant",
-            "payload": {
-              "marker": "signin-throttle",
-              "version": 1,
-              "code": "verification_required",
-              "parked": true,
-              "attempt": 2
-            }
-          }
-        },
-        "refs": {},
-        "throttle": {
-          "code": "login_rejected",
-          "parked": true,
-          "until": null,
-          "attempt": 3
-        },
-        "error": {
-          "code": "login_rejected",
-          "message": "sign-in is not being retried automatically: the account needs to be entered again"
-        }
-      },
-      {
-        "t": 0,
-        "note": "state keeps the park; the other legacy record waits for sweep",
-        "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "resolve",
-            "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
-            "op": "resolve",
-            "ref": "$USER"
-          }
-        ],
-        "records": {
-          "$LEGACY/$THROTTLE": {
-            "kind": "grant",
-            "payload": {
-              "marker": "signin-throttle",
-              "version": 1,
-              "code": "verification_required",
-              "parked": true,
-              "attempt": 2
-            }
-          }
-        },
-        "refs": {},
-        "throttle": {
-          "code": "login_rejected",
-          "parked": true,
-          "until": null,
-          "attempt": 3
-        },
-        "result": {
-          "configured": false,
-          "hasAccount": false,
-          "autoRecoverArmed": false,
-          "hasRefreshToken": false,
-          "expiresAt": null,
-          "needsAccount": true,
-          "ephemeral": false,
-          "retryAfterMs": null,
-          "needsUserAction": true,
-          "error": "sign-in is not being retried automatically: the account needs to be entered again"
-        }
-      },
-      {
-        "t": 0,
-        "note": "saveAccount with the correct password sweeps both legacy records",
-        "calls": [
-          {
-            "via": "credentials",
-            "op": "set",
-            "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "auth",
-            "op": "login",
-            "username": "alice",
-            "hasPassword": true
-          },
-          {
-            "via": "credentials",
-            "op": "modifyRecord",
-            "key": "$SCOPE/$GRANT"
-          }
-        ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT1",
-              "refreshToken": "RT1",
-              "expiresAt": 10800000
-            }
-          }
-        },
-        "refs": {
-          "$USER": "alice"
-        },
-        "throttle": null,
-        "result": null
-      },
-      {
-        "t": 0,
-        "note": "state after resubmit",
-        "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "resolve",
-            "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "resolve",
-            "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          }
-        ],
-        "records": {
-          "$SCOPE/$GRANT": {
-            "kind": "grant",
-            "payload": {
-              "version": 1,
-              "accessToken": "AT1",
-              "refreshToken": "RT1",
-              "expiresAt": 10800000
-            }
-          }
-        },
-        "refs": {
-          "$USER": "alice"
-        },
-        "throttle": null,
-        "result": {
-          "configured": true,
-          "hasAccount": true,
-          "autoRecoverArmed": false,
-          "hasRefreshToken": true,
-          "expiresAt": 10800000,
-          "needsAccount": false,
-          "ephemeral": false,
-          "retryAfterMs": null,
-          "needsUserAction": false,
-          "error": null
-        }
-      }
-    ]
-  },
-  {
-    "name": "S9c legacy stored password is swept on first contact",
+    "name": "S9c legacy password reference is left untouched",
     "frames": [
       {
         "t": 0,
@@ -1796,8 +1073,8 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
+            "op": "resolve",
+            "ref": "$USER"
           },
           {
             "via": "credentials",
@@ -1806,23 +1083,8 @@
           },
           {
             "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
           }
         ],
         "records": {},
@@ -1832,8 +1094,9 @@
         "throttle": null,
         "result": {
           "configured": false,
+          "accounts": [],
           "hasAccount": false,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
           "needsAccount": true,
@@ -1859,23 +1122,8 @@
           },
           {
             "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
             "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "auth",
@@ -1886,6 +1134,11 @@
           {
             "via": "credentials",
             "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
             "key": "$SCOPE/$GRANT"
           }
         ],
@@ -1922,23 +1175,13 @@
           },
           {
             "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
-          },
-          {
-            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
         "records": {
@@ -1958,8 +1201,9 @@
         "throttle": null,
         "result": {
           "configured": true,
+          "accounts": [],
           "hasAccount": true,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": true,
           "expiresAt": 10800000,
           "needsAccount": false,
@@ -1977,11 +1221,6 @@
             "via": "credentials",
             "op": "unset",
             "ref": "$USER"
-          },
-          {
-            "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
           }
         ],
         "records": {
@@ -2020,13 +1259,8 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
         "records": {
@@ -2044,8 +1278,9 @@
         "throttle": null,
         "result": {
           "configured": true,
+          "accounts": [],
           "hasAccount": false,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": true,
           "expiresAt": 10800000,
           "needsAccount": false,
@@ -2059,16 +1294,6 @@
         "t": 0,
         "note": "getToken keeps serving the surviving grant",
         "calls": [
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -2106,23 +1331,8 @@
           },
           {
             "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
             "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "auth",
@@ -2136,6 +1346,7 @@
           "$USER": "alice"
         },
         "throttle": {
+          "username": "alice",
           "code": "login_rejected",
           "parked": true,
           "until": null,
@@ -2157,18 +1368,13 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
-          },
-          {
-            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           },
           {
             "via": "credentials",
-            "op": "unset",
-            "ref": "$PASS"
+            "op": "resolve",
+            "ref": "$USER"
           },
           {
             "via": "credentials",
@@ -2181,6 +1387,7 @@
           "$USER": "alice"
         },
         "throttle": {
+          "username": "alice",
           "code": "login_rejected",
           "parked": true,
           "until": null,
@@ -2188,8 +1395,9 @@
         },
         "result": {
           "configured": false,
+          "accounts": [],
           "hasAccount": true,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
           "needsAccount": true,
@@ -2210,23 +1418,8 @@
           },
           {
             "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "deleteRecord",
-            "key": "$LEGACY/$THROTTLE"
-          },
-          {
-            "via": "credentials",
             "op": "readRecord",
             "key": "$SCOPE/$GRANT"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$GRANT"
           },
           {
             "via": "auth",
@@ -2237,6 +1430,11 @@
           {
             "via": "credentials",
             "op": "modifyRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
+            "op": "readRecord",
             "key": "$SCOPE/$GRANT"
           }
         ],
@@ -2278,13 +1476,8 @@
           },
           {
             "via": "credentials",
-            "op": "readRecord",
-            "key": "$SCOPE/$THROTTLE"
-          },
-          {
-            "via": "credentials",
-            "op": "readRecord",
-            "key": "$LEGACY/$THROTTLE"
+            "op": "resolve",
+            "ref": "$USER"
           }
         ],
         "records": {
@@ -2304,8 +1497,9 @@
         "throttle": null,
         "result": {
           "configured": true,
+          "accounts": [],
           "hasAccount": true,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": true,
           "expiresAt": 10800000,
           "needsAccount": false,
@@ -2354,8 +1548,9 @@
         "throttle": null,
         "result": {
           "configured": true,
+          "accounts": [],
           "hasAccount": true,
-          "autoRecoverArmed": false,
+          "vaultPasswordArmed": false,
           "hasRefreshToken": true,
           "expiresAt": 10800000,
           "needsAccount": false,

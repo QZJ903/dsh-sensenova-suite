@@ -13,13 +13,12 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 
 //#endregion
 //#region src/client/const.ts
-	var NS, PANEL_ID, SNAPSHOT_PATH, ACCOUNT_PATH, API_KEY_PATH, PROVIDER_PATH, MODELS_PATH, POOL_PATH, SENSENOVA_SIGNUP_URL;
+	var NS, PANEL_ID, SNAPSHOT_PATH, ACCOUNT_PATH, PROVIDER_PATH, MODELS_PATH, POOL_PATH, SENSENOVA_SIGNUP_URL;
 	var init_const = __esmMin((() => {
 		NS = "dsh-sensenova-suite";
 		PANEL_ID = NS;
 		SNAPSHOT_PATH = `/api/${NS}/snapshot`;
 		ACCOUNT_PATH = `/api/${NS}/account`;
-		API_KEY_PATH = `/api/${NS}/api-key`;
 		PROVIDER_PATH = `/api/${NS}/provider`;
 		MODELS_PATH = `/api/${NS}/models`;
 		POOL_PATH = `/api/${NS}/pool`;
@@ -51,7 +50,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"composer.planPrefix": "商汤",
 			"composer.poolHit": "本模型计入此池",
 			"composer.poolFallback": "本模型未列入任何池，此处按平台顺序取第一个池",
-			"auth.title": "连接商汤控制台",
+			"auth.title": "账号管理",
 			"auth.registerHint": "还没有账号？前往官网注册，免费开通 Token Plan 额度 →",
 			"auth.portalHint": "前往官网管理额度 / 获取 API Key →",
 			"auth.username": "账号",
@@ -61,12 +60,19 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"auth.placeholderUser": "登录 platform.sensenova.cn 的账号",
 			"auth.submit": "登录",
 			"auth.submitting": "登录中…",
+			"auth.addAccount": "添加账号",
+			"auth.detailWrongPasswordLock": "平台提示：账号或密码不正确；账号在错误 {attempts} 次后将锁定 {minutes} 分钟。",
+			"auth.adding": "添加中…",
+			"auth.added": "已添加账号；当前登录保持不变。",
 			"auth.working": "已保存并登录，正在读取额度…",
-			"auth.forget": "清除已保存的账号",
-			"auth.forgotten": "已清除账号（当前令牌仍可用）",
-			"auth.saved": "账号与登录令牌已保存在 DSH 凭据中；密码不落盘，refresh 令牌失效后需重新输入一次。",
+			"auth.accounts": "已存账号",
+			"auth.accountCurrent": "当前",
+			"auth.accountSwitch": "切换",
+			"auth.accountRemove": "移除",
+			"auth.cancel": "取消",
+			"auth.removeConfirm": "确定移除该账号？存档的密码与令牌将一并删除；若为当前登录账号将同时退出。",
+			"auth.saved": "账号与密码已保存在 DSH 凭据中；登录令牌失效后会自动用存档密码重登，无需重新输入。",
 			"auth.ephemeral": "注意：当前 Host 没有凭据服务，账号只保存在内存中，重启后需要重新登录。",
-			"auth.autoRecoverOn": "账号与登录令牌已保存在 DSH 凭据中；自动恢复已开启（环境已备密码 SENSENOVA_PASSWORD），令牌失效后会自动重登，无需手动输入。",
 			"auth.badCredentials": "账号或密码不正确",
 			"auth.locked": "账号已被锁定，请在商汤控制台用手机号验证或联系客服解锁。",
 			"auth.retryAfter": "平台要求等待约 {minutes} 分钟后再试；等待期间面板不会自动重试，避免再次触发锁定。",
@@ -106,10 +112,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.placeholder": "粘贴 sk- 开头的 API Key",
 			"llm.save": "保存 API Key",
 			"llm.saving": "保存中…",
-			"llm.forget": "清除已保存的 API Key",
-			"llm.forgetConfirm": "确定清除已保存的 API Key？清除后需要重新粘贴才能继续使用。",
 			"llm.saved": "API Key 已保存在 DSH 凭据中；下次轮询自动拉取模型目录。",
-			"llm.forgotten": "已清除面板保存的 API Key（环境变量 SENSENOVA_API_KEY 不受影响）。",
 			"llm.empty": "请输入 sk- 开头的 API Key",
 			"llm.footnote": "Key 只保存在 DSH 凭据中，不会写入插件目录或日志；请求时按次读取。",
 			"llm.keyRegisterHint": "还没有 API Key？前往官网免费获取 →",
@@ -139,6 +142,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterNoMatch": "没有匹配的模型。",
 			"llm.rosterVision": "可看图",
 			"llm.rosterThinking": "模型设置",
+			"llm.settingsHint": "默认配置已按各模型能力完成，无需调整。『可看图』仅限具备原生看图能力的模型勾选；若为无法看图的模型勾选，图片既无法被识别，也不会被转述。新模型上架后，如需启用再在此处补充勾选。",
 			"llm.rosterThinkingLevels": "思考档位",
 			"llm.rosterExhausted": "额度耗尽",
 			"llm.rosterRateTitle": "积分消耗伪倍率（自定义对比用，非官方）",
@@ -171,14 +175,15 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"mm.visionModel": "视觉模型",
 			"mm.bridgePrompt": "转述提示词",
 			"mm.bridgePromptPlaceholder": "留空用内置默认（事实性转录、不猜测）",
+			"mm.text2imgHint": "让对话模型按文字描述生成图片；出图以链接返回，保存目录填了才落盘（目录会自动创建）。",
+			"mm.img2imgHint": "让对话模型对图片进行编辑，第 1 张为主编辑图，至多另附 5 张参考图；出图以链接返回，保存目录填了才落盘（目录会自动创建）。",
+			"mm.visionHint": "为没有原生看图能力的模型转述图片；有原生看图能力的模型（即已勾选「可看图」）不做转述。",
 			"mm.catalogEmpty": "（目录暂无此模型）",
-			"mm.hint": "这里的设置是主要设置（存插件状态文件）；cordis.patch.yml 的同名键只在未设置时生效。改动即保存。",
 			"poolMng.concurrent": "并发",
 			"poolMng.note": "备注",
 			"poolMng.saveName": "保存",
 			"poolMng.routeMissing": "Host 未加载本插件的池路由：正在运行的是旧构建。请完全退出 DSH（含托盘图标）后重新启动。",
 			"poolMng.concurrentHint": "全局在途上限",
-			"poolMng.empty": "池为空：在 cordis.patch.yml 配置 accounts，或保存一把 Key",
 			"poolMng.phaseRunning": "运行",
 			"poolMng.phaseBlocked": "阻塞",
 			"poolMng.phaseAbsent": "未入池",
@@ -186,7 +191,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"poolMng.disable": "停用",
 			"poolMng.restore": "恢复",
 			"poolMng.delete": "删除",
-			"poolMng.deleteConfirm": "确定删除这把 key？凭据本体将一并删除，恢复需要重新粘贴。"
+			"poolMng.deleteConfirm": "确定删除这把 key？凭据本体将一并删除，恢复需要重新粘贴。",
+			"poolMng.cancel": "取消"
 		};
 		en = {
 			"panel.back": "Back to conversation",
@@ -209,7 +215,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"composer.planPrefix": "SenseNova",
 			"composer.poolHit": "this model draws from this pool",
 			"composer.poolFallback": "no pool lists this model — showing the first pool the platform returned",
-			"auth.title": "Connect the SenseNova console",
+			"auth.title": "Account management",
 			"auth.registerHint": "No account yet? Register on the official site for a free Token Plan quota →",
 			"auth.portalHint": "Manage quota / get API keys on the official site →",
 			"auth.username": "Username",
@@ -219,12 +225,19 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"auth.placeholderUser": "Your platform.sensenova.cn account",
 			"auth.submit": "Sign in",
 			"auth.submitting": "Signing in…",
+			"auth.addAccount": "Add account",
+			"auth.detailWrongPasswordLock": "Platform: wrong account or password; the account locks for {minutes} minutes after {attempts} wrong attempts.",
+			"auth.adding": "Adding…",
+			"auth.added": "Account added; the current sign-in is unchanged.",
 			"auth.working": "Saved and signed in; reading quota…",
-			"auth.forget": "Forget the saved account",
-			"auth.forgotten": "Account cleared (the current token still works)",
-			"auth.saved": "Account and login token stored in the DSH credentials; the password is never written to disk — you'll be asked to sign in again once the refresh token dies.",
+			"auth.accounts": "Saved accounts",
+			"auth.accountCurrent": "current",
+			"auth.accountSwitch": "switch",
+			"auth.accountRemove": "remove",
+			"auth.cancel": "Cancel",
+			"auth.removeConfirm": "Remove this account? Its stored password and tokens are deleted too; removing the currently signed-in account also signs you out.",
+			"auth.saved": "Account and password stored in the DSH credentials; a dead token re-signs in automatically with the stored password — no re-typing.",
 			"auth.ephemeral": "Note: this Host has no credentials service, so the account lives in memory only and must be entered again after a restart.",
-			"auth.autoRecoverOn": "Account and login token saved in DSH credentials; auto-recovery is on (an environment password SENSENOVA_PASSWORD is present), so a dead token re-signs in automatically.",
 			"auth.badCredentials": "That username or password is not right",
 			"auth.locked": "This account is locked. Verify by phone in the SenseNova console or contact support to unlock it.",
 			"auth.retryAfter": "The platform asks to wait about {minutes} more minutes. The panel will not retry on its own during that window, so the lock is not extended.",
@@ -264,10 +277,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.placeholder": "Paste your sk- API key",
 			"llm.save": "Save API key",
 			"llm.saving": "Saving…",
-			"llm.forget": "Forget the saved API key",
-			"llm.forgetConfirm": "Forget the saved API key? You will need to paste it again to continue.",
 			"llm.saved": "API key stored in the DSH credentials; the next poll fetches the model catalog.",
-			"llm.forgotten": "Panel-saved API key cleared (an SENSENOVA_API_KEY environment value is left untouched).",
 			"llm.empty": "Enter an API key starting with sk-",
 			"llm.footnote": "The key is kept only in the DSH credentials, never in this plugin's folder or logs; it is read per request.",
 			"llm.keyRegisterHint": "No API key yet? Get a free one on the official site →",
@@ -297,6 +307,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterNoMatch": "No model matches.",
 			"llm.rosterVision": "vision",
 			"llm.rosterThinking": "model settings",
+			"llm.settingsHint": "Defaults are preconfigured per model capability; no adjustment needed. \"vision\" is only for models with native vision — checking it on a model that cannot see images means the image is neither recognized nor relayed. When a new model arrives, tick it here if needed.",
 			"llm.rosterThinkingLevels": "thinking levels",
 			"llm.rosterExhausted": "quota exhausted",
 			"llm.rosterRateTitle": "Pseudo credit multiplier (custom comparison aid, not official)",
@@ -329,14 +340,15 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"mm.visionModel": "Vision model",
 			"mm.bridgePrompt": "Relay prompt",
 			"mm.bridgePromptPlaceholder": "empty = built-in default (factual, no guessing)",
+			"mm.text2imgHint": "Let chat models generate images from text. Images return as links; files land on disk only when a save directory is set (created automatically).",
+			"mm.img2imgHint": "Let chat models edit images: the first image is the main image to edit, with up to 5 more as references. Images return as links; files land on disk only when a save directory is set (created automatically).",
+			"mm.visionHint": "Relay images for models without native vision; models with native vision (checked \"vision\") are not relayed.",
 			"mm.catalogEmpty": " (no such model in the catalogue yet)",
-			"mm.hint": "Panel values here are PRIMARY (stored in the plugin state file); cordis.patch.yml defaults apply only to unset keys. Every change saves immediately.",
 			"poolMng.concurrent": "Concurrency",
 			"poolMng.note": "note",
 			"poolMng.saveName": "save",
 			"poolMng.routeMissing": "The Host is not serving this plugin's pool route: an older build is running. Fully quit DSH (including the tray icon) and start it again.",
 			"poolMng.concurrentHint": "global in-flight cap",
-			"poolMng.empty": "Pool is empty: configure accounts in cordis.patch.yml or save a key",
 			"poolMng.phaseRunning": "running",
 			"poolMng.phaseBlocked": "blocked",
 			"poolMng.phaseAbsent": "out of pool",
@@ -344,7 +356,8 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"poolMng.disable": "disable",
 			"poolMng.restore": "restore",
 			"poolMng.delete": "delete",
-			"poolMng.deleteConfirm": "Delete this key? Its credential is removed too; paste it again to restore."
+			"poolMng.deleteConfirm": "Delete this key? Its credential is removed too; paste it again to restore.",
+			"poolMng.cancel": "Cancel"
 		};
 	}));
 
@@ -530,9 +543,18 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		if (api === null) throw new Error("client: react used before clientFactory ran");
 		return api;
 	}
-	var api, h, useState, useEffect, useCallback, useMemo, useRef;
+	/** Hand the loader-provided UI kit to the rest of the client; null = 该宿主没有。 */
+	function provideClientPrimitives(value) {
+		primitives = typeof value === "object" && value !== null ? value : null;
+	}
+	/** The host Modal, or null when this Host's module table lacks the kit. */
+	function clientModal() {
+		return primitives?.Modal ?? null;
+	}
+	var api, primitives, h, useState, useEffect, useCallback, useMemo, useRef;
 	var init_runtime = __esmMin((() => {
 		api = null;
+		primitives = null;
 		h = (type, props, ...children) => reactApi().createElement(type, props, ...children);
 		useState = (initial) => reactApi().useState(initial);
 		useEffect = (effect, deps) => reactApi().useEffect(effect, deps);
@@ -596,6 +618,20 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		return `HTTP ${status}`;
 	}
 	/**
+	* Translate one platform failure detail into the panel's language, or return
+	* it verbatim when no known pattern matches（未知消息原文兜底——宁可英文也不编造）.
+	*/
+	function platformDetail(detail, tt) {
+		for (const { re, key } of PLATFORM_DETAIL_PATTERNS) {
+			const match = detail.match(re);
+			if (match !== null) return format(tt(key), {
+				minutes: match[1],
+				attempts: match[2]
+			});
+		}
+		return detail;
+	}
+	/**
 	* The panel's decision: what this snapshot means for what to show.
 	*
 	* Deliberately a module-scope pure function in `(data, error, tt)`.
@@ -622,7 +658,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			shapeWarnings: Array.isArray(data?.shapeWarnings) ? data.shapeWarnings : []
 		};
 	}
-	var GUIDANCE_BY_CODE, FORM_EXCLUDED_CODES, REFUSAL_TEXT;
+	var GUIDANCE_BY_CODE, FORM_EXCLUDED_CODES, PLATFORM_DETAIL_PATTERNS, REFUSAL_TEXT;
 	var init_snapshot = __esmMin((() => {
 		init_format();
 		GUIDANCE_BY_CODE = Object.freeze({
@@ -633,6 +669,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			console_error: "panel.consoleTransient"
 		});
 		FORM_EXCLUDED_CODES = Object.freeze(/* @__PURE__ */ new Set(["config_error", "console_error"]));
+		PLATFORM_DETAIL_PATTERNS = Object.freeze([{
+			re: /Wrong account or password[,.]?\s*(?:please check the input\.)?\s*The account will be locked for (\d+) minutes? after (\d+) attempts?/i,
+			key: "auth.detailWrongPasswordLock"
+		}]);
 		REFUSAL_TEXT = Object.freeze({
 			login_rejected: "auth.badCredentials",
 			account_locked: "auth.locked",
@@ -1275,9 +1315,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		const [formError, setFormError] = useState(null);
 		const [formDetail, setFormDetail] = useState(null);
 		const [saved, setSaved] = useState(false);
-		const [forgotten, setForgotten] = useState(false);
+		const [added, setAdded] = useState(false);
 		const outcomeAt = useRef(0);
 		const [cooldownUntil, setCooldownUntil] = useState(0);
+		const [cooldownUser, setCooldownUser] = useState("");
 		const [now, setNow] = useState(() => Date.now());
 		useEffect(() => {
 			if (cooldownUntil <= Date.now()) return void 0;
@@ -1290,13 +1331,50 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		useEffect(() => {
 			if (typeof snapshotAt === "number" && snapshotAt > outcomeAt.current) {
 				setSaved(false);
-				setForgotten(false);
+				setAdded(false);
 			}
 		}, [snapshotAt]);
-		const cooling = now < cooldownUntil;
+		const accounts = Array.isArray(auth?.accounts) ? auth.accounts : [];
+		const hasAccounts = accounts.length > 0;
+		const [accountBusy, setAccountBusy] = useState(null);
+		const accountAction = useCallback(async (payload, id) => {
+			setAccountBusy(id);
+			setFormError(null);
+			setFormDetail(null);
+			try {
+				const body = await postJson(ACCOUNT_PATH, payload);
+				if (body?.ok !== true) {
+					setFormError(typeof body?.error === "string" ? body.error : tt("auth.network"));
+					return;
+				}
+				onDone?.();
+			} catch (caught) {
+				setFormError(caught instanceof Error && caught.message !== "" ? caught.message : tt("auth.network"));
+			} finally {
+				setAccountBusy(null);
+			}
+		}, [onDone, tt]);
+		const switchAccount = useCallback((id) => accountAction({
+			action: "switch",
+			id
+		}, id), [accountAction]);
+		const removeAccount = useCallback((id) => accountAction({
+			action: "remove",
+			id
+		}, id), [accountAction]);
+		const [pendingRemove, setPendingRemove] = useState(null);
+		const requestRemove = useCallback((id) => {
+			if (clientModal() === null) {
+				if (globalThis.confirm(tt("auth.removeConfirm"))) removeAccount(id);
+				return;
+			}
+			setPendingRemove(id);
+		}, [removeAccount, tt]);
+		const cooling = now < cooldownUntil && username.trim() === cooldownUser;
 		const coolingMinutes = Math.max(1, Math.ceil((cooldownUntil - now) / 6e4));
-		const setCooldown = useCallback((ms) => {
+		const setCooldown = useCallback((ms, username) => {
 			setCooldownUntil(Date.now() + ms);
+			setCooldownUser(username);
 			setNow(Date.now());
 		}, []);
 		const submit = useCallback(async (event) => {
@@ -1312,12 +1390,14 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			try {
 				const body = await postJson(ACCOUNT_PATH, {
 					username: username.trim(),
-					password
+					password,
+					mode: hasAccounts ? "add" : "login"
 				});
 				if (body && body.ok === true) {
+					setUsername("");
 					setPassword("");
 					setSaved(true);
-					setForgotten(false);
+					setAdded(hasAccounts === true);
 					outcomeAt.current = Date.now();
 					onDone?.();
 					return;
@@ -1325,7 +1405,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				const code = body?.code;
 				const waitMs = typeof body?.retryAfterMs === "number" ? body.retryAfterMs : null;
 				if (waitMs !== null && waitMs > 0) {
-					setCooldown(waitMs);
+					setCooldown(waitMs, username.trim());
 					setFormError(tt(REFUSAL_TEXT[typeof code === "string" ? code : ""] ?? "auth.rateLimited"));
 					return;
 				}
@@ -1347,30 +1427,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			onDone,
 			tt,
 			cooling,
+			cooldownUser,
 			setCooldown
 		]);
-		const forget = useCallback(async () => {
-			setBusy(true);
-			setFormError(null);
-			setFormDetail(null);
-			try {
-				const body = await postJson(ACCOUNT_PATH, { forget: true });
-				if (body?.ok !== true) {
-					setFormError(body?.error ?? tt("auth.network"));
-					return;
-				}
-				setForgotten(true);
-				setSaved(false);
-				setUsername("");
-				setPassword("");
-				outcomeAt.current = Date.now();
-				onDone?.();
-			} catch {
-				setFormError(tt("auth.network"));
-			} finally {
-				setBusy(false);
-			}
-		}, [onDone, tt]);
 		return h("div", { style: bare ? {} : {
 			...S.card,
 			maxWidth: 420
@@ -1420,30 +1479,70 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				...busy || cooling ? S.primaryBusy : {}
 			},
 			disabled: busy || cooling
-		}, busy ? tt("auth.submitting") : tt("auth.submit")), auth?.hasAccount ? h("button", {
-			type: "button",
-			style: S.button,
-			disabled: busy,
-			onClick: forget
-		}, tt("auth.forget")) : null), forgotten ? h("p", {
+		}, busy ? hasAccounts ? tt("auth.adding") : tt("auth.submitting") : hasAccounts ? tt("auth.addAccount") : tt("auth.submit"))), saved ? h("p", {
 			style: {
 				...S.formNote,
 				color: "var(--dsw-alias-state-success-primary)"
 			},
 			role: "status"
-		}, tt("auth.forgotten")) : saved ? h("p", {
-			style: {
-				...S.formNote,
-				color: "var(--dsw-alias-state-success-primary)"
-			},
-			role: "status"
-		}, tt("auth.working")) : null, formError ? h("p", {
+		}, added === true ? tt("auth.added") : tt("auth.working")) : null, formError ? h("p", {
 			style: S.formError,
 			role: "alert"
-		}, formError) : null, formError && formDetail ? h("p", { style: S.formNote }, formDetail) : null, cooling ? h("p", { style: {
+		}, formError) : null, formError && formDetail ? h("p", { style: S.formNote }, platformDetail(formDetail, tt)) : null, cooling ? h("p", { style: {
 			...S.formNote,
 			color: "var(--dsw-alias-state-warn-primary)"
-		} }, format(tt("auth.retryAfter"), { minutes: coolingMinutes })) : null, h("p", { style: S.formNote }, auth?.ephemeral === true ? tt("auth.ephemeral") : auth?.autoRecoverArmed === true ? tt("auth.autoRecoverOn") : tt("auth.saved"))));
+		} }, format(tt("auth.retryAfter"), { minutes: coolingMinutes })) : null, accounts.length > 0 ? h("div", { style: { marginTop: 12 } }, h("div", { style: {
+			...S.fieldLabel,
+			marginBottom: 6
+		} }, tt("auth.accounts")), accounts.map((entry) => h("div", {
+			key: entry.id,
+			style: {
+				display: "flex",
+				gap: 8,
+				alignItems: "center",
+				padding: "4px 0"
+			}
+		}, h("span", { style: {
+			...S.modelName,
+			fontSize: 13
+		} }, entry.username), entry.active === true ? h("span", { style: S.modelBadge }, tt("auth.accountCurrent")) : null, h("span", { style: {
+			marginLeft: "auto",
+			display: "flex",
+			gap: 4
+		} }, entry.active === true ? null : h("button", {
+			type: "button",
+			style: S.rosterBulk,
+			disabled: busy || accountBusy !== null,
+			onClick: () => void switchAccount(entry.id)
+		}, tt("auth.accountSwitch")), h("button", {
+			type: "button",
+			style: S.rosterBulkDanger,
+			disabled: busy || accountBusy !== null,
+			onClick: () => requestRemove(entry.id)
+		}, tt("auth.accountRemove")))))) : null, auth?.needsAccount === true ? null : h("p", { style: S.formNote }, auth?.ephemeral === true ? tt("auth.ephemeral") : auth?.vaultPasswordArmed === true ? tt("auth.saved") : null)), pendingRemove !== null ? h(clientModal(), {
+			open: true,
+			onClose: () => setPendingRemove(null),
+			title: tt("auth.accountRemove"),
+			description: tt("auth.removeConfirm"),
+			footer: h("div", { style: {
+				display: "flex",
+				gap: 8,
+				justifyContent: "flex-end"
+			} }, h("button", {
+				type: "button",
+				style: S.button,
+				onClick: () => setPendingRemove(null)
+			}, tt("auth.cancel")), h("button", {
+				type: "button",
+				style: S.rosterBulkDanger,
+				disabled: busy || accountBusy !== null,
+				onClick: () => {
+					const id = pendingRemove;
+					setPendingRemove(null);
+					if (id !== null) removeAccount(id);
+				}
+			}, tt("auth.accountRemove")))
+		}) : null);
 	}
 	var init_account_form = __esmMin((() => {
 		init_const();
@@ -1882,6 +1981,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 					fontWeight: 600,
 					color: "var(--dsw-alias-label-secondary)"
 				} }, tt("llm.rosterThinking")), h("div", { style: {
+					fontSize: 11,
+					color: "var(--dsw-alias-label-secondary)"
+				} }, tt("llm.settingsHint")), h("div", { style: {
 					display: "flex",
 					flexWrap: "wrap",
 					gap: "2px 10px",
@@ -2214,14 +2316,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		const [busy, setBusy] = useState(false);
 		const [formError, setFormError] = useState(null);
 		const [saved, setSaved] = useState(false);
-		const [forgotten, setForgotten] = useState(false);
 		const post = useCallback((payload) => postJson(POOL_PATH, payload), []);
-		/** 清除面板 key 走 API-KEY 路由（forget 分支在那里；POOL 路由不认识 forget）。 */
-		const postApiKey = useCallback((payload) => postJson(API_KEY_PATH, payload), []);
 		const submit = useCallback(async (event) => {
 			event?.preventDefault?.();
 			setSaved(false);
-			setForgotten(false);
 			if (!/^sk-[A-Za-z0-9]/.test(apiKey.trim())) {
 				setFormError(tt("llm.empty"));
 				return;
@@ -2236,7 +2334,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				if (body && body.ok === true) {
 					setApiKey("");
 					setSaved(true);
-					setForgotten(false);
 					onDone?.();
 					return;
 				}
@@ -2252,30 +2349,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			onDone,
 			tt
 		]);
-		const forget = useCallback(async () => {
-			setBusy(true);
-			setFormError(null);
-			try {
-				const body = await postApiKey({ forget: true });
-				if (body?.ok !== true) {
-					setFormError(body?.error ?? tt("auth.network"));
-					return;
-				}
-				setForgotten(true);
-				setSaved(false);
-				setApiKey("");
-				onDone?.();
-			} catch (caught) {
-				setFormError(caught instanceof Error && caught.message !== "" ? caught.message : tt("auth.network"));
-			} finally {
-				setBusy(false);
-			}
-		}, [
-			post,
-			onDone,
-			tt
-		]);
-		const canForget = llm?.hasApiKey === true && llm?.keySource === "credentials";
 		const poolConfigured = Array.isArray(pool?.keys) && pool.keys.length > 0;
 		const keyEditor = h("div", null, h("label", { style: S.field }, h("span", { style: S.fieldLabel }, tt("llm.keyField")), h("div", { style: {
 			display: "flex",
@@ -2312,20 +2385,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				...busy ? S.primaryBusy : {}
 			},
 			disabled: busy
-		}, busy ? tt("llm.saving") : tt("llm.save")), canForget ? h("button", {
-			type: "button",
-			style: S.button,
-			disabled: busy,
-			onClick: () => {
-				if (globalThis.confirm(tt("llm.forgetConfirm"))) forget();
-			}
-		}, tt("llm.forget")) : null), forgotten ? h("p", {
-			style: {
-				...S.formNote,
-				color: "var(--dsw-alias-state-success-primary)"
-			},
-			role: "status"
-		}, tt("llm.forgotten")) : saved ? h("p", {
+		}, busy ? tt("llm.saving") : tt("llm.save"))), saved ? h("p", {
 			style: {
 				...S.formNote,
 				color: "var(--dsw-alias-state-success-primary)"
@@ -2410,6 +2470,17 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		/** 行内改备注：编辑中的 id + 草稿（注释 = 备注字段，可为空）。 */
 		const [editingId, setEditingId] = useState(null);
 		const [noteDraft, setNoteDraft] = useState("");
+		const [pendingDelete, setPendingDelete] = useState(null);
+		const requestDelete = useCallback((id) => {
+			if (clientModal() === null) {
+				if (globalThis.confirm(tt("poolMng.deleteConfirm"))) act({
+					action: "delete",
+					id
+				}, id);
+				return;
+			}
+			setPendingDelete(id);
+		}, [act, tt]);
 		const setNote = useCallback(async (id, name) => {
 			if (await act({
 				action: "rename",
@@ -2448,7 +2519,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			running: "var(--dsw-alias-state-success-primary)",
 			absent: "var(--dsw-alias-state-error-primary)"
 		};
-		return h("div", { style: { marginTop: 10 } }, h("div", { style: {
+		return h("div", { style: { marginTop: 10 } }, keys.length > 0 ? h("div", { style: {
 			display: "flex",
 			gap: 8,
 			alignItems: "center",
@@ -2473,10 +2544,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		}, tt("llm.save")) : null, h("span", { style: {
 			...S.muted,
 			fontSize: 12
-		} }, tt("poolMng.concurrentHint"))), keys.length === 0 ? h("p", { style: {
-			...S.muted,
-			fontSize: 12
-		} }, tt("poolMng.empty")) : h("ul", {
+		} }, tt("poolMng.concurrentHint"))) : null, keys.length > 0 ? h("ul", {
 			style: S.modelList,
 			role: "list"
 		}, keys.map((entry) => {
@@ -2587,17 +2655,38 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				type: "button",
 				style: S.rosterBulkDanger,
 				disabled: busyId !== null,
-				onClick: () => {
-					if (globalThis.confirm(tt("poolMng.deleteConfirm"))) act({
-						action: "delete",
-						id: entry.id
-					}, entry.id);
-				}
+				onClick: () => requestDelete(entry.id)
 			}, tt("poolMng.delete")))));
-		})), error !== null ? h("p", {
+		})) : null, error !== null ? h("p", {
 			style: S.formError,
 			role: "alert"
-		}, error) : null);
+		}, error) : null, pendingDelete !== null ? h(clientModal(), {
+			open: true,
+			onClose: () => setPendingDelete(null),
+			title: tt("poolMng.delete"),
+			description: tt("poolMng.deleteConfirm"),
+			footer: h("div", { style: {
+				display: "flex",
+				gap: 8,
+				justifyContent: "flex-end"
+			} }, h("button", {
+				type: "button",
+				style: S.button,
+				onClick: () => setPendingDelete(null)
+			}, tt("poolMng.cancel")), h("button", {
+				type: "button",
+				style: S.rosterBulkDanger,
+				disabled: busyId !== null,
+				onClick: () => {
+					const id = pendingDelete;
+					setPendingDelete(null);
+					if (id !== null) act({
+						action: "delete",
+						id
+					}, id);
+				}
+			}, tt("poolMng.delete")))
+		}) : null);
 	}
 	var init_api_key_form = __esmMin((() => {
 		init_const();
@@ -3000,7 +3089,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* arrive as props, so the render tests exercise the toggle without faking
 	* React state (children travel as a regular `children` prop, as in React).
 	*/
-	function SectionCard({ title, open, onToggle, children, tt }) {
+	function SectionCard({ title, description, open, onToggle, children, tt }) {
 		return h("div", { style: S.sectionCard }, h("button", {
 			type: "button",
 			style: S.sectionHead,
@@ -3024,7 +3113,11 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		}, h("path", { d: "M3 6l5 5 5-5" }))), h("div", {
 			style: S.sectionBody,
 			hidden: !open
-		}, open ? children : null));
+		}, open ? [typeof description === "string" && description !== "" ? h("p", { style: {
+			...S.muted,
+			fontSize: 12,
+			margin: "0 0 10px"
+		} }, description) : null, children] : null));
 	}
 	var init_cards = __esmMin((() => {
 		init_format();
@@ -3275,8 +3368,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			value: option
 		}, labelOf ? labelOf(option) : option))));
 		/** 出图单工具的参数卡（两工具同构，配置各自独立）。 */
-		const imageCard = (tool, title, modelFallback) => h(SectionCard, {
+		const imageCard = (tool, title, description, modelFallback) => h(SectionCard, {
 			title,
+			description,
 			open: openCards[tool] !== false,
 			onToggle: () => toggleCard(tool),
 			tt
@@ -3290,8 +3384,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		return h("div", null, error !== null ? h("p", {
 			style: S.formError,
 			role: "alert"
-		}, error) : null, imageCard("text2img", tt("mm.text2imgTitle"), "sensenova-u1.5-lite"), h("div", { style: { height: 14 } }), imageCard("img2img", tt("mm.img2imgTitle"), "sensenova-u1.5-lite"), h("div", { style: { height: 14 } }), h(SectionCard, {
+		}, error) : null, imageCard("text2img", tt("mm.text2imgTitle"), tt("mm.text2imgHint"), "sensenova-u1.5-lite"), h("div", { style: { height: 14 } }), imageCard("img2img", tt("mm.img2imgTitle"), tt("mm.img2imgHint"), "sensenova-u1.5-lite"), h("div", { style: { height: 14 } }), h(SectionCard, {
 			title: tt("mm.visionTitle"),
+			description: tt("mm.visionHint"),
 			open: openCards.vision !== false,
 			onToggle: () => toggleCard("vision"),
 			tt
@@ -3301,10 +3396,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			busy: busySection === "vision",
 			error: void 0,
 			commit: commitBridgePrompt
-		})), h("p", { style: {
-			...S.trendLegend,
-			marginTop: 10
-		} }, tt("mm.hint")));
+		})));
 	}
 	var IMAGE_FORMATS, IMAGE_SIZES;
 	var init_multimodal_tab = __esmMin((() => {
@@ -4058,9 +4150,14 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-10-29T03:25";
+		const CLIENT_BUILD = "2026-10-30T05:10";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
+			try {
+				provideClientPrimitives(loaderRequire("@deepseek-ai/dsh-client-ui-primitives"));
+			} catch {
+				provideClientPrimitives(null);
+			}
 			console.info(`[dsh-sensenova-suite] client build ${CLIENT_BUILD}`);
 			/**
 			* The module's test surface.

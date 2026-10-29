@@ -49,7 +49,7 @@ import {
   toggleModelIn
 } from "./models.ts";
 import { clockLong, count, format, statedCadenceMs, tokenSize, when } from "./format.ts";
-import { provideClientReact } from "./runtime.ts";
+import { provideClientPrimitives, provideClientReact } from "./runtime.ts";
 import { en, zh } from "./i18n.ts";
 import { S } from "./styles.ts";
 import {
@@ -76,7 +76,7 @@ import { ComposerUsagePill } from "./composer-usage-pill.ts";
  * 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
  * 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
  */
-const CLIENT_BUILD = "2026-10-29T03:25";;
+const CLIENT_BUILD = "2026-10-30T05:10";;;;;;;;;;;;
 
 function clientFactory(loaderRequire: (specifier: string) => unknown): {
   inject: string[];
@@ -84,6 +84,13 @@ function clientFactory(loaderRequire: (specifier: string) => unknown): {
   panel: object;
 } {
   provideClientReact(loaderRequire("react"));
+  // 宿主 UI 套件（平台 seed 表九键之一）：删除确认的 Modal 从这来。旧宿主的
+  // 模块表没有它时 require 会抛——接住记为 null，消费端回落自带通路。
+  try {
+    provideClientPrimitives(loaderRequire("@deepseek-ai/dsh-client-ui-primitives"));
+  } catch {
+    provideClientPrimitives(null);
+  }
   console.info(`[dsh-sensenova-suite] client build ${CLIENT_BUILD}`);
 
   /**

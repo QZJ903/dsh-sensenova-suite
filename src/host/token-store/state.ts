@@ -3,16 +3,15 @@
  * around `token-store.ts` stands on.
  *
  * `token-store.ts` is one closure holding four intertwined blocks (grant,
- * account, renewal, throttle) that share seven mutable variables. Each block
+ * account, renewal, throttle) that share five mutable variables. Each block
  * lives in its own module (docs/TOKEN-STORE-SPLIT.md); what they all keep in
  * common is exactly what this file owns:
  *
  *   - `wiring` — the read side: the credentials backend (real service or the
  *     in-memory vault), the keys, the injected clock, env, auth, and the
- *     throttle store. Built once per instance.
+ *     throttle store (per-account parks). Built once per instance.
  *   - `state` — the seven mutable fields, now named instead of closure-scoped:
- *     `cached`, `rejected`, `inflight`, `lastError`, `throttle`,
- *     `consecutiveRefusals`, `passwordSwept`. Each block writes only its own
+ *     `cached`, `rejected`, `inflight`, `lastError`. Each block writes only its own
  *     fields (the ownership table lives in the split doc §1); every block may
  *     read any field through `state.`.
  *
@@ -44,9 +43,10 @@ export interface CredentialBackend {
 
 /** The throttle store the blocks persist refusals through (`throttle-store.ts`). */
 export interface ThrottleStore {
-  read(): Promise<HeldThrottle | null>;
-  write(held: HeldThrottle): Promise<unknown>;
-  clear(): Promise<unknown>;
+  /** 读某账号的冷却；没有 = null。 */
+  read(username: string): Promise<HeldThrottle | null>;
+  write(username: string, held: HeldThrottle): Promise<unknown>;
+  clear(username: string): Promise<unknown>;
 }
 
 /** The auth instance (`createAuth()`), as the login/renewal blocks consume it. */
@@ -72,6 +72,12 @@ export interface AuthLike {
  * left `credentials` typed as its `null` default and `backend` as a function
  * over `unknown`, which is what pushed `never` into the blocks downstream.
  */
+/** 账号清单存储（方案 C：插件状态文件自持，见 accounts.ts）。 */
+export interface AccountsStore {
+  read(): Promise<unknown>;
+  write(accounts: unknown): Promise<void>;
+}
+
 export interface StoreContextWiring {
   credentials?: unknown;
   auth: AuthLike;
@@ -85,6 +91,8 @@ export interface StoreContextWiring {
   THROTTLE_KEY: string;
   backend: () => CredentialBackend;
   ephemeral: () => boolean;
+  /** 账号清单存储；缺省（旧接线/测试未注）= 清单功能降级为空。 */
+  accountsStore?: AccountsStore;
 }
 
 /** Refresh this long before the stored expiry, so a request never races the token's death. */
@@ -104,6 +112,8 @@ export interface StoredGrant {
  * deadline, so there is nothing to count down.
  */
 export interface HeldThrottle {
+  /** 这个冷却属于哪个账号（2026-10-29 多账号：park 按用户名分钥）。 */
+  username: string;
   code: string;
   parked: boolean;
   until: number | null;
@@ -111,7 +121,7 @@ export interface HeldThrottle {
 }
 
 /**
- * The seven mutable fields the four blocks share (see the module doc above).
+ * The five mutable fields the four blocks share (see the module doc above).
  *
  * Declared rather than inferred (docs/IMPROVEMENTS.md §8): under
  * strictNullChecks a bare object literal pins each field to its INITIALIZER's
@@ -132,12 +142,6 @@ export interface TokenStoreState {
   saveInflight: Promise<void> | null;
   /** Last failure, surfaced to the panel instead of a bare "not configured". */
   lastError: unknown;
-  /** The refusal in force, or `null` when sign-in may be attempted. */
-  throttle: HeldThrottle | null;
-  /** How many refusals in a row this store has seen (survives the throttle). */
-  consecutiveRefusals: number;
-  /** True once a legacy stored password has been swept. */
-  passwordSwept: boolean;
 }
 
 /**
@@ -157,6 +161,7 @@ export function createStoreContext({
   env = process.env,
   skewMs = DEFAULT_SKEW_MS,
   throttleStore: injectedThrottleStore,
+  accountsStore,
   now = Date.now,
   onTrace,
   credentialKey
@@ -166,6 +171,7 @@ export function createStoreContext({
   env?: Record<string, string | undefined>;
   skewMs?: number;
   throttleStore?: ThrottleStore;
+  accountsStore?: AccountsStore;
   now?: () => number;
   onTrace?: (hops: unknown[], error: unknown) => void;
   credentialKey: (scope: string, id: string) => string;
@@ -179,13 +185,6 @@ export function createStoreContext({
   // disagree about whether a wait is over, which is invisible in production
   // and fatal in a test that crosses the window deliberately.
   //
-  // And it defaults to MEMORY, not to the file. The file is shared and
-  // durable, so a default that writes it makes every store in the process
-  // share one throttle — in a test suite that means one case's lockout
-  // refuses the next case's login, which reads as a bug in the code under
-  // test. The Host passes the file store explicitly (see `index.ts`, where the
-  // wiring is assembled), so a production store shares one throttle record.
-  const throttleStore = injectedThrottleStore ?? createMemoryThrottleStore(now);
   /**
    * The in-memory fallback used while no credentials service is reachable. A
    * Host without the service still gets a working panel: the account and grant
@@ -218,6 +217,10 @@ export function createStoreContext({
   // forever while the store quietly exists on disk.
   /** The live backend: the real service when attached, else the in-memory vault. */
   const backend = () => resolveCredentialsService(credentials) ?? memory;
+  // 节流存储缺省 = 内存版（上面的注释：测试套件各案例隔离）；注入缺席时保护
+  // 也不能缺席——进程内锁死防护照常。跨进程共享由 index.ts 显式注入文件版，
+  // 那里才是「默认错误」的注释所指。
+  const throttle = injectedThrottleStore ?? createMemoryThrottleStore(now);
   /** True while nothing written through the store would survive a restart. */
   const ephemeral = () => isEphemeral(credentials);
 
@@ -226,14 +229,15 @@ export function createStoreContext({
     auth,
     env,
     skewMs,
-    throttleStore,
+    throttleStore: throttle,
     now,
     ...(onTrace !== undefined ? { onTrace } : {}),
     credentialKey,
     key,
     THROTTLE_KEY,
     backend,
-    ephemeral
+    ephemeral,
+    ...(accountsStore !== undefined ? { accountsStore } : {})
   };
 
   const state: TokenStoreState = {
@@ -256,30 +260,6 @@ export function createStoreContext({
     saveInflight: null,
     /** Last failure, surfaced to the panel instead of a bare "not configured". */
     lastError: null,
-    /**
-     * A refusal that must not be repeated on a timer.
-     *
-     * The platform locks an account after a few bad attempts, so retrying a
-     * failed sign-in automatically turns one mistake into a lockout. This records
-     * why sign-in is pointless right now and until when.
-     *
-     * `until` is the absolute deadline when the platform names one ("try again
-     * in 8 minutes"); otherwise a local backoff applies, doubling per attempt up
-     * to a cap. `parked` marks a credential-shaped refusal, which has no
-     * deadline at all: waiting cannot make a wrong password right.
-     */
-    throttle: null,
-    /**
-     * How many refusals in a row this store has seen.
-     *
-     * Kept separately from `throttle` because the throttle record is deleted as
-     * soon as its window closes, while this count must survive that deletion —
-     * otherwise the doubling has nothing to double from and every wait restarts
-     * at the shortest one.
-     */
-    consecutiveRefusals: 0,
-    /** True once a legacy stored password has been swept from the credentials service. */
-    passwordSwept: false
   };
 
   return { wiring, state };

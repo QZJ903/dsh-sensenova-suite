@@ -32,6 +32,7 @@
 
 import { createAuth } from "./sensenova-auth.ts";
 import { createTokenStore } from "./token-store.ts";
+import { createFileAccountsStore } from "./token-store/accounts.ts";
 import { createFileThrottleStore } from "./throttle-store.ts";
 import { createFileCatalogStore } from "./catalog-store.ts";
 import { createFileProviderStore } from "./provider-store.ts";
@@ -382,6 +383,10 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // disk. Refusing to build a store at all would leave such a Host with no way
   // to sign in.
   const tokenStore = createTokenStore({
+    // 账号清单（方案 C）落插件状态文件 accounts.json——**绝不进凭据服务**：
+    // credentials-local 对记录 kind 是封闭白名单，启动整文件校验，自造 kind
+    // = 凭据插件激活失败 = 整机无法启动（2026-10-30 真机崩溃实录）。
+    accountsStore: createFileAccountsStore({ profile, logger: ctx.logger }),
     // The configured auth instance; a malformed config already set configError
     // above, but the account route may still be reached, so fall back to a
     // defaults-built instance rather than a `null` that would disable login.

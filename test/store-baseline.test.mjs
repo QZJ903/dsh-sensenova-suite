@@ -27,11 +27,9 @@ import { fileURLToPath } from "node:url";
 import {
   createTokenStore,
   RECORD_SCOPE,
-  LEGACY_SCOPE,
   RECORD_ID,
   THROTTLE_ID,
-  USERNAME_REF,
-  PASSWORD_REF
+  USERNAME_REF
 } from "../src/host/token-store.ts";
 import { createMemoryThrottleStore } from "../src/host/throttle-store.ts";
 
@@ -45,9 +43,7 @@ const T0 = 1_000_000_000_000;
 const SKEW_MS = 120_000;
 
 const GRANT_KEY = `${RECORD_SCOPE}/${RECORD_ID}`;
-const LEGACY_GRANT_KEY = `${LEGACY_SCOPE}/${RECORD_ID}`;
 const THROTTLE_KEY_RAW = `${RECORD_SCOPE}/${THROTTLE_ID}`;
-const LEGACY_THROTTLE_KEY_RAW = `${LEGACY_SCOPE}/${THROTTLE_ID}`;
 
 // ---------------------------------------------------------------- fixtures
 
@@ -58,10 +54,6 @@ const grant = (accessToken, refreshToken, expiresAt) => ({
   payload: { version: 1, accessToken, refreshToken, expiresAt }
 });
 
-const legacyThrottleRecord = (code, parked, attempt) => ({
-  kind: "grant",
-  payload: { marker: "signin-throttle", version: 1, code, parked, attempt }
-});
 
 const failure = (code, message, extra = {}) =>
   Object.assign(new Error(message), { code }, extra);
@@ -132,7 +124,6 @@ function makeAuth(script, events) {
 
 function normKey(k) {
   return String(k)
-    .split(LEGACY_SCOPE).join("$LEGACY")
     .split(RECORD_SCOPE).join("$SCOPE")
     // THROTTLE_ID contains RECORD_ID as a prefix, so replace it first.
     .split(THROTTLE_ID).join("$THROTTLE")
@@ -141,8 +132,7 @@ function normKey(k) {
 
 function normRef(r) {
   return String(r)
-    .split(USERNAME_REF).join("$USER")
-    .split(PASSWORD_REF).join("$PASS");
+    .split(USERNAME_REF).join("$USER");
 }
 
 function normError(e) {
@@ -185,9 +175,10 @@ async function runScenario(def) {
   const events = [];
   const frames = [];
 
-  const makeStore = ({ service, auth, env = {}, throttleStore }) =>
+  const makeStore = ({ service, auth, env = {}, throttleStore, accountsStore }) =>
     createTokenStore({
       credentials: service ?? null,
+      accountsStore,
       credentialKey: credKey,
       auth,
       env,
@@ -205,7 +196,8 @@ async function runScenario(def) {
       records,
       refs,
       // The store's own read view (an expired window already reads null).
-      throttle: throttleStore ? norm(await throttleStore.read()) : null
+      // 节流按账号分钥（2026-10-29 多账号）：基线场景的账号都是 alice。
+      throttle: throttleStore ? norm(await throttleStore.read("alice")) : null
     };
   }
 
@@ -237,14 +229,18 @@ async function runScenario(def) {
     advance,
     frame,
     GRANT_KEY,
-    LEGACY_GRANT_KEY,
     THROTTLE_KEY: THROTTLE_KEY_RAW,
-    LEGACY_THROTTLE_KEY: LEGACY_THROTTLE_KEY_RAW,
     grant,
-    legacyThrottleRecord,
     failure,
-    envAccount(extra = {}) {
-      return { [USERNAME_REF]: "alice", [PASSWORD_REF]: "pw", ...extra };
+    // 账号清单预置（2026-10-29 方案 C：清单在插件状态文件，登录源=清单存档密码）。
+    vaultSeeded(username = "alice", password = "pw") {
+      const store = {
+        data: null,
+        async read() { return store.data; },
+        async write(accounts) { store.data = accounts; }
+      };
+      store.data = [{ username, password }];
+      return store;
     },
     service(records = {}, refs = {}, hooks = {}) {
       return makeService(records, refs, events, hooks);
@@ -278,11 +274,11 @@ define("S1 unconfigured: no attempt and no throttle", async ({ frame, service, t
 
 // S2 — [login] env bootstrap: one login, grant persisted v1 with
 // now+expiresIn, second call served from cache.
-define("S2 env login persists the grant then serves from cache", async ({ frame, service, throttle, auth, store, envAccount }) => {
+define("S2 vault login persists the grant then serves from cache", async ({ frame, service, throttle, auth, store, vaultSeeded }) => {
   const svc = service();
   const thr = throttle();
   const a = auth({ login: async () => ({ accessToken: "AT1", refreshToken: "RT1", expiresIn: 10800 }) });
-  const s = store({ service: svc, auth: a, env: envAccount(), throttleStore: thr });
+  const s = store({ service: svc, auth: a, throttleStore: thr, accountsStore: vaultSeeded() });
   const deps = { service: svc, throttleStore: thr };
   await frame("getToken performs one login", () => s.getToken(), deps);
   await frame("getToken again is served from cache", () => s.getToken(), deps);
@@ -314,7 +310,7 @@ define("S3 parked refusal survives a restart with no new login", async ({ frame,
 
 // S4 — [throttle] local backoff doubles 60s -> 120s across a closed window
 // (attempt count is kept), and a success clears the wait and the count.
-define("S4 local backoff doubles, then success clears it", async ({ frame, service, throttle, auth, store, envAccount, failure, advance }) => {
+define("S4 local backoff doubles, then success clears it", async ({ frame, service, throttle, auth, store, vaultSeeded, failure, advance }) => {
   const svc = service();
   const thr = throttle();
   let n = 0;
@@ -325,7 +321,7 @@ define("S4 local backoff doubles, then success clears it", async ({ frame, servi
       return { accessToken: "AT1", refreshToken: "RT1", expiresIn: 10800 };
     }
   });
-  const s = store({ service: svc, auth: a, env: envAccount(), throttleStore: thr });
+  const s = store({ service: svc, auth: a, throttleStore: thr, accountsStore: vaultSeeded() });
   const deps = { service: svc, throttleStore: thr };
   await frame("getToken #1 fails: 60s local backoff", () => s.getToken(), deps);
   advance(61_000);
@@ -337,7 +333,7 @@ define("S4 local backoff doubles, then success clears it", async ({ frame, servi
 
 // S5 — [throttle] a platform-stated window is taken verbatim and never
 // truncated by the local 30-minute cap.
-define("S5 platform-stated window is honoured untruncated", async ({ frame, service, throttle, auth, store, envAccount, failure }) => {
+define("S5 platform-stated window is honoured untruncated", async ({ frame, service, throttle, auth, store, vaultSeeded, failure }) => {
   const svc = service();
   const thr = throttle();
   const a = auth({
@@ -345,7 +341,9 @@ define("S5 platform-stated window is honoured untruncated", async ({ frame, serv
       throw failure("rate_limited", "platform: try again in 2 hours", { retryAfterMs: 7_200_000 });
     }
   });
-  const s = store({ service: svc, auth: a, env: envAccount(), throttleStore: thr });
+  const seed = vaultSeeded();
+  const svc2 = service(seed.records, seed.refs);
+  const s = store({ service: svc, auth: a, throttleStore: thr, accountsStore: vaultSeeded() });
   const deps = { service: svc, throttleStore: thr };
   await frame("getToken fails carrying the 2h platform window", () => s.getToken(), deps);
   await frame("state shows the full 2h countdown", () => s.state(), deps);
@@ -412,7 +410,7 @@ define("S7a dead refresh with no account reaps the grant", async ({ frame, servi
 
 // S7b — [renewal->login] refresh_rejected WITH an env account falls through
 // to a password login instead of reaping.
-define("S7b dead refresh with an account re-logs-in", async ({ frame, service, throttle, auth, store, grant, failure, envAccount, GRANT_KEY, T0 }) => {
+define("S7b dead refresh with a vault account re-logs-in", async ({ frame, service, throttle, auth, store, grant, failure, vaultSeeded, GRANT_KEY, T0 }) => {
   const svc = service({ [GRANT_KEY]: grant("AT1", "RT1", T0 + 60_000) });
   const thr = throttle();
   const a = auth({
@@ -421,7 +419,7 @@ define("S7b dead refresh with an account re-logs-in", async ({ frame, service, t
     },
     login: async () => ({ accessToken: "AT2", refreshToken: "RT2", expiresIn: 10800 })
   });
-  const s = store({ service: svc, auth: a, env: envAccount(), throttleStore: thr });
+  const s = store({ service: svc, auth: a, throttleStore: thr, accountsStore: vaultSeeded() });
   const deps = { service: svc, throttleStore: thr };
   await frame("getToken falls through to a password login", () => s.getToken(), deps);
   await frame("state after re-login", () => s.state(), deps);
@@ -441,39 +439,9 @@ define("S8 invalidated token is renewed once, never replayed", async ({ frame, s
   await frame("following getToken is served from cache", () => s.getToken(), deps);
 });
 
-// S9a — [migration] a grant saved under the pre-rename namespace is adopted
-// once: rewritten at the current address, deleted at the old one.
-define("S9a legacy grant is adopted and the old record deleted", async ({ frame, service, throttle, auth, store, grant, LEGACY_GRANT_KEY, T0 }) => {
-  const svc = service({ [LEGACY_GRANT_KEY]: grant("AT1", "RT1", T0 + 10_000_000) });
-  const thr = throttle();
-  const a = auth({});
-  const s = store({ service: svc, auth: a, env: {}, throttleStore: thr });
-  const deps = { service: svc, throttleStore: thr };
-  await frame("state adopts the legacy grant on first read", () => s.state(), deps);
-  await frame("getToken serves the adopted grant with no auth call", () => s.getToken(), deps);
-});
-
-// S9b — [migration] a parked throttle smuggled into the credentials service
-// is adopted into the throttle store. The first matching candidate wins;
-// the other address is swept later by clearThrottle on resubmit.
-define("S9b legacy parked throttle is adopted then swept on resubmit", async ({ frame, service, throttle, auth, store, legacyThrottleRecord, THROTTLE_KEY, LEGACY_THROTTLE_KEY }) => {
-  const svc = service({
-    [THROTTLE_KEY]: legacyThrottleRecord("login_rejected", true, 3),
-    [LEGACY_THROTTLE_KEY]: legacyThrottleRecord("verification_required", true, 2)
-  });
-  const thr = throttle();
-  const a = auth({ login: async () => ({ accessToken: "AT1", refreshToken: "RT1", expiresIn: 10800 }) });
-  const s = store({ service: svc, auth: a, env: {}, throttleStore: thr });
-  const deps = { service: svc, throttleStore: thr };
-  await frame("getToken adopts the current-address park and refuses", () => s.getToken(), deps);
-  await frame("state keeps the park; the other legacy record waits for sweep", () => s.state(), deps);
-  await frame("saveAccount with the correct password sweeps both legacy records", () => s.saveAccount({ username: "alice", password: "pw" }), deps);
-  await frame("state after resubmit", () => s.state(), deps);
-});
-
 // S9c — [migration] a password a previous version persisted in the
 // credentials service is swept on the first readAccount contact.
-define("S9c legacy stored password is swept on first contact", async ({ frame, service, throttle, auth, store, PASSWORD_REF }) => {
+define("S9c legacy password reference is left untouched", async ({ frame, service, throttle, auth, store, PASSWORD_REF }) => {
   const svc = service({}, { [PASSWORD_REF]: "legacy-secret" });
   const thr = throttle();
   const a = auth({});
@@ -574,7 +542,7 @@ const actual = await build();
 // here too — that is the closed-set fix, and it appears in the diff.
 const FROZEN_SCENARIOS = [
   "S1 unconfigured: no attempt and no throttle",
-  "S2 env login persists the grant then serves from cache",
+  "S2 vault login persists the grant then serves from cache",
   "S3 parked refusal survives a restart with no new login",
   "S4 local backoff doubles, then success clears it",
   "S5 platform-stated window is honoured untruncated",
@@ -582,16 +550,14 @@ const FROZEN_SCENARIOS = [
   "S6b three concurrent polls share exactly one refresh",
   "S6c refresh write defers to a concurrently rotated grant",
   "S7a dead refresh with no account reaps the grant",
-  "S7b dead refresh with an account re-logs-in",
+  "S7b dead refresh with a vault account re-logs-in",
   "S8 invalidated token is renewed once, never replayed",
-  "S9a legacy grant is adopted and the old record deleted",
-  "S9b legacy parked throttle is adopted then swept on resubmit",
-  "S9c legacy stored password is swept on first contact",
+  "S9c legacy password reference is left untouched",
   "S10 saveAccount then forgetAccount leaves the grant serving",
   "S11 wrong-password park is cleared by a corrected resubmit",
   "S12 no credentials service still works, marked ephemeral"
 ];
-const FROZEN_FRAME_COUNT = 48;
+const FROZEN_FRAME_COUNT = 42;
 const scenarioNames = defs.map((def) => def.name);
 const frameCount = actual.reduce((n, s) => n + s.frames.length, 0);
 if (JSON.stringify(scenarioNames) !== JSON.stringify(FROZEN_SCENARIOS)) {

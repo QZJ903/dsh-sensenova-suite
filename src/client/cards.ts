@@ -308,8 +308,10 @@ export function TrendTable({ trend, tt }: { trend?: TrendData | null; tt: Tt }):
  * arrive as props, so the render tests exercise the toggle without faking
  * React state (children travel as a regular `children` prop, as in React).
  */
-export function SectionCard({ title, open, onToggle, children, tt }: {
+export function SectionCard({ title, description, open, onToggle, children, tt }: {
   title: string;
+  /** 卡副标题（2026-10-29 用户定稿）：展开时标题下一行灰字，说这张卡的行为事实。 */
+  description?: string;
   open: boolean;
   onToggle: () => void;
   children?: unknown;
@@ -334,6 +336,13 @@ export function SectionCard({ title, open, onToggle, children, tt }: {
         h("path", { d: "M3 6l5 5 5-5" })
       )
     ),
-    h("div", { style: S.sectionBody, hidden: !open }, open ? children : null)
+    h("div", { style: S.sectionBody, hidden: !open }, open
+      ? [
+          typeof description === "string" && description !== ""
+            ? h("p", { style: { ...S.muted, fontSize: 12, margin: "0 0 10px" } }, description)
+            : null,
+          children
+        ]
+      : null)
   );
 }

@@ -668,7 +668,7 @@ const healthy = {
   // costs a round trip to interpret — which is exactly what happened when
   // `DrawSwitch` introduced `tt(absentKey)`.
   const tableDrivenDetail = (found) => {
-    const expected = "guidanceKey,open,quotaGuidanceKey,refusalKey".split(",");
+    const expected = "guidanceKey,key,open,quotaGuidanceKey,refusalKey".split(",");
     const foundIds = [...found].sort().join(",");
     if (foundIds === expected.join(",")) {
       return `identifiers: ${foundIds} | conditions: ${[...conditions].sort().join(", ")}`;
@@ -686,7 +686,7 @@ const healthy = {
   // the same dictionary obligation — a table value is only checked when it is
   // handed to `tt` directly, which is what this list records.
   check("the table-driven tt sites are the ones expected",
-    [...deferred].sort().join(",") === "guidanceKey,open,quotaGuidanceKey,refusalKey",
+    [...deferred].sort().join(",") === "guidanceKey,key,open,quotaGuidanceKey,refusalKey",
     tableDrivenDetail(deferred));
   const tableKeys = [...Object.values(tables.GUIDANCE_BY_CODE ?? {}), ...Object.values(tables.REFUSAL_TEXT ?? {})];
   const tableMissing = [...new Set(tableKeys)].filter((key) => !(key in zh) || !(key in en));
@@ -703,6 +703,22 @@ const healthy = {
   check("the reader was read from the shipped client", typeof interpretSnapshot === "function");
   check("a successful body is read as data", interpretSnapshot(healthy).data === healthy);
   check("a failed body is read as an error", interpretSnapshot({ ok: false, code: "x" }).data === null);
+}
+
+// === H. 平台 detail 的模式翻译（2026-10-30 假冷却同批）====================
+// 已知模式（条件式锁定警告）转面板语言、数字插值；未知消息原文兜底。
+{
+  const { platformDetail } = await import("../src/client/snapshot.ts");
+  const { zh } = await import("../src/client/i18n.ts");
+  const ttZh = (key) => zh[key] ?? key;
+  const raw = "Wrong account or password, please check the input. The account will be locked for 15 minutes after 4 attempts";
+  const translated = platformDetail(raw, ttZh);
+  check("平台锁定警告翻译为中文（数字插值）",
+    translated.includes("15") && translated.includes("4") && translated !== raw,
+    translated);
+  check("未知平台消息原文兜底（不编造翻译）",
+    platformDetail("Some unknown platform prose", ttZh) === "Some unknown platform prose",
+    platformDetail("Some unknown platform prose", ttZh));
 }
 
 finish();

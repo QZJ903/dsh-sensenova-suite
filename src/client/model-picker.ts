@@ -150,6 +150,9 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, visionIds,
               }
             },
             h("div", { style: { fontSize: 11, fontWeight: 600, color: "var(--dsw-alias-label-secondary)" } }, tt("llm.rosterThinking")),
+            // 面板提示（2026-10-29 用户定稿）：默认不用调；『可看图』只给真识图
+            // 的模型勾；新模型上架后再来补。跟在「模型设置」标题后面一行灰字。
+            h("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary)" } }, tt("llm.settingsHint")),
             // 档位复选 + 「可看图」同一行：档位在左、可看图右对齐（不与最高贴太近，
             // 用户 2026-10-26 拍板：可看图提上来但靠右）。档位前缀「思考档位：」
             // 让勾选内容自解释（后面只跟关闭/低/中/高…）。

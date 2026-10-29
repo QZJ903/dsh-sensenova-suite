@@ -38,7 +38,7 @@
  * @module dsh-sensenova-suite/sensenova-auth
  */
 
-import { CODE } from "./codes.ts";
+import { CODE, isCredentialRefusal } from "./codes.ts";
 import { b64url, pkce, sealPassword } from "./sensenova-crypto.ts";
 import { str, obj, verbatim, pluginError } from "./util.ts";
 import { AUTH_DEFAULTS, resolveAuthConfig } from "./auth-config.ts";
@@ -293,9 +293,16 @@ async function postIamLogin(cfg: AuthConfig, jar: Map<string, string>, trace: Au
     const code = rejectionCode(iamBody);
     const detail = rejectionDetail(iamBody, iamResponse.status);
     throw fail(code, `login failed: ${detail}`, {
-      // Carry the platform's own retry window so a caller can stop instead of
-      // re-attempting into a lockout.
-      retryAfterMs: retryWindowMs(iamBody, iamResponse),
+      // The platform's own retry window rides ONLY on time-shaped refusals
+      // (rate limits / stated lockout windows). A credential-shaped refusal's
+      // message can carry a CONDITIONAL warning — "The account will be locked
+      // for 15 minutes after 4 attempts" — that warns about a FUTURE wrong
+      // attempt, not a window to wait out now: parsing it as one imposed a
+      // fake 10-15 minute cooldown on a form the user could have retried with
+      // the correct password immediately (2026-10-30 真机：网站能登=平台没锁，
+      // 锁的是我们自己的按钮). The park covers the auto-retry side; the
+      // warning text reaches the user verbatim through `detail`.
+      ...(isCredentialRefusal(code) ? {} : { retryAfterMs: retryWindowMs(iamBody, iamResponse) }),
       // The platform's own words, kept apart from the wrapper sentence so the
       // panel can show the classified line AND the original detail.
       detail

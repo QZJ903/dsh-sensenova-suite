@@ -123,6 +123,34 @@ export const FORM_EXCLUDED_CODES: ReadonlySet<string> = Object.freeze(new Set(["
  * branch into dead code with nothing red (F2b now fails on any inline
  * comparison, so the taxonomy stays in these tables).
  */
+/**
+ * 平台 detail 的模式翻译（2026-10-30 假冷却同批）：商汤的失败消息只有
+ * `locale: "*"` 单语原文（如条件式锁定警告 "The account will be locked for 15
+ * minutes after 4 attempts"——它警告的是未来错误，不是当前窗口）。已知模式转成
+ * 面板语言（数字走 format 插值）；未知消息原文兜底——宁可英文也不编造。
+ * 与 {@link REFUSAL_TEXT} 同族：值是字典键的表，住决策层。
+ */
+const PLATFORM_DETAIL_PATTERNS: ReadonlyArray<{ re: RegExp; key: keyof typeof zh }> = Object.freeze([
+  {
+    re: /Wrong account or password[,.]?\s*(?:please check the input\.)?\s*The account will be locked for (\d+) minutes? after (\d+) attempts?/i,
+    key: "auth.detailWrongPasswordLock"
+  }
+]);
+
+/**
+ * Translate one platform failure detail into the panel's language, or return
+ * it verbatim when no known pattern matches（未知消息原文兜底——宁可英文也不编造）.
+ */
+export function platformDetail(detail: string, tt: Tt): string {
+  for (const { re, key } of PLATFORM_DETAIL_PATTERNS) {
+    const match = detail.match(re);
+    if (match !== null) {
+      return format(tt(key), { minutes: match[1], attempts: match[2] });
+    }
+  }
+  return detail;
+}
+
 export const REFUSAL_TEXT: Readonly<Record<string, keyof typeof zh>> = Object.freeze({
   login_rejected: "auth.badCredentials",
   account_locked: "auth.locked",

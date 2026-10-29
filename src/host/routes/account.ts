@@ -1,10 +1,11 @@
 /**
  * The account route — the panel configures itself without editing `.env`.
  *
- * Part of the routes split (see `../routes.ts` for the family map). Two GET
- * answers (stored-state / forgot), one POST (sign in / forget): the form
- * never learns the password, and a rejected sign-in reports the platform's
- * own words plus the sanitized trace file.
+ * Part of the routes split (see `../routes.ts` for the family map). One GET
+ * answer (stored-state), POST = sign in / switch / remove: the form never
+ * learns the password, and a rejected sign-in reports the platform's own
+ * words plus the sanitized trace file. （`forget` 分支已随清除按钮退役——
+ * 2026-10-29：多账号下移除走 switch/remove，身份清除会废掉 vault 自动重登。）
  *
  * @module dsh-sensenova-suite/routes/account
  */
@@ -30,6 +31,27 @@ export const ACCOUNT_PATH = `/api/${name}/account`;
 export function registerAccountRoute(ctx: any, wiring: Pick<Wiring, "settings" | "tokenStore" | "cache" | "inflight">) {
   const { settings, tokenStore, cache, inflight } = wiring;
 
+  /** 登录类失败的上屏（saveAccount 与 switchAccount 共用一条报告路径，防双抄漂移）。 */
+  const reportAuthFailure = async (response: any, e: unknown): Promise<void> => {
+    const error = e as Partial<PluginError>;
+    const traceFile = await writeLoginTrace(error?.trace, str(error?.code, CODE.AUTH_ERROR));
+    writeJson(response, 200, {
+      ...(await optional(tokenStore.state())),
+      ok: false,
+      code: str(error?.code, CODE.AUTH_ERROR),
+      error: redactedError(error),
+      // The platform's own words ride along so the panel can show them
+      // beneath the classified line.
+      ...(error?.detail === undefined ? {} : { detail: String(error.detail) }),
+      // The sanitized hop-by-hop record of this attempt: the panel links
+      // to it, and a support question becomes answerable.
+      ...(traceFile !== null ? { traceFile } : {}),
+      // When the platform names a wait, the panel greys the form out for
+      // that long: retrying inside the window is what extends a lockout.
+      ...(typeof error?.retryAfterMs === "number" ? { retryAfterMs: error.retryAfterMs } : {})
+    }, { "cache-control": "no-store" });
+  };
+
   return ctx.webServer.register({
     kind: "exact",
     path: ACCOUNT_PATH,
@@ -49,61 +71,43 @@ export function registerAccountRoute(ctx: any, wiring: Pick<Wiring, "settings" |
       }
       const body = await readJsonBodyOr400(request, response);
       if (body === null) return;
-      // `forget: true` clears the account without logging in again; the grant
-      // survives on its refresh token until it needs the password again.
-      if (body.value.forget === true) {
+      // 一键切换（2026-10-29 方案 C）：把目标槽的 grant 装上活动槽并当场要一次
+      // 令牌——成败在这次 POST 里给答案（冷账号的死令牌会用存档密码自动重登）。
+      if (body.value.action === "switch" && typeof body.value.id === "string") {
         try {
-          await tokenStore.forgetAccount();
-        } catch (error) {
-          // The state is spread FIRST: it carries its own `error` field, and
-          // spreading it after this one would overwrite the real reason with
-          // whatever the store last saw.
-          writeJson(response, 200, {
-            ...(await optional(tokenStore.state())),
-            ok: false,
-            error: redactedError(error)
-          }, { "cache-control": "no-store" });
+          await tokenStore.switchAccount(body.value.id);
+        } catch (e) {
+          // 切换失败保持已生效（用户可再切走）；失败原因按登录类上屏。
+          await reportAuthFailure(response, e);
           return;
         }
-        // The grant that just cleared answers the very next poll, so the cached
-        // console responses from the previous account must not survive it.
-        // (saveAccount does the same on its success path.)
-        // Routed through `clearCoalescedFetch` rather than `cache.clear()`: the
-        // map must be emptied AND its generation bumped, or a console flight
-        // that started under the previous account and lands after this point
-        // writes back under the still-current generation and is served to the
-        // account that just signed in.
+        // 新账号的额度/目录从下一次拉取开始：上一账号的缓存响应不得越界存活。
+        clearCoalescedFetch(cache, inflight);
+        writeJson(response, 200, { ...(await tokenStore.state()), ok: true }, { "cache-control": "no-store" });
+        return;
+      }
+      // 移除存档：只删侧槽（密码+令牌快照），活动会话不动。
+      if (body.value.action === "remove" && typeof body.value.id === "string") {
+        await tokenStore.removeAccount(body.value.id);
         clearCoalescedFetch(cache, inflight);
         writeJson(response, 200, { ...(await tokenStore.state()), ok: true }, { "cache-control": "no-store" });
         return;
       }
       try {
-        await tokenStore.saveAccount({ username: body.value.username, password: body.value.password });
+        // mode=add（2026-10-29 用户拍板）：已有账号时表单是「添加账号」——只把
+        // 用户名+密码落清单，不验证不登录；切到该号时才用存档密码登录。无账号
+        // （或未带 mode）= 登录并接管。
+        const mode = body.value.mode === "add" ? "add" : "login";
+        await tokenStore.saveAccount(
+          { username: body.value.username, password: body.value.password },
+          { activate: mode !== "add" }
+        );
         // The success trace is persisted through `onTrace`; no path is owed
         // to the panel for a sign-in that worked.
       } catch (e) {
         // A rejected password is the common case, and it is the user's to
-        // correct: report the reason and leave the panel usable. The extra
-        // fields are the shape `pluginError` attaches (types.PluginError) —
-        // a non-pluginError throw simply has none of them, which every read
-        // below already handles with its own fallback.
-        const error = e as Partial<PluginError>;
-        const traceFile = await writeLoginTrace(error?.trace, str(error?.code, CODE.AUTH_ERROR));
-        writeJson(response, 200, {
-          ...(await optional(tokenStore.state())),
-          ok: false,
-          code: str(error?.code, CODE.AUTH_ERROR),
-          error: redactedError(error),
-          // The platform's own words ride along so the panel can show them
-          // beneath the classified line.
-          ...(error?.detail === undefined ? {} : { detail: String(error.detail) }),
-          // The sanitized hop-by-hop record of this attempt: the panel links
-          // to it, and a support question becomes answerable.
-          ...(traceFile !== null ? { traceFile } : {}),
-          // When the platform names a wait, the panel greys the form out for
-          // that long: retrying inside the window is what extends a lockout.
-          ...(typeof error?.retryAfterMs === "number" ? { retryAfterMs: error.retryAfterMs } : {})
-        }, { "cache-control": "no-store" });
+        // correct: report the reason and leave the panel usable.
+        await reportAuthFailure(response, e);
         return;
       }
       // The grant that just landed answers the very next poll, so the cached

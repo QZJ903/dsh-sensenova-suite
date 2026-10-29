@@ -1,15 +1,17 @@
 /**
  * The inference API-key editor (`sk-…`) with the llm section assembled around
- * it. Same security shape as `AccountForm`: show/hide, save/forget, busy and
- * outcome notes, and the value leaves component state the moment it is saved.
- * It is hook-based, so like AccountForm the render suite does not mount it;
- * the secret-free half it displays IS covered, via `ProviderStatus`. The key
- * is NEVER populated from the snapshot — the Host only reports whether one
- * exists.
+ * it. The save path adds to the key POOL (`/pool {action:add}`); pool keys are
+ * cleared per-row, so this form has no forget of its own (2026-10-29 用户拍板
+ * 退役清除按钮——面板主 key 已无 UI 写入口，按钮成了几乎不可能出现的死件).
+ * show/hide, busy and outcome notes stay; the value leaves component state the
+ * moment it is saved. It is hook-based, so like AccountForm the render suite
+ * does not mount it; the secret-free half it displays IS covered, via
+ * `ProviderStatus`. The key is NEVER populated from the snapshot — the Host
+ * only reports whether one exists.
  */
-import { POOL_PATH, API_KEY_PATH, SENSENOVA_SIGNUP_URL } from "./const.ts";
+import { POOL_PATH, SENSENOVA_SIGNUP_URL } from "./const.ts";
 import { postJson, postJsonOrThrow } from "./http.ts";
-import { h, useCallback, useState } from "./runtime.ts";
+import { clientModal, h, useCallback, useState } from "./runtime.ts";
 import type { Tt } from "./runtime.ts";
 import type { LlmData, PoolDiagData } from "./wire.ts";
 import { ProviderRegStatus, ProviderStatus, ProviderSwitch } from "./provider-controls.ts";
@@ -27,12 +29,9 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
-  const [forgotten, setForgotten] = useState(false);
 
   // 上面的表单现在直接进 key 池（POST /pool {action:add}）——唯一入口。
   const post = useCallback((payload: Record<string, unknown>) => postJson(POOL_PATH, payload), []);
-  /** 清除面板 key 走 API-KEY 路由（forget 分支在那里；POOL 路由不认识 forget）。 */
-  const postApiKey = useCallback((payload: Record<string, unknown>) => postJson(API_KEY_PATH, payload), []);
 
   const submit = useCallback(async (event?: { preventDefault?: () => void }) => {
     event?.preventDefault?.();
@@ -40,7 +39,6 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
     // 绿字「已保存」和本次查重拒绝的红字一起挂着）——提交开始即清上一次
     // 的结果横幅；本次成功会在下方重新点亮。
     setSaved(false);
-    setForgotten(false);
     // 前缀校验（2026-10-27 用户要求）：必须 sk- 开头——面板加错 key（整串
     // 粘错/带了空格外的杂质）会进池参与轮转，把限流与失败怪到好 key 头上。
     if (!/^sk-[A-Za-z0-9]/.test(apiKey.trim())) {
@@ -55,7 +53,6 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
       if (body && body.ok === true) {
         setApiKey("");
         setSaved(true);
-        setForgotten(false);
         onDone?.();
         return;
       }
@@ -67,29 +64,6 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
     }
   }, [apiKey, post, onDone, tt]);
 
-  const forget = useCallback(async () => {
-    setBusy(true);
-    setFormError(null);
-    try {
-      const body = await postApiKey({ forget: true });
-      if (body?.ok !== true) {
-        setFormError(body?.error ?? tt("auth.network"));
-        return;
-      }
-      setForgotten(true);
-      setSaved(false);
-      setApiKey("");
-      onDone?.();
-    } catch (caught) {
-      setFormError(caught instanceof Error && caught.message !== "" ? caught.message : tt("auth.network"));
-    } finally {
-      setBusy(false);
-    }
-  }, [post, onDone, tt]);
-
-  // Only a REFERENCE the panel stored can be forgotten: an environment
-  // value has no panel-saved copy to clear, so the button would mislead.
-  const canForget = llm?.hasApiKey === true && llm?.keySource === "credentials";
   // 「配置了 key」看两处（2026-10-29 真机：sk- 框的保存进池、不写面板主 key，
   // 只盯 hasApiKey 会给配置了池 key 的卡片永远催 key）：面板主 key 在，或池
   // 里有条目，都算配置——催贴 key 的提示与官网注册链接都以这个为准。
@@ -132,21 +106,11 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
         "button",
         { type: "submit", style: { ...S.primary, ...(busy ? S.primaryBusy : {}) }, disabled: busy },
         busy ? tt("llm.saving") : tt("llm.save")
-      ),
-      canForget
-        ? h("button", {
-            type: "button", style: S.button, disabled: busy,
-            // 二次确认（2026-10-27 用户拍板）：清除是本面板最重的破坏性操作
-            // （清凭据本体 + 目录缓存 + 池槽），误触一次就得重新找 key。
-            onClick: () => { if (globalThis.confirm(tt("llm.forgetConfirm"))) void forget(); }
-          }, tt("llm.forget"))
-        : null
+      )
     ),
-    forgotten
-      ? h("p", { style: { ...S.formNote, color: "var(--dsw-alias-state-success-primary)" }, role: "status" }, tt("llm.forgotten"))
-      : saved
-        ? h("p", { style: { ...S.formNote, color: "var(--dsw-alias-state-success-primary)" }, role: "status" }, tt("llm.saved"))
-        : null,
+    saved
+      ? h("p", { style: { ...S.formNote, color: "var(--dsw-alias-state-success-primary)" }, role: "status" }, tt("llm.saved"))
+      : null,
     formError ? h("p", { style: S.formError, role: "alert" }, formError) : null,
     h("p", { style: S.formNote }, tt("llm.footnote")),
     // The official-site link only exists for the no-key state (sign-up
@@ -244,6 +208,18 @@ export function PoolManager({ pool, onDone, tt }: {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
 
+  // 删除二次确认（2026-10-29 换宿主 Modal）：pendingDelete = 正在确认的行 id。
+  // 宿主 primitives 缺席（旧宿主模块表没有这个键）时回落原生 confirm——
+  // 「删除必须二次确认」这条规则不随宿主版本打折，两条路共用同一份文案。
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const requestDelete = useCallback((id: string) => {
+    if (clientModal() === null) {
+      if (globalThis.confirm(tt("poolMng.deleteConfirm"))) void act({ action: "delete", id }, id);
+      return;
+    }
+    setPendingDelete(id);
+  }, [act, tt]);
+
   const setNote = useCallback(async (id: string, name: string) => {
     const ok = await act({ action: "rename", id, name }, id);
     if (ok) { setEditingId(null); setNoteDraft(""); }
@@ -280,27 +256,29 @@ export function PoolManager({ pool, onDone, tt }: {
   return h(
     "div",
     { style: { marginTop: 10 } },
-    // 并发：全局在途上限（0 = 跟随 key 数）。
-    h(
-      "div",
-      { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } },
-      h("span", { style: { ...S.fieldLabel, flex: "none" } }, tt("poolMng.concurrent")),
-      h("input", {
-        type: "number",
-        min: 0,
-        style: { ...S.input, width: 90 },
-        value: String(concurrencyValue),
-        disabled: busyId !== null,
-        onChange: (event: { target: { value: string } }) => setConcurrency(Math.max(0, Math.floor(Number(event.target.value) || 0)))
-      }),
-      concurrencyDirty
-        ? h("button", { type: "button", style: S.button, onClick: () => void saveConcurrency() }, tt("llm.save"))
-        : null,
-      h("span", { style: { ...S.muted, fontSize: 12 } }, tt("poolMng.concurrentHint"))
-    ),
-    keys.length === 0
-      ? h("p", { style: { ...S.muted, fontSize: 12 } }, tt("poolMng.empty"))
-      : h(
+    // 并发：全局在途上限（0 = 跟随 key 数）。配了 key 才渲染（2026-10-29 用户
+    // 拍板）：空池时它不得与「尚未配置」提示同屏——没有 key，并发无物可约束。
+    keys.length > 0
+      ? h(
+          "div",
+          { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 8 } },
+          h("span", { style: { ...S.fieldLabel, flex: "none" } }, tt("poolMng.concurrent")),
+          h("input", {
+            type: "number",
+            min: 0,
+            style: { ...S.input, width: 90 },
+            value: String(concurrencyValue),
+            disabled: busyId !== null,
+            onChange: (event: { target: { value: string } }) => setConcurrency(Math.max(0, Math.floor(Number(event.target.value) || 0)))
+          }),
+          concurrencyDirty
+            ? h("button", { type: "button", style: S.button, onClick: () => void saveConcurrency() }, tt("llm.save"))
+            : null,
+          h("span", { style: { ...S.muted, fontSize: 12 } }, tt("poolMng.concurrentHint"))
+        )
+      : null,
+    keys.length > 0
+      ? h(
           "ul",
           { style: S.modelList, role: "list" },
           keys.map((entry) => {
@@ -389,13 +367,35 @@ export function PoolManager({ pool, onDone, tt }: {
                     h("button", {
                       type: "button", style: S.rosterBulkDanger, disabled: busyId !== null,
                       // 二次确认（2026-10-27 用户拍板）：删除连凭据本体一起清，误触即失。
-                      onClick: () => { if (globalThis.confirm(tt("poolMng.deleteConfirm"))) void act({ action: "delete", id: entry.id }, entry.id); }
+                      onClick: () => requestDelete(entry.id)
                     }, tt("poolMng.delete"))
                   )
             )
             );
           })
-        ),
-    error !== null ? h("p", { style: S.formError, role: "alert" }, error) : null
+        ) : null,
+    error !== null ? h("p", { style: S.formError, role: "alert" }, error) : null,
+    // 删除确认弹窗（宿主 Modal；requestDelete 里已兜住 kit 缺席的旧宿主）。
+    pendingDelete !== null
+      ? h(clientModal() as (props: Record<string, unknown>) => unknown, {
+          open: true,
+          onClose: () => setPendingDelete(null),
+          title: tt("poolMng.delete"),
+          description: tt("poolMng.deleteConfirm"),
+          footer: h(
+            "div",
+            { style: { display: "flex", gap: 8, justifyContent: "flex-end" } },
+            h("button", { type: "button", style: S.button, onClick: () => setPendingDelete(null) }, tt("poolMng.cancel")),
+            h("button", {
+              type: "button", style: S.rosterBulkDanger, disabled: busyId !== null,
+              onClick: () => {
+                const id = pendingDelete;
+                setPendingDelete(null);
+                if (id !== null) void act({ action: "delete", id }, id);
+              }
+            }, tt("poolMng.delete"))
+          )
+        })
+      : null
   );
 }

@@ -276,9 +276,9 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   );
 
   /** 出图单工具的参数卡（两工具同构，配置各自独立）。 */
-  const imageCard = (tool: "text2img" | "img2img", title: string, modelFallback: string) => h(
+  const imageCard = (tool: "text2img" | "img2img", title: string, description: string, modelFallback: string) => h(
     SectionCard,
-    { title, open: openCards[tool] !== false, onToggle: () => toggleCard(tool), tt },
+    { title, description, open: openCards[tool] !== false, onToggle: () => toggleCard(tool), tt },
     // 开关写进 toolsEnabled 分区（宿主注册 gating 只认 toolsEnabled.text2img /
     // toolsEnabled.img2img）。写进 text2img.enabled 会被 readImage 白名单丢弃，
     // 工具永不注册 —— 2026-10-25 修的「按了开启没反应」根因。
@@ -307,13 +307,13 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
     "div",
     null,
     error !== null ? h("p", { style: S.formError, role: "alert" }, error) : null,
-    imageCard("text2img", tt("mm.text2imgTitle"), "sensenova-u1.5-lite"),
+    imageCard("text2img", tt("mm.text2imgTitle"), tt("mm.text2imgHint"), "sensenova-u1.5-lite"),
     h("div", { style: { height: 14 } }),
-    imageCard("img2img", tt("mm.img2imgTitle"), "sensenova-u1.5-lite"),
+    imageCard("img2img", tt("mm.img2imgTitle"), tt("mm.img2imgHint"), "sensenova-u1.5-lite"),
     h("div", { style: { height: 14 } }),
     h(
       SectionCard,
-      { title: tt("mm.visionTitle"), open: openCards.vision !== false, onToggle: () => toggleCard("vision"), tt },
+      { title: tt("mm.visionTitle"), description: tt("mm.visionHint"), open: openCards.vision !== false, onToggle: () => toggleCard("vision"), tt },
       // 文案是「启用转述」不是「启用工具」——视觉卡不是模型工具，是转述管道
       // （独立 i18n key，出图两卡仍用 mm.enabled「启用工具」）。
       switchRow("toolsEnabled", "visionTools", tt("mm.visionEnabled"), true),
@@ -325,7 +325,6 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
         error: undefined,
         commit: commitBridgePrompt
       })
-    ),
-    h("p", { style: { ...S.trendLegend, marginTop: 10 } }, tt("mm.hint"))
+    )
   );
 }
