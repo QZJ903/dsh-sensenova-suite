@@ -22,7 +22,7 @@ import { isEphemeral, resolveCredentialsService } from "../credentials-service.t
 import { createAuth } from "../sensenova-auth.ts";
 import { createMemoryThrottleStore } from "../throttle-store.ts";
 import { name as RECORD_SCOPE } from "../host-config.ts";
-import { RECORD_ID, THROTTLE_ID } from "./constants.ts";
+import { RECORD_ID } from "./constants.ts";
 
 /**
  * The credential backend the blocks read and write through.
@@ -88,7 +88,6 @@ export interface StoreContextWiring {
   onTrace?: (hops: unknown[], error: unknown) => void;
   credentialKey: (scope: string, id: string) => string;
   key: string;
-  THROTTLE_KEY: string;
   backend: () => CredentialBackend;
   ephemeral: () => boolean;
   /** 账号清单存储；缺省（旧接线/测试未注）= 清单功能降级为空。 */
@@ -142,6 +141,15 @@ export interface TokenStoreState {
   saveInflight: Promise<void> | null;
   /** Last failure, surfaced to the panel instead of a bare "not configured". */
   lastError: unknown;
+  /**
+   * 进程内冷却镜像（U5-D3a，拍板 2026-10-31）：写侧被 ADR-006 拒或写失败、
+   * 冷却落不到盘时，writeThrottle 把冷却挂到这里，readThrottle 在存储读空时
+   * 回退到它——本进程照常遵守平台给的等待窗，不因磁盘拒写就重新撞门。磁盘
+   * 是跨进程的唯一通道，拒写窗内跨进程保护退化为尽力而为（degrade 日志可见）。
+   * 镜像只是「磁盘丢了我们的写」的替身，不是第二真相源：磁盘读得到时一律以
+   * 磁盘为准（readThrottle/clearThrottle 的清理条件见各自注释）。
+   */
+  throttleOverlay: Map<string, HeldThrottle>;
 }
 
 /**
@@ -177,14 +185,6 @@ export function createStoreContext({
   credentialKey: (scope: string, id: string) => string;
 }): { wiring: StoreContextWiring; state: TokenStoreState } {
   const key = credentialKey(RECORD_SCOPE, RECORD_ID);
-  const THROTTLE_KEY = credentialKey(RECORD_SCOPE, THROTTLE_ID);
-  // Resolved here rather than as a parameter default, for two reasons.
-  //
-  // It has to judge its window with the clock the rest of the store uses: a
-  // store given an injected clock and a throttle reading the real one would
-  // disagree about whether a wait is over, which is invisible in production
-  // and fatal in a test that crosses the window deliberately.
-  //
   /**
    * The in-memory fallback used while no credentials service is reachable. A
    * Host without the service still gets a working panel: the account and grant
@@ -217,10 +217,11 @@ export function createStoreContext({
   // forever while the store quietly exists on disk.
   /** The live backend: the real service when attached, else the in-memory vault. */
   const backend = () => resolveCredentialsService(credentials) ?? memory;
-  // 节流存储缺省 = 内存版（上面的注释：测试套件各案例隔离）；注入缺席时保护
-  // 也不能缺席——进程内锁死防护照常。跨进程共享由 index.ts 显式注入文件版，
-  // 那里才是「默认错误」的注释所指。
-  const throttle = injectedThrottleStore ?? createMemoryThrottleStore(now);
+  // 节流存储缺省 = 内存版（测试套件各案例隔离）；注入缺席时保护也不能缺席
+  // ——进程内锁死防护照常。跨进程共享由 index.ts 显式注入文件版，那里才是
+  // 「默认错误」的注释所指。U5-D2 后节流存储自身不带时钟、不判过期，窗口
+  // 判定统一走下方 wiring.now（inForceWaitMs / throttleGateError）。
+  const throttle = injectedThrottleStore ?? createMemoryThrottleStore();
   /** True while nothing written through the store would survive a restart. */
   const ephemeral = () => isEphemeral(credentials);
 
@@ -234,7 +235,6 @@ export function createStoreContext({
     ...(onTrace !== undefined ? { onTrace } : {}),
     credentialKey,
     key,
-    THROTTLE_KEY,
     backend,
     ephemeral,
     ...(accountsStore !== undefined ? { accountsStore } : {})
@@ -260,6 +260,8 @@ export function createStoreContext({
     saveInflight: null,
     /** Last failure, surfaced to the panel instead of a bare "not configured". */
     lastError: null,
+    /** U5-D3a：写盘失败时的进程内冷却镜像（语义见接口注释）。 */
+    throttleOverlay: new Map(),
   };
 
   return { wiring, state };

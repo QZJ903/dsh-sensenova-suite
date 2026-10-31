@@ -9,6 +9,8 @@
  */
 import { readJwtClaims, readJwtExpiry, createAuth } from "../src/host/sensenova-auth.ts";
 import { createTrace } from "../src/host/auth-trace.ts";
+import { paramOf } from "../src/host/auth-walk.ts";
+import { retryWindowMs } from "../src/host/auth-iam.ts";
 import { sealPassword, createJwksCache } from "../src/host/sensenova-crypto.ts";
 import { installNetworkGuard } from "./peer-roots.mjs";
 import {
@@ -895,6 +897,158 @@ check("empty token yields null expiry", readJwtExpiry("") === null);
       !blob.includes("SECRETAT"), blob.slice(0, 220));
   } catch (error) {
     fail("the login trace never records a credential", error);
+  }
+}
+
+// --- 7e. U5-S-C：相对 Location 不再把成功流读成 login_flow ----------------
+// paramOf 原来只认绝对 URL；一跳的相对 Location 带 code 时读参得空，带参的
+// 成功走查被判 LOGIN_FLOW。钉两件事：paramOf 的相对兜底，和整条走查在
+// 「回调跳发相对 Location」与「相对 meta-refresh」两种形状下照样拿到码。
+{
+  check("paramOf reads a relative URL's query (U5-S-C)",
+    paramOf("/oauth2/callback?code=rel-code&state=s1", "code") === "rel-code"
+      && paramOf("/oauth2/callback?code=rel-code&state=s1", "state") === "s1"
+      && paramOf("https://absolute.example/cb?code=abs", "code") === "abs"
+      && paramOf("not a url at all", "code") === "",
+    `${paramOf("/cb?code=x", "code")} / ${paramOf("not a url at all", "code")}`);
+  const { jwk } = await stubKey();
+  for (const [label, consentHop] of [
+    ["a relative Location", (issued) => new Response("", {
+      status: 302,
+      headers: { location: `/oauth2/callback?code=rel-code&state=${encodeURIComponent(issued)}` }
+    })],
+    ["a relative meta refresh", (issued) => new Response(
+      `<html><head><meta http-equiv="refresh" url="/oauth2/callback?code=meta-code&state=${encodeURIComponent(issued)}"></head></html>`,
+      { status: 200, headers: { "content-type": "text/html" } }
+    )]
+  ]) {
+    const realFetch = globalThis.fetch;
+    let issuedState = "";
+    globalThis.fetch = async (url) => {
+      const target = String(url);
+      if (target.includes("jwks.json")) {
+        return new Response(JSON.stringify({ keys: [{ ...jwk, kid: "public:hydra.openid.id-token", use: "sig" }] }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (target.includes("/oauth2/auth")) {
+        issuedState = new URL(target).searchParams.get("state") ?? "";
+        return new Response("", { status: 302, headers: { location: "https://platform.sensenova.cn/login?login_challenge=chal" } });
+      }
+      if (target.includes("iam.sensecoreapi.cn")) {
+        return new Response(JSON.stringify({ redirect: "https://platform.sensenova.cn/consent" }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      if (target.includes("/consent")) {
+        return consentHop(issuedState);
+      }
+      if (target.includes("oauth2/token")) {
+        return new Response(
+          JSON.stringify({ access_token: "granted-token", refresh_token: "granted-refresh", expires_in: 10800 }),
+          { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("{}", { status: 500, headers: { "content-type": "application/json" } });
+    };
+    try {
+      const mod = await import(`../src/host/sensenova-auth.ts?rel-${encodeURIComponent(label)}=${Date.now()}-${Math.random()}`);
+      let granted = null;
+      let thrown = null;
+      try { granted = await mod.createAuth().login({ username: "u", password: "p" }); }
+      catch (error) { thrown = error; }
+      check(`${label} carrying the wanted parameter still completes the walk (U5-S-C)`,
+        granted?.accessToken === "granted-token" && thrown === null,
+        thrown ? `${thrown.code}: ${thrown.message}` : String(granted?.accessToken));
+    } catch (error) {
+      fail(`U5-S-C ${label}`, error);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+}
+
+// --- 7f. U5-S-E/S-F：非 JSON 自由文本与双解析失败逃生口也按形状擦 ----------
+// 键名擦不覆盖的两条缝：HTML/纯文本体里的凭据形状串（U5-S-E），和含空格
+// 这类连兜底 URL() 都解析不了的输入（U5-S-F 曾原样落盘）。
+{
+  const trace = createTrace();
+  trace.step("html", { body: "<p>hello eyJhbGciOiJIUzI1NiJ9.abc.def world</p>" });
+  trace.step("badurl", { url: "https://x/cb ?code=RAWCODE&state=s" });
+  const blob = JSON.stringify(trace.done());
+  check("a JWT-shaped string in a non-JSON body is scrubbed (U5-S-E)",
+    !blob.includes("eyJhbGciOiJIUzI1NiJ9.abc.def"), blob.slice(0, 220));
+  check("a URL that fails BOTH parses is still scrubbed (U5-S-F)",
+    !blob.includes("RAWCODE") && blob.includes("[REDACTED]"), blob.slice(0, 220));
+}
+
+// --- 7g. U5-S-D：IAM 登录路径段是 override 点，而不是硬编码 ---------------
+{
+  const cfg = createAuth().getConfig();
+  check("iamLoginPath defaults to the nova tenant shape (U5-S-D)",
+    cfg.iamLoginPath === "/iam/authn/v1/auth/nova/login", String(cfg.iamLoginPath));
+  check("iamLoginPath is an override point",
+    createAuth({ iamLoginPath: "/iam/authn/v1/auth/other/login" }).getConfig().iamLoginPath === "/iam/authn/v1/auth/other/login");
+  let code = null;
+  try { createAuth({ iamLoginPath: "no-slash" }); } catch (error) { code = error?.code; }
+  check("iamLoginPath without a leading slash is a config error",
+    code === CODE.CONFIG, String(code));
+}
+
+// --- 7h. U5-D7：条件式锁定警告不再被读成真实窗 ---------------------------
+// N1 真机测试测出的后门：表外 reason 兜底 LOGIN_FAILED（非凭据），旧闸把
+// LocalizedMessage 里的条件式警告（will be locked … after N attempts）读成
+// 15 分钟真窗。两层钉：prose 解析跳过计数子句；窗闸只认已知 time-shaped 码。
+{
+  // ① prose 层：计数子句在场 → 不出窗（单元钉，无需走查）。
+  const conditionalBody = {
+    code: 3, message: "InvalidArgument",
+    details: [
+      { reason: "someBrandNewReason" },
+      { message: "Wrong account or password, please check the input. The account will be locked for 15 minutes after 4 attempts" }
+    ]
+  };
+  check("the conditional lock warning yields no window (U5-D7 ①)",
+    retryWindowMs(conditionalBody, { status: 400 }) === undefined,
+    String(retryWindowMs(conditionalBody, { status: 400 })));
+  const futureWindowBody = { message: "x", details: [{ message: "the account will be locked for 15 minutes" }] };
+  check("a future-tense window WITHOUT the counter clause still parses (narrow gate)",
+    retryWindowMs(futureWindowBody, { status: 400 }) === 900_000,
+    String(retryWindowMs(futureWindowBody, { status: 400 })));
+  // ② 闸层：未知 reason 的整条走查 → login_failed 且无窗（修复前 900_000）。
+  const { jwk } = await stubKey();
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const target = String(url);
+    if (target.includes("jwks.json")) {
+      return new Response(JSON.stringify({ keys: [{ ...jwk, kid: "public:hydra.openid.id-token", use: "sig" }] }),
+        { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (target.includes("/oauth2/auth")) {
+      return new Response("", { status: 302, headers: { location: "https://platform.sensenova.cn/login?login_challenge=chal" } });
+    }
+    if (target.includes("iam.sensecoreapi.cn")) {
+      return new Response(JSON.stringify({
+        code: 3, message: "InvalidArgument",
+        details: [
+          { reason: "someBrandNewReason", domain: "iam" },
+          { message: "Wrong account or password, please check the input. The account will be locked for 15 minutes after 4 attempts" }
+        ]
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+    return new Response("{}", { status: 500, headers: { "content-type": "application/json" } });
+  };
+  try {
+    const mod = await import(`../src/host/sensenova-auth.ts?d7=${Date.now()}-${Math.random()}`);
+    let thrown = null;
+    try { await mod.createAuth().login({ username: "u", password: "p" }); } catch (error) { thrown = error; }
+    check("an unrecognized reason folds to login_failed (U5-D7 ②)",
+      thrown?.code === "login_failed", `${thrown?.code}: ${thrown?.message}`);
+    check("an unrecognized reason's conditional warning yields no retryAfterMs (U5-D7 ②)",
+      thrown?.retryAfterMs === undefined, String(thrown?.retryAfterMs));
+    check("the platform's own words still reach the user verbatim via detail",
+      /will be locked/.test(String(thrown?.detail)), String(thrown?.detail));
+  } catch (error) {
+    fail("U5-D7 walk", error);
+  } finally {
+    globalThis.fetch = realFetch;
   }
 }
 

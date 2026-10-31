@@ -52,9 +52,10 @@
 import { CODE } from "./codes.ts";
 import { str, obj, num, verbatim, pluginError } from "./util.ts";
 import { name as RECORD_SCOPE } from "./host-config.ts";
+import { ASSUMED_TOKEN_LIFETIME_SECONDS } from "./auth-config.ts";
 import { createStoreContext } from "./token-store/state.ts";
 import { RECORD_ID, THROTTLE_ID } from "./token-store/constants.ts";
-import type { AuthLike, ThrottleStore, StoredGrant } from "./token-store/state.ts";
+import type { AuthLike, ThrottleStore, StoredGrant, HeldThrottle } from "./token-store/state.ts";
 import {
   readStored as readStoredImpl,
   storeGrant,
@@ -63,10 +64,10 @@ import {
   isFresh as isFreshImpl
 } from "./token-store/grant.ts";
 import {
-  throttleError as throttleErrorImpl,
   readThrottle as readThrottleImpl,
   writeThrottle as writeThrottleImpl,
   clearThrottle as clearThrottleImpl,
+  throttleGateError as throttleGateErrorImpl,
   inForceWaitMs as inForceWaitMsImpl,
   DEFAULT_LOGIN_BACKOFF_MS,
   MAX_LOGIN_BACKOFF_MS
@@ -154,11 +155,13 @@ export function createTokenStore(options: {
   const store = (accessToken: string, refreshToken: string, expiresAt: number, replacing?: string) => storeGrant(wiring, state, accessToken, refreshToken, expiresAt, replacing);
   const purgeGrant = (accessToken?: string) => purgeGrantImpl(wiring, state, accessToken);
   const isFresh = (token: StoredGrant | null | undefined, at?: number) => isFreshImpl(wiring, state, token, at);
-  const readThrottle = (username: string) => readThrottleImpl(wiring, username);
-  const clearThrottle = (username: string) => clearThrottleImpl(wiring, username);
-  const writeThrottle = (username: string, error: unknown) => writeThrottleImpl(wiring, username, error);
-  const throttleError = (held: import("./token-store/state.ts").HeldThrottle, cause?: Error) => throttleErrorImpl(held, cause);
-  const inForceWaitMs = (held: import("./token-store/state.ts").HeldThrottle | null) => inForceWaitMsImpl(wiring, held);
+  const readThrottle = (username: string) => readThrottleImpl(wiring, state, username);
+  const clearThrottle = (username: string) => clearThrottleImpl(wiring, state, username);
+  const writeThrottle = (username: string, error: unknown) => writeThrottleImpl(wiring, state, username, error);
+  /** U5-D5：登录闸的唯一判据，`now` 在这里绑定本实例时钟——acquire 的登录
+   *  闸与 switchAccount 的无快照防御路径共用同一份（防两处手抄漂移）。 */
+  const throttleGateError = (held: HeldThrottle | null) => throttleGateErrorImpl(held, wiring.now);
+  const inForceWaitMs = (held: HeldThrottle | null) => inForceWaitMsImpl(wiring, held);
   const readUsername = () => readUsernameImpl(wiring, state);
   const readAccount = () => readAccountImpl(wiring, state);
   const loginFromAccount = (explicit?: { username: string; password: string }) => loginFromAccountImpl(wiring, state, explicit, readStored, store);
@@ -170,7 +173,7 @@ export function createTokenStore(options: {
     readStored, isFresh,
     renewWithRefresh,
     readAccount, loginFromAccount,
-    writeThrottle, throttleError, purgeGrant
+    writeThrottle, throttleGateError, purgeGrant
   });
 
   return {
@@ -240,15 +243,24 @@ export function createTokenStore(options: {
         throw pluginError(CODE.MISSING_CREDENTIALS, "a username and a password are both required");
       }
 
+      // U5-SBc（拍板 2026-10-31，方案 c）：先记原身份，登录失败写回（见
+      // saveInflight 的 catch）。空串 = 首装无原号，回滚即 unset。
+      let previousUsername = "";
+      /** 登录本身是否落地（U5-SBc 的回滚判据：落地后的清单/回读失败不回滚）。 */
+      let loginLanded = false;
       if (activate) {
         // Persist first, then log in: if the write is rejected (a read-only
         // environment shadows the reference) the user is told before any login
         // attempt, instead of being left with a token that dies at restart.
+        previousUsername = await readUsername();
         await backend().set(credentialRef(USERNAME_REF), username);
         // The password may differ from the one that produced the current grant.
         state.cached = null;
+        // U5-D4：拒绝记忆是活动 grant 的附属——只在「接管」时清。add 模式
+        // 承诺活动槽不动（见下方验证分支），也不得顺手抹掉它的 401 记忆，
+        // 否则下一次 getToken 会把控制台刚拒过的令牌再发一轮。
+        rejected.clear();
       }
-      rejected.clear();
       // A deliberate resubmit is the user acting on what the panel told them,
       // so it clears THIS account's throttle — otherwise a corrected password
       // would be refused by this store's own timer. It is the ONE path that
@@ -282,7 +294,7 @@ export function createTokenStore(options: {
               grant: {
                 accessToken: result.accessToken,
                 refreshToken: result.refreshToken,
-                expiresAt: clock() + num(result.expiresIn, 10800) * 1000
+                expiresAt: clock() + num(result.expiresIn, ASSUMED_TOKEN_LIFETIME_SECONDS) * 1000
               }
             });
             state.lastError = null;
@@ -292,6 +304,7 @@ export function createTokenStore(options: {
           // in this closure, so the env-based `readAccount` must not be asked
           // for it here.
           await loginFromAccount({ username, password });
+          loginLanded = true;
           // A successful manual sign-in supersedes whatever failure the panel
           // last saw. `state.lastError` is otherwise cleared only inside
           // `acquire`'s success path — which never runs while the fresh grant
@@ -308,6 +321,21 @@ export function createTokenStore(options: {
           }
           await upsertAccount(wiring, { username, password, grant: storedGrant });
         } catch (error) {
+          // U5-SBc（拍板 2026-10-31，方案 c）：登录**本身**没落地就把身份写回
+          // 原号——0.1.30「失败旧会话原样保留」补齐到登录表单，面板标题与自动
+          // 重登链条不再指向一个没登录成的号。登录落地后的清单/回读失败不回滚
+          // （grant 与身份一致地在新号上，只缺快照，好过身份与 grant 分家）。
+          // persist-first 的金丝雀理由保留：写环境坏了仍在花平台尝试之前暴露。
+          if (activate && !loginLanded) {
+            try {
+              if (previousUsername === "") await backend().unset(credentialRef(USERNAME_REF));
+              else await backend().set(credentialRef(USERNAME_REF), previousUsername);
+              // 登录未落地 ⇒ 活动 grant 与新号无关（没写盘，或只在内存——
+              // store 失败时 cached 曾挂上新号令牌）。清内存镜像，下一轮从
+              // 记录读回原号真相。
+              state.cached = null;
+            } catch { /* 回滚失败不掩盖原始登录错误；写环境问题 persist-first 已暴露 */ }
+          }
           // A deliberate submit is the one path allowed to spend an attempt, but
           // a REFUSED one must still be recorded. This call's caller reads
           // `state()` the moment it rejects, and with no throttle on record the
@@ -392,7 +420,15 @@ export function createTokenStore(options: {
         // 无快照目标（理论不该有——添加模式已验证并落快照；防御路径）：
         // **先登录成功才动会话**——失败时旧令牌与身份原样保留（2026-10-30
         // 用户实测教训：先删后登会让人挂在新号的失败上，旧号被顶掉）。
+        // U5-D5（拍板③同一把门）：防御路径同样先过 park 闸——切到 parked 号
+        // 当场报错，不清门、不消耗平台尝试（与快照路径经 acquire 的门同语义，
+        // 判据同源 throttleGateError）。
+        const blocked = throttleGateError(await readThrottle(target.username));
+        if (blocked !== null) throw blocked;
         await loginFromAccountImpl(wiring, state, { username: target.username, password: target.password }, readStored, store);
+        // 登录成功 = 唯一有效证据，与 acquire 的登录兜底同纪律：清**本号**的
+        // park（否则下轮 acquire 会被一个刚被证伪的冷却挡住）。
+        await clearThrottle(target.username);
         await wiring.backend().set(USERNAME_REF, target.username);
         state.lastError = null;
       }

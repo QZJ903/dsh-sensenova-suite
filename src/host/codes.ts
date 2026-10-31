@@ -124,6 +124,23 @@ export const CREDENTIAL_REFUSALS: ReadonlySet<string> = Object.freeze(new Set([
 ]));
 
 /**
+ * Refusals whose wait window, WHEN THE PLATFORM STATES ONE, may be trusted.
+ *
+ * 收窄自「非凭据即挂窗」（U5-D7，N1 真机测试测出）：折叠兜底 {@link CODE.LOGIN_FAILED}
+ * **有意缺席**。平台的凭据拒绝模板在每张错误密码回答上都带条件式警告
+ * （"The account will be locked for 15 minutes after N attempts"，N 递减——
+ * 真机 16 份 trace 实证），而一个表外 reason 折成 LOGIN_FAILED 后，它的
+ * prose 因此不是真实窗的证据；未知语义的拒绝不信 prose，交给本地退避梯
+ * 定节奏。ACCOUNT_LOCKED 与 RATE_LIMITED 是两个按平台观测（auth.test 5c 真
+ * 窗钉、e2e 假平台 429 样本）确认 time-shaped 的码。
+ * @type {ReadonlySet<string>}
+ */
+export const TIME_SHAPED_REFUSALS: ReadonlySet<string> = Object.freeze(new Set([
+  CODE.ACCOUNT_LOCKED,
+  CODE.RATE_LIMITED
+]));
+
+/**
  * Every code that means "the plugin could not obtain a token".
  *
  * The panel says something different for these than for a console failure:

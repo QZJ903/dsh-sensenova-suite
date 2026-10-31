@@ -38,7 +38,7 @@
  * @module dsh-sensenova-suite/sensenova-auth
  */
 
-import { CODE, isCredentialRefusal } from "./codes.ts";
+import { CODE, TIME_SHAPED_REFUSALS } from "./codes.ts";
 import { b64url, pkce, sealPassword } from "./sensenova-crypto.ts";
 import { str, obj, verbatim, pluginError } from "./util.ts";
 import { AUTH_DEFAULTS, resolveAuthConfig } from "./auth-config.ts";
@@ -261,7 +261,9 @@ async function obtainLoginChallenge(cfg: AuthConfig, jar: Map<string, string>, t
  */
 async function postIamLogin(cfg: AuthConfig, jar: Map<string, string>, trace: AuthTrace, loginChallenge: string, user: string, secret: string, fail: (code: import("./codes.ts").CodeValue, message: string, extra?: object) => Error, deadline: number): Promise<string> {
   const encrypted = await sealPassword(secret, { jwksEndpoint: cfg.jwksEndpoint, encKeyId: cfg.encKeyId, cache: cfg.jwksCache });
-  const iamUrl = `${cfg.iamOrigin}/iam/authn/v1/auth/nova/login`;
+  // U5-S-D：路径段走配置（默认 = nova 租户形状），不再硬编码——clientId 是
+  // override 点而登录路由不是，曾是 override 面的一个静默豁口。
+  const iamUrl = `${cfg.iamOrigin}${cfg.iamLoginPath}`;
   const iamResponse = await fetch(iamUrl, {
     method: "POST",
     headers: {
@@ -293,16 +295,19 @@ async function postIamLogin(cfg: AuthConfig, jar: Map<string, string>, trace: Au
     const code = rejectionCode(iamBody);
     const detail = rejectionDetail(iamBody, iamResponse.status);
     throw fail(code, `login failed: ${detail}`, {
-      // The platform's own retry window rides ONLY on time-shaped refusals
-      // (rate limits / stated lockout windows). A credential-shaped refusal's
-      // message can carry a CONDITIONAL warning — "The account will be locked
-      // for 15 minutes after 4 attempts" — that warns about a FUTURE wrong
-      // attempt, not a window to wait out now: parsing it as one imposed a
-      // fake 10-15 minute cooldown on a form the user could have retried with
-      // the correct password immediately (2026-10-30 真机：网站能登=平台没锁，
-      // 锁的是我们自己的按钮). The park covers the auto-retry side; the
-      // warning text reaches the user verbatim through `detail`.
-      ...(isCredentialRefusal(code) ? {} : { retryAfterMs: retryWindowMs(iamBody, iamResponse) }),
+      // The platform's own retry window rides ONLY on a refusal whose
+      // time-shaped semantics are KNOWN (U5-D7：闸从「非凭据即挂窗」收窄到
+      // TIME_SHAPED_REFUSALS——表外 reason 兜底成 LOGIN_FAILED 后，其
+      // LocalizedMessage 仍带条件式锁定警告，prose 不可信，交给本地退避梯)。
+      // A credential-shaped refusal's message can carry a CONDITIONAL warning
+      // — "The account will be locked for 15 minutes after 4 attempts" — that
+      // warns about a FUTURE wrong attempt, not a window to wait out now:
+      // parsing it as one imposed a fake 10-15 minute cooldown on a form the
+      // user could have retried with the correct password immediately
+      // (2026-10-30 真机：网站能登=平台没锁，锁的是我们自己的按钮). The park
+      // covers the auto-retry side; the warning text reaches the user verbatim
+      // through `detail`.
+      ...(TIME_SHAPED_REFUSALS.has(code) ? { retryAfterMs: retryWindowMs(iamBody, iamResponse) } : {}),
       // The platform's own words, kept apart from the wrapper sentence so the
       // panel can show the classified line AND the original detail.
       detail

@@ -11,6 +11,7 @@
  */
 
 import { readJwtExpiry } from "../sensenova-auth.ts";
+import { ASSUMED_TOKEN_LIFETIME_SECONDS } from "../auth-config.ts";
 import { verbatim, obj, num, numOrNull } from "../util.ts";
 import type { StoredGrant, StoreContextWiring, TokenStoreState } from "./state.ts";
 
@@ -106,7 +107,9 @@ export async function storeGrant(
     version: GRANT_VERSION,
     accessToken,
     refreshToken,
-    expiresAt: issuedAt + num(expiresIn, 10800) * 1000
+    // U5-D6：回落值与 AUTH_DEFAULTS / saveAccount(add) 同源一个常量，不再
+    // 各抄一份字面量。
+    expiresAt: issuedAt + num(expiresIn, ASSUMED_TOKEN_LIFETIME_SECONDS) * 1000
   };
   try {
     const record = await backend().modifyRecord(key, (current) => {

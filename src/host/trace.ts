@@ -34,6 +34,9 @@ function traceDir() {
  * password, token, cookie, or authorization code ever reaches this file — so
  * the only concerns here are I/O failures, which must never break the login
  * response.
+ *
+ * U5 顺带 3：`mode: 0o600` 是 POSIX 语义，Windows 上被 Node 忽略——Windows 机的
+ * 实际保护来自目录 ACL 继承。注释只把这点说诚实，行为无可改（Node 摸不到 ACL）。
  * @param {object[]|undefined} trace - the sanitized hop list from the auth module.
  * @param {string} outcome - "ok" or the error code, for the filename.
  * @returns {Promise<string|null>} the file path, or null when not written.

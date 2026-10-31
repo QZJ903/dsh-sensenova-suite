@@ -30,13 +30,12 @@ import type { HeldThrottle } from "./token-store/state.ts";
  * Shape version of the throttle STATE FILE, bumped when the persisted form
  * changes.
  *
- * Deliberately NOT the same constant as the legacy record's payload version
- * (`LEGACY_THROTTLE_PAYLOAD_VERSION` in `token-store/throttle.ts`): this one
- * versions a file this module still writes and will bump, that one versions a
- * credentials record the plugin no longer writes at all. They were two
- * unrelated constants that happened to share a name and a value, which is the
- * worst kind of duplicate — bumping one "in lockstep" with the other would
- * silently orphan every parked refusal already on disk.
+ * Deliberately independent of the credentials-record version the throttle used
+ * to carry before the move — that constant is gone with the retired migration
+ * (2026-10-29「无存量用户，迁移代码是纯负债」拍板). This one versions a file this
+ * module still writes and will bump. Sharing a name and a value with the old
+ * record's version was the worst kind of duplicate — bumping one "in lockstep"
+ * with the other would silently orphan every parked refusal already on disk.
  */
 const THROTTLE_FILE_VERSION = 2;
 
@@ -72,7 +71,7 @@ function throttleDir() {
 }
 
 /** 文件载荷形状校验：v2 = `{ version: 2, parks: { "<用户名>": 冷却 } }`。 */
-function parseParks(raw: unknown, now: () => number): Map<string, HeldThrottle> {
+function parseParks(raw: unknown): Map<string, HeldThrottle> {
   const map = new Map<string, HeldThrottle>();
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return map;
   const body = raw as { version?: unknown; parks?: unknown };
@@ -88,9 +87,11 @@ function parseParks(raw: unknown, now: () => number): Map<string, HeldThrottle> 
       continue;
     }
     const until = num(held.until, NaN);
-    // A window that has closed is no longer a reason to refuse; the attempt
-    // count inside still feeds the next backoff doubling on rewrite.
-    if (!Number.isFinite(until) || until <= now()) continue;
+    // 已关闭的窗口条目**原样保留**（U5-D2 拍板 2026-10-31：保留 attempt）——
+    // attempt 还要喂下次失败时的倍增梯。「是否仍在生效」由读侧判：acquire 闸
+    // 只拦 `until > now()`，`inForceWaitMs` 把过期窗读成 null。本层不做时间
+    // 过滤，只在形状坏到无法解释（until 非数）时丢弃。
+    if (!Number.isFinite(until)) continue;
     map.set(username, { username, code, parked: false, until, attempt });
   }
   return map;
@@ -119,8 +120,6 @@ function parksPayload(parks: Map<string, HeldThrottle>): { version: number; park
 export interface ThrottleStoreOptions {
   /** Directory the throttle file lives in. */
   dir?: string;
-  /** Clock override for tests. */
-  now?: () => number;
   /** `ctx.logger`, for the ADR-006 write-side version-guard degrade signal. */
   logger?: { warn?: (message: string) => void };
 }
@@ -136,7 +135,9 @@ export interface ThrottleStoreOptions {
  * @returns the store, keyed by username（多账号分钥）.
  */
 export function createFileThrottleStore(options: ThrottleStoreOptions = {}) {
-  const { dir = throttleDir(), now = Date.now, logger } = options;
+  // 不带时钟（U5-D2 后本层不做时间过滤——过期判定在读侧），「测试注时钟」的
+  // 旧选项随之退役：窗口穿越由 token-store 层注入的 `now` 负责。
+  const { dir = throttleDir(), logger } = options;
   const file = join(dir, "throttle.json");
   // ADR-006 write-side guard + atomic write shared via createVersionedJsonWriter
   // (state-store.ts). A refusal is NOT silent: the guard's whole contract
@@ -151,9 +152,12 @@ export function createFileThrottleStore(options: ThrottleStoreOptions = {}) {
   });
 
   return {
-    /** 读某账号的冷却；过期窗口不算数（attempt 留在文件里喂下次倍增）。 */
+    /**
+     * 读某账号的冷却。过期窗口条目**原样返回**（U5-D2 拍板：attempt 保留喂
+     * 下次倍增）；是否仍在生效由读侧判（acquire 闸 / inForceWaitMs）。
+     */
     async read(username: string) {
-      const parks = parseParks(await readStateJson(file), now);
+      const parks = parseParks(await readStateJson(file));
       return parks.get(username) ?? null;
     },
     /**
@@ -168,7 +172,7 @@ export function createFileThrottleStore(options: ThrottleStoreOptions = {}) {
      * @returns {Promise<boolean>} true when the record reached the disk.
      */
     async write(username: string, held: HeldThrottle) {
-      const parks = parseParks(await readStateJson(file), now);
+      const parks = parseParks(await readStateJson(file));
       parks.set(username, held);
       try {
         // `null` = written. A string = the ADR-006 guard refused the write and
@@ -186,7 +190,7 @@ export function createFileThrottleStore(options: ThrottleStoreOptions = {}) {
      * @returns {Promise<boolean>} true when the key is gone.
      */
     async clear(username: string) {
-      const parks = parseParks(await readStateJson(file), now);
+      const parks = parseParks(await readStateJson(file));
       if (!parks.has(username)) return true;
       parks.delete(username);
       try {
@@ -205,20 +209,19 @@ export function createFileThrottleStore(options: ThrottleStoreOptions = {}) {
  *
  * Used by the tests, and by a Host that can be given nothing writable. It is
  * deliberately NOT the default: the throttle exists so that a second Host
- * process does not walk into a lock the first is waiting out, which is a
- * claim about other processes and cannot be kept in memory.
- * @param {() => number} [now] - clock source.
+ * process does not walk into a lock the first is waiting out, which is a claim
+ * about other processes and cannot be kept in memory.
+ *
+ * 不带时钟、不过滤过期窗（U5-D2 后与文件版同形）：条目原样返回，过期判定
+ * 在读侧（acquire 闸 / inForceWaitMs）——窗口穿越由 token-store 层的 `now` 负责。
  * @returns the store, keyed by username.
  */
-export function createMemoryThrottleStore(now = Date.now) {
+export function createMemoryThrottleStore() {
   const parks = new Map<string, HeldThrottle>();
   return {
     async read(username: string) {
-      const held = parks.get(username);
-      if (held === undefined) return null;
-      // A window that has closed is no longer a reason to refuse.
-      if (held.parked !== true && held.until !== null && held.until <= now()) return null;
-      return held;
+      // 过期窗口也原样返回（U5-D2 拍板：attempt 保留喂下次倍增）。
+      return parks.get(username) ?? null;
     },
     async write(username: string, held: HeldThrottle) {
       parks.set(username, held);

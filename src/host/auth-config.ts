@@ -14,6 +14,16 @@ import { createJwksCache } from "./sensenova-crypto.ts";
 import { str, obj, num, pluginError } from "./util.ts";
 
 /**
+ * The console JWT's assumed lifetime, in seconds, for the one shape the token
+ * endpoint does not answer for: `expires_in` absent or not a usable number.
+ * One declaration, three consumers (U5-D6)：{@link AUTH_DEFAULTS} 的回落、
+ * `token-store/grant.ts` storeGrant 的 expiresAt 计算、`token-store.ts`
+ * saveAccount add 模式的快照 expiresAt——改这一处，三处同动，不再有第二份
+ * `10800` 字面量。
+ */
+export const ASSUMED_TOKEN_LIFETIME_SECONDS = 10_800;
+
+/**
  * The platform's public defaults — every value here is an override point, not a
  * law of nature.
  *
@@ -27,6 +37,10 @@ import { str, obj, num, pluginError } from "./util.ts";
 export const AUTH_DEFAULTS = Object.freeze({
   consoleOrigin: "https://platform.sensenova.cn",
   iamOrigin: "https://iam.sensecoreapi.cn",
+  // 登录端点的路径段（U5-S-D）：这是默认租户的形状。「路径段是否随 client
+  // 变化」没有文档判据（S2 沉默、无第二租户样本），所以做成 override 点而
+  // 不是从 clientId 推导——推导错一次就是全体登录挂；第二租户实锤后改这里。
+  iamLoginPath: "/iam/authn/v1/auth/nova/login",
   tokenEndpoint: "https://signin.sensecore.cn/oauth2/token",
   jwksEndpoint: "https://signin.sensecore.cn/.well-known/jwks.json",
   clientId: "nova",
@@ -37,13 +51,15 @@ export const AUTH_DEFAULTS = Object.freeze({
   requestTimeoutMs: 20_000,
   maxHops: 6,
   /** Used only when the token endpoint omits `expires_in`; the console JWT lives 180 min. */
-  assumedTokenLifetimeSeconds: 10_800
+  assumedTokenLifetimeSeconds: ASSUMED_TOKEN_LIFETIME_SECONDS
 });
 
 /** The resolved auth configuration every flow function walks with. */
 export interface AuthConfig {
   consoleOrigin: string;
   iamOrigin: string;
+  /** IAM 登录端点的路径段（U5-S-D override 点；默认 = nova 租户形状）。 */
+  iamLoginPath: string;
   authEndpoint: string;
   tokenEndpoint: string;
   jwksEndpoint: string;
@@ -119,9 +135,16 @@ export function resolveAuthConfig(overrides: object = {}): AuthConfig {
     return value === undefined ? fallback : value;
   };
   const consoleOrigin = checkEndpoint(pick("consoleOrigin", AUTH_DEFAULTS.consoleOrigin, false), "consoleOrigin");
+  // U5-S-D：路径段只要求是「以 / 开头的路径」，其余形状留白——它是拼进 URL
+  // 的路径段，写错在登录那刻才炸不如在装配时炸。
+  const iamLoginPath = str(pick("iamLoginPath", AUTH_DEFAULTS.iamLoginPath, false), AUTH_DEFAULTS.iamLoginPath);
+  if (!iamLoginPath.startsWith("/")) {
+    throw pluginError(CODE.CONFIG, `iamLoginPath must start with "/", got ${iamLoginPath}`);
+  }
   return Object.freeze({
     consoleOrigin,
     iamOrigin: checkEndpoint(pick("iamOrigin", AUTH_DEFAULTS.iamOrigin, false), "iamOrigin"),
+    iamLoginPath,
     authEndpoint: `${consoleOrigin}/oauth2/auth`,
     tokenEndpoint: checkEndpoint(pick("tokenEndpoint", AUTH_DEFAULTS.tokenEndpoint, false), "tokenEndpoint"),
     jwksEndpoint: checkEndpoint(pick("jwksEndpoint", AUTH_DEFAULTS.jwksEndpoint, false), "jwksEndpoint"),

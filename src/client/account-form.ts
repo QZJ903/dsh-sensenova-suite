@@ -87,8 +87,9 @@ export function AccountForm({ auth, onDone, tt, bare, snapshotAt }: {
   // 已存账号（2026-10-29 方案 C）：切换/移除。错误走同一条 formError；
   // 切到冷账号的登录失败会带平台原话与退避，与表单提交同一套处理。
   const accounts = Array.isArray(auth?.accounts) ? auth.accounts : [];
-  // 两态表单（2026-10-29 用户拍板）：无账号 = 「登录」（连上该号）；有账号 =
-  // 「添加账号」（只入清单，不验证不登录，当前登录保持不变）。
+  // 两态表单（2026-10-29 用户拍板；2026-10-31 修正注释——旧文「不验证不登录」
+  // 描述的是 0.1.29 形状）：无账号 = 「登录」（连上该号）；有账号 = 「添加账号」
+  // （登录一次只为验证凭据并落令牌快照，活动槽/当前登录保持不变）。
   const hasAccounts = accounts.length > 0;
   const [accountBusy, setAccountBusy] = useState<string | null>(null);
   // 切换/移除共用一条动作路径（busy/错误/成功刷新同源）——两份手抄会被

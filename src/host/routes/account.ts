@@ -78,6 +78,10 @@ export function registerAccountRoute(ctx: any, wiring: Pick<Wiring, "settings" |
           await tokenStore.switchAccount(body.value.id);
         } catch (e) {
           // 切换失败保持已生效（用户可再切走）；失败原因按登录类上屏。
+          // U5 顺带 2：快照路径失败时身份/grant 已可能换人——上一账号的
+          // 缓存响应不得越界存活，与成功路径同一条纪律（否则 ≤cacheSeconds
+          // 窗口内面板把旧号的额度/目录挂在可能是新号的会话上）。
+          clearCoalescedFetch(cache, inflight);
           await reportAuthFailure(response, e);
           return;
         }
@@ -94,9 +98,11 @@ export function registerAccountRoute(ctx: any, wiring: Pick<Wiring, "settings" |
         return;
       }
       try {
-        // mode=add（2026-10-29 用户拍板）：已有账号时表单是「添加账号」——只把
-        // 用户名+密码落清单，不验证不登录；切到该号时才用存档密码登录。无账号
-        // （或未带 mode）= 登录并接管。
+        // mode=add（2026-10-30 拍板「验证但不接管」；本注释 2026-10-31 修正——
+        // 旧文「不验证不登录」描述的是 0.1.29 形状，与 store 实现和 account-vault
+        // 套件的钉相反）：提交 mode=add 时登录一次只为**验证凭据**并落令牌快照，
+        // 错密码当场红字报平台原话、不落清单、该号进冷却；活动槽/身份/当前会话
+        // 全不动。无账号（或未带 mode）= 登录并接管。
         const mode = body.value.mode === "add" ? "add" : "login";
         await tokenStore.saveAccount(
           { username: body.value.username, password: body.value.password },

@@ -69,6 +69,29 @@ const SECRET_URL_PARAMS = new Set([
   "access_token", "refresh_token", "session_state"
 ]);
 
+/** `name=secret` 键值对的文本内擦除（非 JSON 体与 URL 逃生口共用一份正则）。 */
+const SECRET_PARAM_PAIRS = new RegExp(`\\b(${[...SECRET_URL_PARAMS].join("|")})=([^&\\s"']+)`, "gi");
+
+/**
+ * 同一批 {@link SECRET_VALUE_SHAPES} 的「文本内扫描」版：去首尾锚定后用于
+ * 非 JSON 自由文本与逃生口（U5-S-E）。形状本身高度特异（`eyJ` 前缀 /
+ * `sk-` 前缀 / 字面 Bearer|Basic），误杀代价只是诊断日志多遮一段——
+ * 擦除方向永远取失败闭合。
+ */
+const SECRET_TEXT_SHAPES: ReadonlyArray<RegExp> = Object.freeze(
+  SECRET_VALUE_SHAPES.map((pattern) => new RegExp(pattern.source.replace(/^\^/, "").replace(/\$$/, ""), "gi"))
+);
+
+/**
+ * 自由文本兜底擦除（U5-S-E/S-F）：键值对 + 凭据形状，一份实现三处消费
+ * （非 JSON 体、sanitizeUrl 逃生口）——三处手抄正是 U5-D6 的形态。
+ */
+function scrubFreeText(text: string): string {
+  let out = text.replace(SECRET_PARAM_PAIRS, "$1=[REDACTED]");
+  for (const shape of SECRET_TEXT_SHAPES) out = out.replace(shape, "[REDACTED]");
+  return out;
+}
+
 /** Longest sanitized response snippet kept per hop. */
 const TRACE_SNIPPET_MAX = 2000;
 
@@ -107,7 +130,9 @@ function sanitizeUrl(url: string): string {
     try {
       parsed = new URL(raw, "http://redacted.invalid");
     } catch {
-      return raw.slice(0, 200);
+      // U5-S-F：双解析失败也不裸奔——键值对与凭据形状擦完再截断（此前这里
+      // 返回未脱敏原文，模块头注「永不落日志」的全称在该分支不成立）。
+      return scrubFreeText(raw).slice(0, 200);
     }
   }
   for (const name of [...parsed.searchParams.keys()]) {
@@ -169,11 +194,7 @@ function sanitizeBody(text: unknown): string {
     body = JSON.stringify(scrub(parsed));
   } catch {
     // Not JSON: redact the request-shaped secret patterns we know of.
-    body = raw
-      .replace(/("password"\s*:\s*")[^"]*(")/gi, "$1[REDACTED]$2")
-      // Any `name=secret` pair in the text, not only inside a parseable URL:
-      // an HTML form or a redirect header puts them in plain sight.
-      .replace(new RegExp(`\\b(${[...SECRET_URL_PARAMS].join("|")})=([^&\\s"']+)`, "gi"), "$1=[REDACTED]");
+    body = scrubFreeText(raw.replace(/("password"\s*:\s*")[^"]*(")/gi, "$1[REDACTED]$2"));
   }
   return body.slice(0, TRACE_SNIPPET_MAX);
 }

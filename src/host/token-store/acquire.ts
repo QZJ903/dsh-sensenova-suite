@@ -35,7 +35,9 @@ export interface AcquireBlocks {
    * no code (see `writeThrottle`'s note).
    */
   writeThrottle: (username: string, error: unknown) => Promise<HeldThrottle | null>;
-  throttleError: (held: HeldThrottle, cause?: Error) => Error;
+  /** U5-D5：登录闸的唯一判据（与 switchAccount 的无快照路径共用），now 已由
+   *  门面绑定本实例时钟——挡路时返回要抛的 throttleError，不挡返回 null。 */
+  throttleGateError: (held: HeldThrottle | null) => Error | null;
   purgeGrant: (accessToken?: string) => Promise<void>;
 }
 
@@ -48,13 +50,12 @@ export interface AcquireBlocks {
  * @returns {Promise<string>} the access token now in effect.
  */
 export async function acquire(wiring: StoreContextWiring, state: TokenStoreState, blocks: AcquireBlocks): Promise<string> {
-  const { now } = wiring;
   const {
     readThrottle, clearThrottle,
     readStored, isFresh,
     renewWithRefresh,
     readAccount, loginFromAccount,
-    writeThrottle, throttleError, purgeGrant
+    writeThrottle, throttleGateError, purgeGrant
   } = blocks;
 
   const stored: StoredGrant | null | undefined = (await readStored()) ?? state.cached ?? undefined;
@@ -90,14 +91,18 @@ export async function acquire(wiring: StoreContextWiring, state: TokenStoreState
   }
   // Login fallback. 先解析账号，再查「这个账号」的冷却（多账号分钥）：B 的
   // parked 不拦 A 的重登；A 自己的 park 才拦 A。门只挡登录尝试——续期不受它管。
+  // U5-S-A 窄修：登录兜底前探测 grant 记录可读——readStored 把读失败吞成
+  // 「无 grant」（故意的降级），但那次吞错在这里会被当成「该登录了」：一次
+  // 瞬时读故障换来一次真实密码登录。探测失败 = 「读不到」而非「没有」，抛
+  // **无码**错误（无码不 park，见 writeThrottle 的模块注），下一轮自动重试。
+  try { await wiring.backend().readRecord(wiring.key); }
+  catch { throw new Error("credentials store is unreadable; login fallback skipped this round"); }
   const account = await readAccount();
   if (account === undefined) {
     throw pluginError(CODE.NOT_CONFIGURED, "no console account is configured");
   }
-  const held = await readThrottle(account.username);
-  if (held !== null && (held.parked || (held.until !== null && held.until > now()))) {
-    throw throttleError(held);
-  }
+  const blocked = throttleGateError(await readThrottle(account.username));
+  if (blocked !== null) throw blocked;
   try {
     const fresh = await loginFromAccount(account);
     // A sign-in that worked clears THIS account's earlier refusal: the wait

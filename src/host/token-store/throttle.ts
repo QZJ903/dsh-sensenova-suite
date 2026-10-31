@@ -14,7 +14,7 @@
 
 import { isCredentialRefusal } from "../codes.ts";
 import { obj, numOrNull } from "../util.ts";
-import type { StoreContextWiring, HeldThrottle } from "./state.ts";
+import type { StoreContextWiring, TokenStoreState, HeldThrottle } from "./state.ts";
 
 /**
  * The first wait imposed on a refusal the platform gave no window for.
@@ -32,24 +32,6 @@ export const DEFAULT_LOGIN_BACKOFF_MS = 60_000;
  */
 export const MAX_LOGIN_BACKOFF_MS = 30 * 60_000;
 
-/**
- * Where the throttle used to live, as a record in the credentials service.
- *
- * Read for MIGRATION ONLY; the marker identifies the old record.
- */
-export const THROTTLE_MARKER = "signin-throttle";
-
-/**
- * Payload version of the throttle record that used to live in the credentials
- * service, read for MIGRATION ONLY.
- *
- * A DIFFERENT constant from `THROTTLE_FILE_VERSION` (`throttle-store.ts`),
- * which versions the state file the throttle moved into. This one is frozen:
- * the plugin no longer writes that record, so there is nothing to bump it for —
- * it only has to keep recognising what previous versions parked. Sharing the
- * name and the value with the file's version is exactly what made the two worth
- * separating.
- */
 /**
  * The refusal an in-force throttle stands for.
  *
@@ -91,16 +73,30 @@ export function localBackoffMs(attempt: number): number {
 }
 
 /**
- * Read the persisted throttle, or `null` when absent, stale, or unreadable.
+ * Read the persisted throttle, or `null` when there is no refusal to honour.
  *
  * A parked refusal has no deadline, so it is keyed on its `parked` flag
  * rather than on a time: reading it back must not depend on a field that is
  * legitimately absent.
+ *
+ * U5-D3a（拍板 2026-10-31）：存储读空 ≠ 没有冷却。写侧被 ADR-006 拒或写失败
+ * 时，冷却落不到盘——本进程改从 `state.throttleOverlay`（写侧失败时布下的
+ * 进程内镜像）取回，照常遵守平台给的等待窗；磁盘重新可读（镜像清场条件见
+ * writeThrottle）后自然回到磁盘真相。跨进程的那一半以磁盘为唯一通道，拒写
+ * 窗内退化为尽力而为——degrade 日志与本注释是全部诚实。
  * @returns {Promise<{code: string, parked: boolean, until: number|null, attempt: number}|null>}
  */
-export async function readThrottle(wiring: StoreContextWiring, username: string): Promise<HeldThrottle | null> {
+export async function readThrottle(wiring: StoreContextWiring, state: TokenStoreState, username: string): Promise<HeldThrottle | null> {
   const { throttleStore } = wiring;
-  return throttleStore.read(username).catch(() => null);
+  // 真值判定（而非 !== null）：契约只说 read 返回「冷却或空」，桩可能以
+  // undefined 表达空——非对象一律按缺席走镜像回退。
+  const stored = await throttleStore.read(username).catch(() => null);
+  if (stored) {
+    // 磁盘（或内存桩）有真相：镜像退场，防版本恢复后僵尸条目残留。
+    state.throttleOverlay.delete(username);
+    return stored;
+  }
+  return state.throttleOverlay.get(username) ?? null;
 }
 
 /**
@@ -124,38 +120,59 @@ export async function readThrottle(wiring: StoreContextWiring, username: string)
  *   the throttle now in force, or `null` when nothing was written because the
  *   error carried no code to park.
  */
-export async function writeThrottle(wiring: StoreContextWiring, username: string, error: unknown): Promise<HeldThrottle | null> {
+export async function writeThrottle(wiring: StoreContextWiring, state: TokenStoreState, username: string, error: unknown): Promise<HeldThrottle | null> {
   const { throttleStore, now } = wiring;
   const code = obj(error).code;
   if (typeof code !== "string") {
     // No code, no parking: see the module note above. The attempt ladder is
     // left alone too — a surprise is not a refusal, and it must not reset the
     // backoff ladder a real refusal had been climbing.
-    return await readThrottle(wiring, username);
+    return await readThrottle(wiring, state, username);
   }
   const parked = isCredentialRefusal(code);
   // A window the platform stated is taken at its word; only a window we
   // invented is capped. The attempt ladder lives in THIS account's park
   // （多账号分钥：B 连错两次的倍增不串到 A 的第一次失败上）。
   const stated = numOrNull(obj(error).retryAfterMs);
-  const previous = await readThrottle(wiring, username);
+  // previous 走 readThrottle（含镜像回退）：上次写失败进镜像的 attempt
+  // 也继续爬梯，不被磁盘拒写打断（U5-D3a 的连带收益）。
+  const previous = await readThrottle(wiring, state, username);
   const attempt = Math.max(1, (previous?.attempt ?? 0) + 1);
   const until = parked
     ? null
     : now() + (stated === null ? localBackoffMs(attempt) : Math.max(stated, 0));
   const held: HeldThrottle = { username, code, parked, until, attempt };
-  await throttleStore.write(username, held).catch(() => false);
+  const persisted = await throttleStore.write(username, held).catch(() => false);
+  if (persisted) state.throttleOverlay.delete(username);
+  else state.throttleOverlay.set(username, held);
   return held;
 }
 
 /**
  * Drop ONE account's throttle, so the next sign-in for it is allowed to try.
  * Other accounts' parks are untouched（分钥的本意）.
+ *
+ * 清除失败不进镜像：镜像的语义是「磁盘丢了我们的写」，不是「替磁盘记冷却」——
+ * 清不掉意味着磁盘上还留着 park（可读形态）或整份不可见（版本拒写形态，
+ * 此时 park 本就读不到）。残余风险见模块注释。
  * @returns {Promise<void>}
  */
-export async function clearThrottle(wiring: StoreContextWiring, username: string): Promise<void> {
+export async function clearThrottle(wiring: StoreContextWiring, state: TokenStoreState, username: string): Promise<void> {
   const { throttleStore } = wiring;
-  await throttleStore.clear(username).catch(() => false);
+  const cleared = await throttleStore.clear(username).catch(() => false);
+  if (cleared) state.throttleOverlay.delete(username);
+}
+
+/**
+ * 「这个冷却现在挡不挡路」的唯一判据（U5-D5）：acquire 的登录闸与
+ * switchAccount 的无快照防御路径共用一份，防两处手抄漂移。parked 无限期挡；
+ * time-shaped 只在窗口未过时挡。挡 = 返回要抛的错误；不挡 = null。
+ */
+export function throttleGateError(held: HeldThrottle | null, now: () => number): Error | null {
+  if (held === null) return null;
+  if (held.parked) return throttleError(held);
+  if (held.until !== null && held.until > now()) return throttleError(held);
+  return null;
 }
 
 /**
@@ -168,5 +185,8 @@ export async function clearThrottle(wiring: StoreContextWiring, username: string
 export function inForceWaitMs(wiring: StoreContextWiring, held: HeldThrottle | null): number | null {
   const { now } = wiring;
   if (held === null || held.parked || held.until === null) return null;
-  return Math.max(0, held.until - now());
+  // U5-D2 拍板后过期条目会从存储原样读回：窗口已过 = 不在等待（null，不是 0），
+  // 面板不该为一个已经结束的窗渲染零倒计时。
+  if (held.until <= now()) return null;
+  return held.until - now();
 }

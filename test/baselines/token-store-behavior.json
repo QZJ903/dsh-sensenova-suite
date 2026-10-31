@@ -22,6 +22,11 @@
           },
           {
             "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           }
@@ -92,6 +97,11 @@
           },
           {
             "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           }
@@ -108,6 +118,11 @@
         "t": 0,
         "note": "getToken again is served from cache",
         "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -187,6 +202,11 @@
         "calls": [
           {
             "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
             "op": "set",
             "ref": "$USER"
           },
@@ -200,12 +220,15 @@
             "op": "login",
             "username": "alice",
             "hasPassword": true
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$USER"
           }
         ],
         "records": {},
-        "refs": {
-          "$USER": "alice"
-        },
+        "refs": {},
         "throttle": {
           "username": "alice",
           "code": "login_rejected",
@@ -244,9 +267,7 @@
           }
         ],
         "records": {},
-        "refs": {
-          "$USER": "alice"
-        },
+        "refs": {},
         "throttle": {
           "username": "alice",
           "code": "login_rejected",
@@ -257,14 +278,14 @@
         "result": {
           "configured": false,
           "accounts": [],
-          "hasAccount": true,
+          "hasAccount": false,
           "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
           "needsAccount": true,
           "ephemeral": false,
           "retryAfterMs": null,
-          "needsUserAction": true,
+          "needsUserAction": false,
           "error": null
         }
       },
@@ -279,14 +300,17 @@
           },
           {
             "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           }
         ],
         "records": {},
-        "refs": {
-          "$USER": "alice"
-        },
+        "refs": {},
         "throttle": {
           "username": "alice",
           "code": "login_rejected",
@@ -325,9 +349,7 @@
           }
         ],
         "records": {},
-        "refs": {
-          "$USER": "alice"
-        },
+        "refs": {},
         "throttle": {
           "username": "alice",
           "code": "login_rejected",
@@ -338,14 +360,14 @@
         "result": {
           "configured": false,
           "accounts": [],
-          "hasAccount": true,
+          "hasAccount": false,
           "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
           "needsAccount": true,
           "ephemeral": false,
           "retryAfterMs": null,
-          "needsUserAction": true,
+          "needsUserAction": false,
           "error": "no console account is configured"
         }
       }
@@ -358,6 +380,11 @@
         "t": 0,
         "note": "getToken #1 fails: 60s local backoff",
         "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -388,6 +415,11 @@
           },
           {
             "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
+          {
+            "via": "credentials",
             "op": "resolve",
             "ref": "$USER"
           }
@@ -404,6 +436,11 @@
         "t": 182000,
         "note": "getToken #3 after the doubled window succeeds",
         "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -481,6 +518,11 @@
         "t": 0,
         "note": "getToken fails carrying the 2h platform window",
         "calls": [
+          {
+            "via": "credentials",
+            "op": "readRecord",
+            "key": "$SCOPE/$GRANT"
+          },
           {
             "via": "credentials",
             "op": "readRecord",
@@ -1117,6 +1159,11 @@
         "calls": [
           {
             "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
             "op": "set",
             "ref": "$USER"
           },
@@ -1326,6 +1373,11 @@
         "calls": [
           {
             "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
+          {
+            "via": "credentials",
             "op": "set",
             "ref": "$USER"
           },
@@ -1339,12 +1391,15 @@
             "op": "login",
             "username": "alice",
             "hasPassword": true
+          },
+          {
+            "via": "credentials",
+            "op": "unset",
+            "ref": "$USER"
           }
         ],
         "records": {},
-        "refs": {
-          "$USER": "alice"
-        },
+        "refs": {},
         "throttle": {
           "username": "alice",
           "code": "login_rejected",
@@ -1383,9 +1438,7 @@
           }
         ],
         "records": {},
-        "refs": {
-          "$USER": "alice"
-        },
+        "refs": {},
         "throttle": {
           "username": "alice",
           "code": "login_rejected",
@@ -1396,14 +1449,14 @@
         "result": {
           "configured": false,
           "accounts": [],
-          "hasAccount": true,
+          "hasAccount": false,
           "vaultPasswordArmed": false,
           "hasRefreshToken": false,
           "expiresAt": null,
           "needsAccount": true,
           "ephemeral": false,
           "retryAfterMs": null,
-          "needsUserAction": true,
+          "needsUserAction": false,
           "error": null
         }
       },
@@ -1411,6 +1464,11 @@
         "t": 0,
         "note": "saveAccount with the corrected password clears the park",
         "calls": [
+          {
+            "via": "credentials",
+            "op": "resolve",
+            "ref": "$USER"
+          },
           {
             "via": "credentials",
             "op": "set",

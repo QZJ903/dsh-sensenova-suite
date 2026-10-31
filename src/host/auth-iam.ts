@@ -50,8 +50,15 @@ export function retryWindowMs(body: unknown, response: { status?: number; header
     }
   }
 
-  // Otherwise read the duration out of the human message.
+  // Otherwise read the duration out of the human message — UNLESS the message
+  // is the platform's CONDITIONAL warning (U5-D7)："The account will be locked
+  // for 15 minutes after 4 attempts" 警告的是**未来**的第 N 次错误（N 随剩余
+  // 次数递减，真机 16 份 trace 实证），不是现在要等的窗。计数子句
+  // 「after N attempts」是条件式的签名——真窗措辞（"has been locked, try
+  // again after 8 minutes"）从不带它。只闸子句、不闸「will be locked」：
+  // 真窗也可能用将来时措辞，别把门开过头。
   const text = `${str(obj(body).message, "")} ${rejectionDetail(body, response?.status ?? 0)}`;
+  if (/after \d+ attempts?/i.test(text)) return undefined;
   const match = /(\d+(?:\.\d+)?)\s*(second|sec|minute|min|hour|hr|秒|分钟|小时|时|分)/i.exec(text);
   if (match === null) return undefined;
   const amount = Number(match[1]);

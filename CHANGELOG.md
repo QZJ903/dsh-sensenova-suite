@@ -1,5 +1,18 @@
 # 更新日志（Changelog）
 
+## 0.1.40（2026-10-31）
+
+- **U5 审计修复轮（控制台鉴权与凭据链，两批全毕）**：
+  - **拍板三落地**：`throttle.json` 过期窗条目**保留 attempt**（D2：parseParks 去时间过滤，`inForceWaitMs` 过期窗读 null；倍增梯不再每窗重置）；节流写盘失败的**进程内镜像**（D3a：`writeThrottle` 拒写/写失败时挂 `state.throttleOverlay`，`readThrottle` 读空回退——ADR-006 拒写窗内本进程继续守平台的等待窗，不再重新撞门）；登录表单**失败回滚身份**（S-Bc：persist-first 金丝雀保留，登录本身没落地时把 `USERNAME_REF` 写回原号/首装 unset——面板标题与自动重登链条不再指向没登录成的号）。
+  - **假冷却 login_failed 后门双修（D7，N1 真机测试测出）**：表外 reason 兜底 LOGIN_FAILED 时旧闸仍会把它 LocalizedMessage 里的**条件式**锁定警告（"will be locked for 15 minutes after N attempts"，N 递减——16 份真机 trace 实证）读成 15 分钟真窗。修=①`retryWindowMs` prose 前置计数子句闸（只闸 `after N attempts` 子句，将来时真窗无子句仍解析）；②新 `TIME_SHAPED_REFUSALS={ACCOUNT_LOCKED,RATE_LIMITED}` 收窄窗闸——LOGIN_FAILED 语义未知不信任 prose，走本地退避梯。
+  - **其余五修**：acquire 登录兜底前探测 grant 记录可读（S-A：凭据服务读故障不再烧一次真实密码登录，无码不 park）；相对 `Location` 一族（S-C：`paramOf` 相对兜底 + `followUntil` 逐跳以发跳为基归一——带 code 的成功流不再被误判 login_flow）；IAM 登录路径段 `iamLoginPath` override 点（S-D，默认形状不变）；非 JSON 体与 sanitizeUrl 逃生口的值形状擦除（S-E/S-F：JWT/sk- 自由文本不再穿透，双解析失败不裸奔）。
+  - **清理**：死迁移键（THROTTLE_MARKER/THROTTLE_KEY/LEGACY_ACCOUNT_SLOTS/ACCOUNT_RECORD_PREFIX）与三处「收养后清扫」失实注释（D1）；`rejected.clear()` 移入 activate 分支——add 模式不再抹掉活动 grant 的 401 记忆（D4）；switchAccount 无快照防御路径过 park 闸，判据抽 `throttleGateError` 单源（D5，拍板③补齐）；假定令牌寿命 `ASSUMED_TOKEN_LIFETIME_SECONDS` 单源三处同用（D6）。
+  - **路由与文档**：switch **失败**路径同样清 coalesced 缓存（快照路径失败时身份已可能换人）；三处「添加模式不验证不登录」旧话术修正为「验证但不接管」现状（路由头注 + 面板注释 ×2）；trace 0600 的 Windows 语义说诚实。
+- **新套件两份（peer-free）**：`account-route.test.mjs`（switch 成败都清缓存 + reportAuthFailure 契约 + GET 无秘密）；`coalesced-fetch.test.mjs`（代际闸并发语义六钉——单飞/清场不 join/迟到写不可见/迟到落场不清继任/per-key 清场，N2 宿主半边，该机制此前全仓零钉）。
+- **钉 21 条**：account-vault 场景 9–14（回滚两形态/park 闸/拒绝记忆/attempt 梯/拒写镜像/存储读故障）；auth.test 7e–7h（相对 Location 两走查变体、值形状擦除、iamLoginPath override、D7 双层）；config.test D6 源钉。
+- **冻结基线重生成 ×2**（reason 留档）：S-Bc——S3「parked refusal survives a restart」的失败登录不再残留 `refs.$USER`（旧形状=身份挂在没登录成的号上）；S-A——每个走 acquire 的场景 calls 多一次探测 readRecord，无 result/refs 变化。
+- **N1 真机实测（写进台账）**：凭据拒绝两拼写真机 parked ✓；IAM 拒绝**无 Retry-After 头**（探针全量头）；条件式警告形状与递减计数实锤。
+
 ## 0.1.39（2026-10-31）
 
 - **U7 修复轮（状态落盘原语，两批处置）**：

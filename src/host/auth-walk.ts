@@ -33,6 +33,11 @@ export async function httpGet(url: string, init: RequestInit & { timeoutMs?: num
 /**
  * Dig a query parameter out of a URL, decoded.
  *
+ * 相对地址也解析（U5-S-C）：一跳的 `Location` 可以是相对的且带着想要的参数，
+ * 而调用方读参数的输入就是 `followUntil` 的返回值——绝对解析失败曾把带参的
+ * 成功流读成空参，`login_flow` 误报。兜底基用一个一次性 origin（与 trace 的
+ * sanitizeUrl 同手法）；相对命中真正要的只有查询串。
+ *
  * (The password-sealing JWE lives in `sensenova-crypto.ts` — `sealPassword` —
  * with the PKCE and JWKS primitives this module no longer carries.)
  * @param {string} url - any URL.
@@ -42,6 +47,22 @@ export async function httpGet(url: string, init: RequestInit & { timeoutMs?: num
 export function paramOf(url: string, name: string): string {
   try {
     return new URL(url).searchParams.get(name) ?? "";
+  } catch { /* 相对地址走下方兜底（U5-S-C） */ }
+  try {
+    return new URL(url, "http://relative.invalid").searchParams.get(name) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 把一跳地址归一成绝对 URL：相对 `Location`/meta-refresh 以**发它的那一跳**
+ * 为基解析（U5-S-C）。解析不了返回 ""（调用方据此放弃——原样喂给 fetch 只会
+ * TypeError，错误无码还烧掉整条走查）。
+ */
+function absoluteOf(location: string, base: string): string {
+  try {
+    return new URL(location, base === "" ? undefined : base).href;
   } catch {
     return "";
   }
@@ -92,9 +113,14 @@ function nextFromBody(body: string, wanted: RegExp): string {
 export async function followUntil(start: string, wanted: RegExp, jar: Map<string, string>, cfg: AuthConfig, trace?: AuthTrace): Promise<string> {
   const budget = cfg.maxHops;
   let location = start;
+  // 当前跳的绝对地址：相对 Location/meta-refresh 的解析基（U5-S-C）。
+  let currentUrl = "";
   for (let hop = 0; hop < budget && location !== ""; hop += 1) {
-    if (wanted.test(location)) return location;
-    const response = await httpGet(location, {
+    const here = absoluteOf(location, currentUrl);
+    if (here === "") return "";
+    currentUrl = here;
+    if (wanted.test(here)) return here;
+    const response = await httpGet(here, {
       headers: { cookie: cookieHeader(jar) }
     }, cfg);
     collectCookies(response, jar);
@@ -102,7 +128,7 @@ export async function followUntil(start: string, wanted: RegExp, jar: Map<string
     if (trace !== undefined) {
       const bodyText = next !== "" ? "" : await response.text();
       trace.step(`redirect hop ${hop + 1}`, {
-        url: location,
+        url: here,
         status: response.status,
         location: next !== "" ? next : undefined,
         note: next !== "" ? "followed Location" : "no Location; scanned body for the next hop",
@@ -113,7 +139,7 @@ export async function followUntil(start: string, wanted: RegExp, jar: Map<string
       location = next !== "" ? next : nextFromBody(await response.text(), wanted);
     }
   }
-  return wanted.test(location) ? location : "";
+  return wanted.test(location) ? (absoluteOf(location, currentUrl) || location) : "";
 }
 
 /** Render a cookie jar as a request `cookie` header. */

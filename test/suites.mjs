@@ -70,6 +70,8 @@ export const SUITES = Object.freeze([
   //    has been since it stopped being a *.test.mjs) ───────────────────────
   { name: "auth.test.mjs", kind: "suite", note: "login / PKCE / JWE / throttle classification" },
   { name: "account-vault.test.mjs", kind: "suite", note: "multi-account vault (plan C): slots, one-click switch, capacity" },
+  { name: "account-route.test.mjs", kind: "suite", note: "账号路由（peer-free）：switch 成败都清 coalesced 缓存、reportAuthFailure 契约、GET 无秘密" },
+  { name: "coalesced-fetch.test.mjs", kind: "suite", note: "coalesced 代际闸并发语义（peer-free）：单飞/清场不 join/迟到写不可见/迟到落场不清继任/per-key 清场——N2 宿主半边" },
   { name: "store.test.mjs", kind: "suite", note: "token store behaviour (peer-dependent)" },
   { name: "store-baseline.test.mjs", kind: "suite", note: "frozen behaviour frames — zero drift allowed" },
   { name: "routes.test.mjs", kind: "suite", note: "the HTTP route family" },

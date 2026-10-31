@@ -466,4 +466,25 @@ check("patch tokenSkewSeconds matches code default", Number(activeValue("tokenSk
     `claims "${claimed}", facade registers ${assembled.length}`);
 }
 
+// --- N. U5-D6：假定令牌寿命回落值单源（auth-config 常量，三消费方同源） ----
+{
+  const authConfigSrc = readFileSync(join(here, "..", "src", "host", "auth-config.ts"), "utf8");
+  const grantSrc = readFileSync(join(here, "..", "src", "host", "token-store", "grant.ts"), "utf8");
+  const tokenStoreSrc = readFileSync(join(here, "..", "src", "host", "token-store.ts"), "utf8");
+  // 出厂值钉在定义处：改默认值 = 有意变更，改这里 + CHANGELOG。
+  check("ASSUMED_TOKEN_LIFETIME_SECONDS 定义为出厂默认 10800s",
+    /ASSUMED_TOKEN_LIFETIME_SECONDS = 10_800;/.test(authConfigSrc),
+    authConfigSrc.match(/ASSUMED_TOKEN_LIFETIME_SECONDS = [^;]+;/)?.[0] ?? "missing");
+  // 两个 grant 写侧消费常量、且不再携带独立字面量（防再漂移——U5 审计 D6 的
+  // 形态就是三处独立回落值，override 时其余两处不跟随）。
+  for (const [label, src] of [["grant.ts", grantSrc], ["token-store.ts", tokenStoreSrc]]) {
+    check(`${label} 的 expiresIn 回落消费 ASSUMED_TOKEN_LIFETIME_SECONDS`,
+      src.includes("ASSUMED_TOKEN_LIFETIME_SECONDS"),
+      label);
+    check(`${label} 不再携带独立的假定寿命字面量`,
+      !/10_800|10800/.test(src),
+      (src.match(/.{20}(?:10_800|10800).{20}/) ?? ["clean"])[0]);
+  }
+}
+
 finish();

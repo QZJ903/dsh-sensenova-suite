@@ -35,8 +35,9 @@ export const RECORD_ID = "sensenova-console";
  *
  * The throttle itself now lives in a state file (PITFALLS §23: throttle and
  * the credential grant deliberately share their store, everything else is
- * per-profile). This address survives as a MIGRATION-ONLY key: the parked
- * refusal written under it before the move is adopted once, then swept.
+ * per-profile). 迁移收养已随 2026-10-29「无存量用户，迁移代码是纯负债」拍板
+ * 整体退役——没有任何代码读这个地址（U5-D1）；常量保留只因门面的 re-export
+ * 面冻结（TOKEN-STORE-SPLIT §5），删它等于借清理之名改公共面。
  */
 export const THROTTLE_ID = "sensenova-console-throttle";
 
@@ -45,15 +46,13 @@ export const THROTTLE_ID = "sensenova-console-throttle";
  * 槽位制实现会把枚举成本钉在扫描上限上，单记录数组一次读全拿）。
  *
  * 活动账号仍在 {@link RECORD_ID} 单槽，活动身份 = `USERNAME_REF`——下游
- * （续期/配额/目录）零改动。`ACCOUNT_RECORD_PREFIX` 是槽位制的遗产：仅用于
- * 一次性收编迁移（0.1.27 曾以 `<prefix><n>` 存过侧槽）。
+ * （续期/配额/目录）零改动。0.1.27 槽位制的 `<prefix><n>` 侧槽随同日「无存量
+ * 用户，迁移代码是纯负债」拍板整体作废：不收编、不读取、无收编代码（U5-D1，
+ * 遗产常量已删）。
  */
 export const ACCOUNTS_RECORD_ID = "sensenova-console-accounts";
 /** 账号清单记录形状版本；不兼容变更时递增。 */
 export const ACCOUNTS_RECORD_VERSION = 1;
-/** 槽位制遗产：收编迁移扫描 1..N 号侧槽（0.1.27 的容量即 5）。 */
-export const LEGACY_ACCOUNT_SLOTS = 5;
-export const ACCOUNT_RECORD_PREFIX = "sensenova-console-account-";
 
 /**
  * 账号身份/密码的凭据 ref 名（原属 account.ts；2026-10-29 多账号侧槽需要引用它们，

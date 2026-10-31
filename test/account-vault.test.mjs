@@ -12,6 +12,11 @@
  *   4. removeAccount 只删槽、活动会话不动；
  *   5. 账号数量不设上限（清单制）；
  *   6. env 密码通道退役：env 密码在场也不使用，仅 env 不再自动登录。
+ *
+ * U5 修复轮（2026-10-31 审计拍板）新增：7 = SBc 登录失败身份回滚原号（含首装
+ * unset 形态）；8 = D5 无快照 switch 过 park 闸；9 = D4 add 模式不清 401 拒绝
+ * 记忆 + D6 expiresIn 回落常量；10 = D2 过期窗 attempt 保留（内存/文件/读侧
+ * 三钉）；11 = D3a 拒写镜像（守等待/闸门照拦/恢复退场）。
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -101,10 +106,13 @@ function buildStore({ env = {}, auth, backend, accountsStore }) {
 // 动态加载（ESM import 而非 require0——保持与其它套件同形）。
 let createTokenStore;
 let createMemoryThrottleStore;
+let createFileThrottleStore;
+let inForceWaitMs;
 let RECORD_SCOPE;
 try {
   ({ createTokenStore } = await import("../src/host/token-store.ts"));
-  ({ createMemoryThrottleStore } = await import("../src/host/throttle-store.ts"));
+  ({ createMemoryThrottleStore, createFileThrottleStore } = await import("../src/host/throttle-store.ts"));
+  ({ inForceWaitMs } = await import("../src/host/token-store/throttle.ts"));
   ({ name: RECORD_SCOPE } = await import("../src/host/host-config.ts"));
 } catch (e) { fail("load", e); }
 
@@ -337,6 +345,227 @@ try {
         && backend8.records.get(key("sensenova-console-account-2")) !== undefined
         && backend8.records.get(key("sensenova-console-accounts")) === undefined,
       JSON.stringify(await store8.listAccounts()));
+
+    // ── 场景 9（U5-SBc 拍板 2026-10-31，方案 c）：persist-first 保留，登录
+    // **本身**失败时身份写回原号——面板标题与自动重登链条不再指向没登录成的号。
+    // 判据=loginLanded：登录落地后的清单/回读失败不回滚（grant 与身份一致）。
+    const backendS9 = fakeBackend();
+    const authS9 = fakeAuth();
+    const vstoreS9 = fakeAccountsStore();
+    const wrapS9 = buildStore({ env: {}, auth: authS9, backend: backendS9.backend, accountsStore: vstoreS9 });
+    const storeS9 = wrapS9.store;
+    await storeS9.saveAccount({ username: "old9", password: "pw-old" });   // 登录接管
+    authS9.loginFailsFor = { "new9": true };
+    let errS9 = null;
+    try { await storeS9.saveAccount({ username: "new9", password: "pw-new" }); }
+    catch (e) { errS9 = e; }
+    const stS9 = await storeS9.state();
+    check("U5-SBc：登录失败身份回滚原号（ref 写回、坏号不进清单、原号可见）",
+      errS9 !== null && backendS9.refs.get(USERNAME_REF) === "old9"
+        && (await storeS9.listAccounts()).every((a) => a.username !== "new9")
+        && stS9.hasAccount === true && stS9.accounts.some((a) => a.username === "old9"),
+      `err=${errS9?.message} ref=${backendS9.refs.get(USERNAME_REF)}`);
+    check("U5-SBc：原号会话未受损（getToken 照常服务旧令牌）",
+      String(await storeS9.getToken()).startsWith("at-old9"),
+      String(await storeS9.getToken()));
+    check("U5-SBc：失败号仍进 park（分钥不受回滚影响）",
+      (await wrapS9.throttleStore.read("new9")) !== null,
+      JSON.stringify(await wrapS9.throttleStore.read("new9")));
+    // 首装（无原号）：回滚 = unset，面板回到「需要账号」。
+    const backendS9b = fakeBackend();
+    const authS9b = fakeAuth();
+    const storeS9b = buildStore({ env: {}, auth: authS9b, backend: backendS9b.backend }).store;
+    authS9b.loginFailsFor = { "first9": true };
+    let errS9b = null;
+    try { await storeS9b.saveAccount({ username: "first9", password: "pw" }); }
+    catch (e) { errS9b = e; }
+    check("U5-SBc：首装登录失败回滚到无账号态（ref unset、needsAccount）",
+      errS9b !== null && backendS9b.refs.get(USERNAME_REF) === undefined
+        && (await storeS9b.state()).needsAccount === true,
+      `err=${errS9b?.message} ref=${backendS9b.refs.get(USERNAME_REF)}`);
+
+    // ── 场景 10（U5-D5）：switchAccount 的无快照防御路径过同一把 park 闸——
+    // 拍板③「切到 parked 号当场报错，不清门、不消耗平台尝试」对防御路径同样成立。
+    const backendS5 = fakeBackend();
+    const authS5 = fakeAuth();
+    const vstoreS5 = fakeAccountsStore();
+    const wrapS5 = buildStore({ env: {}, auth: authS5, backend: backendS5.backend, accountsStore: vstoreS5 });
+    const storeS5 = wrapS5.store;
+    await storeS5.saveAccount({ username: "alpha", password: "pw-a" });
+    await storeS5.saveAccount({ username: "beta", password: "pw-b" });
+    // 模拟清单损坏：原位抹掉 beta 的快照（fakeAccountsStore 的 data 是只读
+    // getter，但数组本身可变——与「添加模式恒落快照，损坏才出现 null」的
+    // 防御形态对齐）。
+    vstoreS5.data.find((e) => e.username === "beta").grant = null;
+    await wrapS5.throttleStore.write("beta", { username: "beta", code: "login_rejected", parked: true, until: null, attempt: 1 });
+    const loginsBeforeS5 = authS5.logins.length;
+    let errS5 = null;
+    try { await storeS5.switchAccount("beta"); } catch (e) { errS5 = e; }
+    check("U5-D5：无快照 switch 撞 parked 号——当场报错、零平台尝试、park 原样",
+      errS5 !== null && /not being retried automatically/.test(String(errS5.message))
+        && authS5.logins.length === loginsBeforeS5
+        && (await wrapS5.throttleStore.read("beta")) !== null
+        && backendS5.refs.get(USERNAME_REF) === "beta",   // 切换失败保持已生效（当前身份不动）
+      `err=${errS5?.message} logins=${JSON.stringify(authS5.logins.map((l) => l.username))}`);
+
+    // ── 场景 11（U5-D4）：add 模式不清活动 grant 的 401 拒绝记忆——被拒令牌
+    // 不得在加账号之后被原样再发一轮。
+    const backendS4 = fakeBackend();
+    const authS4 = fakeAuth();
+    const storeS4 = buildStore({ env: {}, auth: authS4, backend: backendS4.backend }).store;
+    await storeS4.saveAccount({ username: "u4", password: "pw" });
+    const refusedS4 = backendS4.records.get(ACTIVE)?.payload?.accessToken;
+    storeS4.invalidate(refusedS4);
+    await storeS4.saveAccount({ username: "u4b", password: "pw" }, { activate: false });
+    check("U5-D4：add 模式后 getToken 走续期（被拒令牌不再原样发出）",
+      (await storeS4.getToken()) !== refusedS4,
+      `tok=${await storeS4.getToken()} refused=${refusedS4}`);
+    // U5-D6：expiresIn 失配回落与 AUTH_DEFAULTS 同源一个常量（≈10800s）。
+    const authS6 = {
+      async login() { return { accessToken: "at-e6", refreshToken: "rt-e6", expiresIn: Number.NaN }; },
+      async refresh() { throw new Error("no refresh in this stub"); }
+    };
+    const vstoreS6 = fakeAccountsStore();
+    const storeS6 = buildStore({ env: {}, auth: authS6, backend: fakeBackend().backend, accountsStore: vstoreS6 }).store;
+    await storeS6.saveAccount({ username: "u6", password: "pw" }, { activate: false });
+    const snapS6 = vstoreS6.data?.[0]?.grant;
+    check("U5-D6：expiresIn 失配回落 ASSUMED_TOKEN_LIFETIME_SECONDS（快照 ≈10800s）",
+      snapS6?.accessToken === "at-e6"
+        && snapS6.expiresAt > Date.now() + 10_700_000 && snapS6.expiresAt < Date.now() + 10_900_000,
+      JSON.stringify(snapS6));
+
+    // ── 场景 12（U5-D2 拍板：过期窗 attempt 保留喂倍增）──
+    // 判别形状：修复前第二次失败 attempt 重置 1（窗重置 60s）；修复后 2（倍增 120s）。
+    let clockS2 = 1_700_000_000_000;
+    const backendS2 = fakeBackend();
+    // 首次登录放行（建立 grant），其后 time-shaped 失败：rate_limited 不在
+    // CREDENTIAL_REFUSALS 里 → 走本地倍增窗（park 型无窗，测不了梯子）。
+    const authS2 = {
+      logins: [],
+      n: 0,
+      async login({ username }) {
+        this.logins.push({ username });
+        this.n += 1;
+        if (this.n > 1) { const e = new Error("slow down"); e.code = "rate_limited"; throw e; }
+        return { accessToken: `at-${username}-1`, refreshToken: `rt-${username}-1`, expiresIn: 10800 };
+      },
+      async refresh() { const e = new Error("refresh rejected"); e.code = "refresh_rejected"; throw e; }
+    };
+    const throttleS2 = createMemoryThrottleStore();
+    const storeS2 = createTokenStore({
+      credentials: backendS2.backend, accountsStore: fakeAccountsStore(), auth: authS2, env: {},
+      throttleStore: throttleS2, credentialKey: (scope, id) => `${scope}/${id}`, skewMs: 60_000, now: () => clockS2
+    });
+    await storeS2.saveAccount({ username: "u1", password: "pw" });   // at-u1-1 / rt-u1-1
+    await storeS2.invalidate();                                       // 拒绝记忆 → 强制续期
+    let eS2a = null; try { await storeS2.getToken(); } catch (e) { eS2a = e; }   // 续期死 → 登录兜底 → rate_limited
+    const heldS2a = await throttleS2.read("u1");
+    check("U5-D2：第一次失败 attempt=1、本地窗 60s",
+      eS2a !== null && heldS2a?.attempt === 1 && heldS2a.until === clockS2 + 60_000,
+      JSON.stringify(heldS2a));
+    clockS2 += 120_000;                                              // 推过窗口再失败
+    let eS2b = null; try { await storeS2.getToken(); } catch (e) { eS2b = e; }
+    const heldS2b = await throttleS2.read("u1");
+    check("U5-D2：过期窗 attempt 保留——第二次失败 attempt=2、倍增 120s",
+      eS2b !== null && heldS2b?.attempt === 2 && heldS2b.until === clockS2 + 120_000,
+      JSON.stringify(heldS2b));
+    clockS2 += 130_000;
+    check("U5-D2：过期窗不在等待（state().retryAfterMs=null，不是 0）",
+      (await storeS2.state()).retryAfterMs === null,
+      JSON.stringify((await storeS2.state()).retryAfterMs));
+    check("U5-D2：inForceWaitMs 过期窗=null / 未来窗=正数 / parked=null",
+      inForceWaitMs({ now: () => 2000 }, { username: "u", code: "c", parked: false, until: 1000, attempt: 1 }) === null
+        && inForceWaitMs({ now: () => 2000 }, { username: "u", code: "c", parked: false, until: 3000, attempt: 1 }) === 1000
+        && inForceWaitMs({ now: () => 2000 }, { username: "u", code: "c", parked: true, until: null, attempt: 1 }) === null);
+    // 文件版落地点：过期窗条目原样读回（attempt 不丢）。
+    const fstoreS2 = createFileThrottleStore({ logger: null });
+    await fstoreS2.write("filed", { username: "filed", code: "rate_limited", parked: false, until: Date.now() - 1000, attempt: 3 });
+    const readBackS2 = await fstoreS2.read("filed");
+    check("U5-D2：文件版过期窗条目原样保留（attempt=3 不丢）",
+      readBackS2 !== null && readBackS2.attempt === 3 && readBackS2.until !== null && readBackS2.until <= Date.now(),
+      JSON.stringify(readBackS2));
+
+    // ── 场景 13（U5-D3a 拍板 A）：写盘被拒 → 进程内镜像接管，本进程继续守等待、
+    // 闸门照拦；磁盘恢复可写后镜像退场。
+    function scriptedThrottleStore() {
+      let failWrites = true;
+      return {
+        setFailWrites(v) { failWrites = v; },
+        async read() { return null; },          // 版本拒写形态：读同样看不见
+        async write() { return !failWrites; },  // false = ADR-006 拒写
+        async clear() { return true; }
+      };
+    }
+    let clockS3 = 1_800_000_000_000;
+    const backendS3 = fakeBackend();
+    // 与场景 12 同形：首次放行，其后 time-shaped 失败（镜像测的是「带窗冷却」
+    // 在拒写后的守候——park 型没有倒计时，测不了）。
+    const authS3 = {
+      logins: [],
+      n: 0,
+      allowAll: false,
+      async login({ username }) {
+        this.logins.push({ username });
+        this.n += 1;
+        if (this.allowAll || this.n === 1) {
+          return { accessToken: `at-${username}-${this.n}`, refreshToken: `rt-${username}-${this.n}`, expiresIn: 10800 };
+        }
+        const e = new Error("slow down"); e.code = "rate_limited"; throw e;
+      },
+      async refresh() { const e = new Error("refresh rejected"); e.code = "refresh_rejected"; throw e; }
+    };
+    const throttleS3 = scriptedThrottleStore();
+    const storeS3 = createTokenStore({
+      credentials: backendS3.backend, accountsStore: fakeAccountsStore(), auth: authS3, env: {},
+      throttleStore: throttleS3, credentialKey: (scope, id) => `${scope}/${id}`, skewMs: 60_000, now: () => clockS3
+    });
+    await storeS3.saveAccount({ username: "u2", password: "pw" });   // at-u2-1 / rt-u2-1
+    await storeS3.invalidate();
+    let eS3a = null; try { await storeS3.getToken(); } catch (e) { eS3a = e; }   // 续期死 → 登录兜底 → rate_limited
+    check("U5-D3a：拒写后本进程仍守等待（retryAfterMs 来自镜像）",
+      eS3a !== null && (await storeS3.state()).retryAfterMs !== null,
+      `err=${eS3a?.message} wait=${(await storeS3.state()).retryAfterMs}`);
+    const loginsBeforeS3 = authS3.logins.length;
+    let eS3b = null; try { await storeS3.getToken(); } catch (e) { eS3b = e; }
+    check("U5-D3a：拒写窗内闸门照拦（零平台尝试、原拒绝码）",
+      authS3.logins.length === loginsBeforeS3 && eS3b !== null
+        && /not being retried automatically/.test(String(eS3b.message)) && eS3b.code === "rate_limited",
+      `err=${eS3b?.message} logins=${JSON.stringify(authS3.logins.map((l) => l.username))}`);
+    clockS3 += 130_000;
+    authS3.allowAll = true;
+    throttleS3.setFailWrites(false);
+    const tokS3 = await storeS3.getToken();
+    check("U5-D3a：窗口过+登录成功+盘恢复 → 镜像退场（retryAfterMs=null）",
+      String(tokS3).startsWith("at-u2-") && (await storeS3.state()).retryAfterMs === null,
+      `tok=${tokS3} wait=${(await storeS3.state()).retryAfterMs}`);
+
+    // ── 场景 14（U5-S-A 窄修）：凭据服务 readRecord 故障 ≠ 没有 grant——
+    // 登录兜底前先探测，读不到就不花平台尝试（无码错误，不 park）。
+    const backendSA = fakeBackend();
+    const authSA = fakeAuth();
+    const wrapSA = buildStore({ env: {}, auth: authSA, backend: backendSA.backend });
+    const storeSA = wrapSA.store;
+    const realReadRecord = backendSA.backend.readRecord.bind(backendSA.backend);
+    backendSA.backend.readRecord = async (k) => {
+      if (backendSA.broken === true) throw new Error("io: store unreadable");
+      return realReadRecord(k);
+    };
+    await storeSA.saveAccount({ username: "uA", password: "pw" });   // at-uA-1 / rt-uA-1
+    await storeSA.invalidate();
+    authSA.deadRefreshes.push("rt-uA-1");   // 刷新死 → 登录兜底才是唯一路（测的就是它）
+    backendSA.broken = true;
+    let eSA = null;
+    try { await storeSA.getToken(); } catch (e) { eSA = e; }
+    check("U5-S-A：存储读不到 → 无码错误拦在登录前（零平台尝试、不 park）",
+      eSA !== null && eSA.code === undefined && /unreadable/.test(String(eSA.message))
+        && authSA.logins.length === 1
+        && (await wrapSA.throttleStore.read("uA")) === null,
+      `err=${eSA?.message} code=${eSA?.code} logins=${JSON.stringify(authSA.logins.map((l) => l.username))}`);
+    backendSA.broken = false;                                        // 读恢复
+    const tokSA = await storeSA.getToken();
+    check("U5-S-A：读恢复后登录兜底照常走（不重试不缺位）",
+      String(tokSA).startsWith("at-uA-") && authSA.logins.length === 2,
+      `tok=${tokSA} logins=${authSA.logins.length}`);
   }
 } catch (e) { fail("account-vault", e); }
 
