@@ -43,7 +43,16 @@ export function str(value: any, fallback?: any): string {
  * @returns {string}
  */
 export function errMsg(value: unknown): string {
-  return value instanceof Error ? value.message : String(value);
+  if (value instanceof Error) return value.message;
+  // String() 走 ToPrimitive：无原型对象（Object.create(null)）没有
+  // toString/valueOf，会让这个「兜底读消息」的帮手在 catch 路径里自己抛——
+  // degrade/redactedError 若捕到这类值，降级就变成崩溃（U1 审计顺带发现 2）。
+  // 失配时退回 Object.prototype.toString：至少报出形状，不撒手。
+  try {
+    return String(value);
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
 }
 
 
@@ -101,7 +110,9 @@ export function redactSecrets(text: unknown) {
       .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, "$1 [REDACTED]")
       // 2) Header values, so a whole `"authorization":"sk-..."` value is
       //    consumed in one pass instead of leaving the token behind.
-      .replace(/(["']?[Aa]uthorization["']?\s*[:=]\s*["']?)(?!Bearer\s)[^"',;\s]+/g, "$1[REDACTED]")
+      //    Case-insensitive: an ALL-CAPS `AUTHORIZATION:` spelling must not
+      //    slip the match (rules 1 and 3 already run /gi).
+      .replace(/(["']?[Aa]uthorization["']?\s*[:=]\s*["']?)(?!Bearer\s)[^"',;\s]+/gi, "$1[REDACTED]")
       // 3) Cookie / Set-Cookie: every cookie in the jar is a session
       //    credential — the OIDC walk's CSRF cookie among them (AGENTS.md red
       //    line 1 names cookies explicitly) — so the whole header goes rather
@@ -364,16 +375,21 @@ export function optional<T, F = null>(value: T | Promise<T> | null | undefined, 
  * prefix plus 2) are kept, then a separator of black dots, then the last 3.
  *
  * `sk-123456789abc` → `sk-12......abc`. Short keys (the platform guarantees at
- * least the prefix + a few chars) still render as `sk-xx......xxx`; a key that
- * is not even 8 chars long falls back to the whole key (there is nothing safe
- * to reveal). The dots are literal U+2022 bullets so the display reads like a
+ * least the prefix + a few chars) still render as `sk-xx......xxx`; a value
+ * that is not even 8 chars long renders as a fixed-width dot run — nothing
+ * about it is safely revealable, so nothing is revealed (a masking function
+ * must not fall back to handing out the whole credential; U1 审计复核补记 §一).
+ * The dots are literal U+2022 bullets so the display reads like a
  * password field, not like part of the key.
  * @param {string} key - the API key (sk-…).
  * @returns {string} the masked display form.
  */
 export function maskKey(key: string): string {
   const k = typeof key === "string" ? key : "";
-  if (k.length <= 8) return k;
+  // 短值没有可安全露出的部分——掩码函数的兜底必须是「全遮」，不是「原样给出」
+  // （≤8 字符时首 5 尾 3 互相覆盖，露出的比例反而最高）。等宽点串保持「有一把
+  // key、内容不可见」的显示语义。
+  if (k.length <= 8) return "·".repeat(14);
   return `${k.slice(0, 5)}${"·".repeat(6)}${k.slice(-3)}`;
 }
 

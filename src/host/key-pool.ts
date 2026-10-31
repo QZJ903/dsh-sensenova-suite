@@ -40,9 +40,11 @@ export interface KeyPoolParams {
   capacity: number
 }
 
-/** 池策略缺省值。 */
+/** 池策略缺省值。kickThreshold 原为 2、运行时恒被 orchestrator 层默认（3）
+ * 遮蔽（index.ts 展开传入、poolDeps 转发）——2026-10-31 对齐到 3 消灭双值分叉，
+ * 同形钉在 pool.test（U1 审计复核补记 §四）。 */
 export const DEFAULT_KEY_POOL_PARAMS: Readonly<KeyPoolParams> = Object.freeze({
-  kickThreshold: 2,
+  kickThreshold: 3,
   probeInitialMs: 15_000,
   probeBackoffFactor: 2,
   probeMaxMs: 60_000,

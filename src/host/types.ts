@@ -125,10 +125,15 @@ export interface PluginError extends Error {
 
 /**
  * The wiring bag `index.ts` assembles once at mount and hands to the route
- * handlers (`routes.ts`). It is the single seam that decides what a route may
- * touch: every service a handler reaches for is listed here, so a route that
- * needs a new dependency gets it through the wiring, never by importing the
- * service directly.
+ * handlers (`routes.ts`). It is the seam for the STATEFUL services a route
+ * touches: every store / publisher / pool handle is listed here, so a route
+ * that needs a new one gets it through the wiring, never by importing the
+ * instance. The deliberate exception — a CLOSED list, gated by package.test's
+ * routes import-face whitelist: stateless helpers/resolvers
+ * (`normalizeEnabledIds`, `syncSignaturesAfterPublish`, `resolveSwitchEnabled`,
+ * `switchSource`, `clearCoalescedFetch`, `buildSnapshotBody`, `failureCode`)
+ * and the trace sinks (`traceLog`, `writeLoginTrace`) carry no injected state,
+ * and routes import those directly (U1 审计确定问题 2).
  *
  * The stores / publishers / caches are opaque injected objects (the DSH peers
  * ship no declarations in this repo), so they are typed loosely — the shape is

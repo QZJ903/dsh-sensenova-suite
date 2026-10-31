@@ -41,6 +41,64 @@ const patch = readFileSync(join(here, "..", "cordis.patch.yml"), "utf8");
     JSON.stringify(settings.auth));
 }
 
+// --- 1b. the newer fields: absent-key equality and loaded-zero shapes ------
+// The block above pinned the first seven fields only; the newer fields shipped
+// without absent-config equality pins — exactly how the tool switches'
+// declared default (true) drifted from the resolver (absent → false) and how
+// globalConcurrency's documented 0 semantics became unreachable from config
+// (U1 审计测试缺失 #1)。Both behaviors are pinned here now.
+{
+  const { settings, configError } = resolveSettings({});
+  check("tool switches default to the declared all-on (absent key, not just the patch row)",
+    settings.text2imgEnabled === true && settings.img2imgEnabled === true && settings.visionToolsEnabled === true,
+    JSON.stringify([settings.text2imgEnabled, settings.img2imgEnabled, settings.visionToolsEnabled]));
+  check("globalConcurrency default", settings.globalConcurrency === CONFIG_DEFAULTS.globalConcurrency, String(settings.globalConcurrency));
+  check("providerRefreshMinutes default", settings.providerRefreshMinutes === CONFIG_DEFAULTS.providerRefreshMinutes, String(settings.providerRefreshMinutes));
+  check("modelGroups default is the flash-lite mapping",
+    settings.modelGroups["sensenova-6.8-flash-lite"] === "flash-lite", JSON.stringify(settings.modelGroups));
+  check("maxTokensOverrides default",
+    JSON.stringify(settings.maxTokensOverrides) === JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides), JSON.stringify(settings.maxTokensOverrides));
+  check("accounts default empty", Array.isArray(settings.accounts) && settings.accounts.length === 0, JSON.stringify(settings.accounts));
+  check("no config error on an empty config (1b)", configError === null, String(configError));
+}
+// The loaded-zero shapes: an explicit 0 is an ANSWER, never "unset".
+{
+  check("globalConcurrency: explicit 0 travels (follow key count)",
+    resolveSettings({ globalConcurrency: 0 }).settings.globalConcurrency === 0,
+    String(resolveSettings({ globalConcurrency: 0 }).settings.globalConcurrency));
+  check("globalConcurrency: negative floors to the 0 answer",
+    resolveSettings({ globalConcurrency: -3 }).settings.globalConcurrency === 0, "");
+  check("globalConcurrency: fractional floors",
+    resolveSettings({ globalConcurrency: 2.9 }).settings.globalConcurrency === 2, "");
+  check("globalConcurrency: non-number falls back to the default",
+    resolveSettings({ globalConcurrency: "2" }).settings.globalConcurrency === CONFIG_DEFAULTS.globalConcurrency, "");
+  check("providerRefreshMinutes: explicit 0 travels (refresher off)",
+    resolveSettings({ providerRefreshMinutes: 0 }).settings.providerRefreshMinutes === 0, "");
+}
+// Tool switches: only the boolean false spells "off".
+{
+  check("tool switches: explicit false stays off", (() => {
+    const s = resolveSettings({ text2imgEnabled: false, img2imgEnabled: false, visionToolsEnabled: false }).settings;
+    return s.text2imgEnabled === false && s.img2imgEnabled === false && s.visionToolsEnabled === false;
+  })(), "");
+  check("tool switches: explicit true stays on",
+    resolveSettings({ text2imgEnabled: true }).settings.text2imgEnabled === true, "");
+}
+// The base-URL shape gate: a malformed origin is a configError with safe
+// fallbacks, not a lifetime of console_error (U1 审计确定问题 3).
+{
+  const bad = resolveSettings({ consoleBase: "https://", apiBase: "https://token.sensenova.cn/v1" });
+  check("malformed consoleBase becomes configError with default fallback",
+    bad.configError !== null && bad.settings.consoleBase === CONFIG_DEFAULTS.consoleBase,
+    `${bad.configError} | ${bad.settings.consoleBase}`);
+  check("trailing-slash-eaten origin is caught too",
+    resolveSettings({ consoleBase: "https:" }).configError !== null, "");
+  check("well-formed https row has no configError",
+    resolveSettings({ consoleBase: "https://platform.sensenova.cn", apiBase: "https://token.sensenova.cn/v1" }).configError === null, "");
+  check("loopback http origin passes (e2e fake platform)",
+    resolveSettings({ apiBase: "http://127.0.0.1:9999" }).configError === null, "");
+}
+
 // --- 2. the patch documents every user-facing key the code reads ----------
 // The list is DERIVED from CONFIG_DEFAULTS, not hand-written. It used to be a
 // literal array that quietly omitted half the keys (apiBase, pollSeconds,
@@ -372,8 +430,9 @@ check("patch tokenSkewSeconds matches code default", Number(activeValue("tokenSk
   const wiringBody = typesSrc.match(/export interface Wiring \{([\s\S]*?)\n\}/)?.[1] ?? "";
   const wiringFields = wiringBody.split("\n")
     .filter((line) => /^\s{2}[A-Za-z_]\w*\??\s*:/.test(line));
+  // 19 → 20（0.1.34 加 `onQuotaPools` 时漏更，b6469b1 的 config 套件因此一直红）。
   check("Wiring's field count is the one this suite reasons about",
-    wiringFields.length === 19, `${wiringFields.length} fields`);
+    wiringFields.length === 20, `${wiringFields.length} fields`);
 
   // Every route declares its own subset, and `registerRoutes` calls each exactly
   // once. A route module added without joining the facade would mount nothing

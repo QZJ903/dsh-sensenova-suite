@@ -111,8 +111,7 @@ export const CONFIG_DEFAULTS = Object.freeze({
    * Read by `llm-models.maxTokensFor`, which BOTH the descriptor build and the
    * panel roster call — the value sent and the value displayed are one order.
    * Scope: the DIRECTLY-REGISTERED provider (`registerProvider`) and the panel
-   * roster that mirrors it. The Raccoon hosted route builds its descriptors in
-   * `the removed module` and is deliberately unaffected.
+   * roster that mirrors it.
    */
   // 单行值：docs.test 按行解析 CONFIG_DEFAULTS，多行对象会让它 JSON.parse 失败。
   maxTokensOverrides: { "deepseek-flash": 393216, "kimi-k3": 131072 },
@@ -138,7 +137,8 @@ export const CONFIG_DEFAULTS = Object.freeze({
   activeAccount: "",
   /**
    * 全局在途上限：per-key 固定 1 由适配器闸负责；这里管总量。
-   * 0 = 跟随 key 数（默认）；调小 = 温和模式（只激活部分 key）。
+   * 0 = 跟随 key 数（有载答案：显式写 0 必达，resolveGlobalConcurrency）；
+   * 调小 = 温和模式（只激活部分 key）。
    * 2026-10-25：默认改为 2（用户偏好——默认并发 2 个在途请求）。
    */
   globalConcurrency: 2,
@@ -152,7 +152,8 @@ export const CONFIG_DEFAULTS = Object.freeze({
   /**
    * 出图/视觉工具开关（部署默认；面板「多模态」的开关是主要设置）：
    * 2026-10-27 起首装默认全开（用户拍板）——agent 工具是 Host 级变更
-   * （无 tools 服务的 Host 静默缺席）。
+   * （无 tools 服务的 Host 静默缺席）。缺键 = 开（拍板在 resolver 由此真正
+   * 生效，显式 false = 关；其他杂值不视为「关」）。
    */
   text2imgEnabled: true,
   img2imgEnabled: true,
@@ -232,6 +233,26 @@ export function clampInt(raw: unknown, def: number, min: number, max = Infinity)
 export function resolveProviderRefreshMinutes(raw: unknown): number {
   if (typeof raw !== "number" || !Number.isFinite(raw)) return CONFIG_DEFAULTS.providerRefreshMinutes;
   return Math.min(1440, Math.max(0, Math.floor(raw)));
+}
+
+/**
+ * Resolve the global in-flight cap, where ZERO IS A LOADED ANSWER — same shape
+ * as {@link resolveProviderRefreshMinutes} above.
+ *
+ * `0` = 跟随 key 数（CONFIG_DEFAULTS 的声明语义，闸门按
+ * `configured > 0 ? configured : key 数` 消费，key-orchestrator.ts）。但底座
+ * `num` 把 0 读作「未设」，旧路径 `clampInt` 会把显式 0 静默改成默认 2——声明
+ * 的 0 语义从配置面不可达，而面板缝（pool-store）保留 0，两条缝互相矛盾
+ * （U1 审计确定问题 1）。与 providerRefreshMinutes 同形：显式有限数（0 与负数
+ * 含）floor 后必达、钳下限 0；非数 / NaN / ±Infinity 回落出货默认。不设上限：
+ * 大数值就是「事实不限」，不会与 0 的语义混淆（那是 providerRefreshMinutes 要
+ * 钳 1440 的原因，这里不成立）。
+ * @param {unknown} raw - the raw `globalConcurrency` row value.
+ * @returns {number} the effective cap (0 = follow the key count).
+ */
+export function resolveGlobalConcurrency(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return CONFIG_DEFAULTS.globalConcurrency;
+  return Math.max(0, Math.floor(raw));
 }
 
 /**
@@ -316,18 +337,26 @@ export interface AccountConfig {
 }
 
 /**
- * 归一化账户清单：非对象/缺 ref/空串的条目丢弃；id/label 缺省补齐。
+ * 归一化账户清单：非对象/缺 ref/空串的条目丢弃；id/label 缺省补齐；
+ * 重 id 与保留 id `default` 丢弃（先到先得）。
  * 导出供测试与 index.ts 复用同一判据。
  */
 export function normalizeAccounts(raw: unknown): AccountConfig[] {
   if (!Array.isArray(raw)) return [];
   const out: AccountConfig[] = [];
+  const seenIds = new Set<string>();
   raw.forEach((entry, index) => {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return;
     const record = entry as Record<string, unknown>;
     const ref = typeof record.apiKeyRef === "string" ? record.apiKeyRef.trim() : "";
     if (ref === "") return;
     const id = typeof record.id === "string" && record.id.trim() !== "" ? record.id.trim() : `account-${index + 1}`;
+    // id 是池管理/显示的索引键（phaseById、disable/restoreById 都按 id 作用），
+    // 重复 id 会让两行池条目串号（U1 审计确定问题 4）：先到先得，后来的丢弃——
+    // 与 resolvePoolKeys 按 key 值去重的既有口径一致。"default" 保留给面板主
+    // key（resolvePoolKeys 恒以它为首条），配置里出现即视为撞名丢弃。
+    if (id === "default" || seenIds.has(id)) return;
+    seenIds.add(id);
     const label = typeof record.label === "string" && record.label.trim() !== "" ? record.label.trim() : `Account ${index + 1}`;
     out.push({ id, label, apiKeyRef: ref });
   });
@@ -362,7 +391,30 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
   const source = obj(config);
   const consoleBase = str(source.consoleBase, CONFIG_DEFAULTS.consoleBase).replace(/\/+$/, "");
   const apiBase = str(source.apiBase, CONFIG_DEFAULTS.apiBase).replace(/\/+$/, "");
+  // Shape-check the two bases before anything builds URLs out of them: a
+  // malformed base (`"https://"` survives `str` and the trailing-slash strip
+  // turns it into `"https:"`) would fail at every fetch with a TypeError and be
+  // reported as console_error ("usually transient") — never as configError,
+  // contradicting this function's contract and the strict validation
+  // auth-config.ts applies to the override fields (U1 审计确定问题 3)。
+  // plain http 仅限回环是 auth-config 的口径，这里只把关必填的 host 与协议族，
+  // 回环 http（e2e 假平台）照常通过。
+  const isHttpOrigin = (value: string) => {
+    try {
+      const parsed = new URL(value);
+      return (parsed.protocol === "https:" || parsed.protocol === "http:") && parsed.host !== "";
+    } catch {
+      return false;
+    }
+  };
+  const safeConsoleBase = isHttpOrigin(consoleBase) ? consoleBase : CONFIG_DEFAULTS.consoleBase;
+  const safeApiBase = isHttpOrigin(apiBase) ? apiBase : CONFIG_DEFAULTS.apiBase;
   try {
+    if (!isHttpOrigin(consoleBase) || !isHttpOrigin(apiBase)) {
+      throw new Error(
+        `consoleBase and apiBase must be absolute http(s) origins (got consoleBase: ${consoleBase}, apiBase: ${apiBase})`
+      );
+    }
     return {
       settings: {
         consoleBase,
@@ -414,11 +466,15 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
         providerRefreshMinutes: resolveProviderRefreshMinutes(source.providerRefreshMinutes),
         accounts: normalizeAccounts(source.accounts),
         activeAccount: str(source.activeAccount, ""),
-        globalConcurrency: clampInt(source.globalConcurrency, CONFIG_DEFAULTS.globalConcurrency, 0),
+        globalConcurrency: resolveGlobalConcurrency(source.globalConcurrency),
         modelGroups: normalizeModelGroups(source.modelGroups),
-        text2imgEnabled: source.text2imgEnabled === true,
-        img2imgEnabled: source.img2imgEnabled === true,
-        visionToolsEnabled: source.visionToolsEnabled === true,
+        // 缺键 = 声明默认（true，2026-10-27 拍板「首装默认全开」）——旧形状
+        // `=== true` 让缺键行静默关掉工具、CONFIG_DEFAULTS 的 true 形同虚设
+        // （U1 审计疑似 1，用户拍板缺键行兜 true）。只有布尔 false 是「关」的
+        // 拼法：显式 false 必须被尊重，杂值不视为「关」。
+        text2imgEnabled: source.text2imgEnabled !== false,
+        img2imgEnabled: source.img2imgEnabled !== false,
+        visionToolsEnabled: source.visionToolsEnabled !== false,
         text2imgModel: str(source.text2imgModel, CONFIG_DEFAULTS.text2imgModel),
         img2imgModel: str(source.img2imgModel, CONFIG_DEFAULTS.img2imgModel),
         imageTimeoutMs: clampInt(source.imageTimeoutMs, CONFIG_DEFAULTS.imageTimeoutMs, 5_000, 1_800_000),
@@ -435,8 +491,8 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
     // present here with its default, so a consumer cannot tell the branches apart.
     return {
       settings: {
-        consoleBase,
-        apiBase,
+        consoleBase: safeConsoleBase,
+        apiBase: safeApiBase,
         trendHours: CONFIG_DEFAULTS.trendHours,
         trendMultipliers: CONFIG_DEFAULTS.trendMultipliers,
         cacheSeconds: CONFIG_DEFAULTS.cacheSeconds,
@@ -444,7 +500,7 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
         consoleTimeoutMs: CONFIG_DEFAULTS.consoleTimeoutMs,
         allowedHosts: new Set(CONFIG_DEFAULTS.admittedHosts),
         tokenSkewSeconds: CONFIG_DEFAULTS.tokenSkewSeconds,
-        auth: { consoleOrigin: consoleBase },
+        auth: { consoleOrigin: safeConsoleBase },
         registerProvider: false,
         maxTokensOverrides: CONFIG_DEFAULTS.maxTokensOverrides,
         providerRefreshMinutes: CONFIG_DEFAULTS.providerRefreshMinutes,
@@ -452,9 +508,9 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
         activeAccount: "",
         globalConcurrency: CONFIG_DEFAULTS.globalConcurrency,
         modelGroups: { ...CONFIG_DEFAULTS.modelGroups },
-        text2imgEnabled: false,
-        img2imgEnabled: false,
-        visionToolsEnabled: false,
+        text2imgEnabled: CONFIG_DEFAULTS.text2imgEnabled,
+        img2imgEnabled: CONFIG_DEFAULTS.img2imgEnabled,
+        visionToolsEnabled: CONFIG_DEFAULTS.visionToolsEnabled,
         text2imgModel: CONFIG_DEFAULTS.text2imgModel,
         img2imgModel: CONFIG_DEFAULTS.img2imgModel,
         imageTimeoutMs: CONFIG_DEFAULTS.imageTimeoutMs,

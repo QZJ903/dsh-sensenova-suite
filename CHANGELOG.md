@@ -1,5 +1,21 @@
 # 更新日志（Changelog）
 
+## 0.1.38（2026-10-31）
+
+- **U1 审计修复轮（共享契约与基础件）**：
+  - **工具开关缺键行兜 true（拍板）**：`text2imgEnabled/img2imgEnabled/visionToolsEnabled` 旧 `=== true` 让缺键行静默关工具、CONFIG_DEFAULTS 声明的 true 形同虚设（patch 行显式 true 只兜住首装）——改 `!== false`（只有布尔 false 是「关」的拼法），catch 路径同步回落默认；「首装默认全开」拍板在 resolver 真正生效。
+  - **globalConcurrency 载入零值**：新增 `resolveGlobalConcurrency`（与 `resolveProviderRefreshMinutes` 同形）——旧 `clampInt` 底座的 `num` 把显式 0 读成「未设」回落 2，「0 = 跟随 key 数」从配置面不可达（闸门处 0 语义真实存在，orchestrator 默认值注释明写「index.ts 归一化」）；面板缝保留 0、配置缝不可达的两缝矛盾消除。CONFIG_DEFAULTS 注释同步删过时「（默认）」括注。
+  - **consoleBase/apiBase URL 形状闸**：坏 origin（`"https://"` 被尾斜杠替换吃成 `"https:"`）从「每次 fetch TypeError → console_error（usually transient 措辞误导）、永不进 configError」改为 configError + catch 回落安全默认；`isHttpOrigin` 放行回环 http（e2e 假平台不受影响）。
+  - **normalizeAccounts 重 id 去重**：id 是池管理/显示的索引键（phaseById、disable/restoreById 都按 id 作用）——重 id 先到先得、保留 id `default`（面板主 key 恒占）撞名丢弃；两行同 id 串号（phase 显示折叠、管理操作指向不明）堵死。
+  - **maskKey 短键全遮**：≤8 字符原样返回全文 → 等宽 14 点串（U+2022）——掩码函数的兜底不得是「原样给出凭据」。
+  - **redactSecrets 规则 2 加 `/i`**：全大写 `AUTHORIZATION:` 值不再漏网（真机日志零样本的理论缺口；规则 1/3 早已 `/gi`）。
+  - **errMsg 防抛**：无原型对象（`Object.create(null)`）没有 toString/valueOf，`String()` 会让这个「兜底读消息」帮手在 catch 路径自己掀翻（degrade/redactedError 捕到即崩）——失配退 `Object.prototype.toString` 报形状。
+  - **Wiring 注释改口径 + import 门禁**：注释从「never by importing the service directly」（失实）改为实际纪律——实例走缝、无状态助手/trace 沉降点直连是**封闭例外清单**；package.test 新增路由 import 封闭白名单门禁（7 路由文件 39 条相对 import 全单，新服务直连即红）。
+  - **kickThreshold 双默认归一**：key-pool 池层默认 2 → 3 对齐 orchestrator 层（运行时零变化——原本恒被 DEFAULT_ORCHESTRATOR_PARAMS 覆盖；直接构造池的测试路径 2→3）；`docs/retry-policy.md` §5 四常量定义处修正（原写 host-config.ts，实际 kick 在 key-orchestrator、probe 三件在 key-pool）。
+  - **注释归位**：shared/wire.ts 两处 JSDoc 从 imageGen 头上挪回 multiplier、SnapshotData 总注释合拢；host-config 删除指向已删模块的占位句 "the removed module"。
+  - **预存在红钉修复**：config.test「Wiring 字段数 19」钉在 0.1.34 加 `onQuotaPools` 时漏更——b6469b1 起 config 套件一直红（20 字段），19 → 20 并注明沿革。
+- **补钉 25 条**（U1 审计测试缺口，提前于集中处置轮）：config.test 新字段缺键等式 7 + loaded-zero 行为 5 + 三开关关拼法 2 + base-URL 四态 4（+18）；pool.test 账户去重 2 钉 + kickThreshold 同形钉（+3）；redaction-closure 全大写 AUTHORIZATION + errMsg 无原型（+2）；pool-route maskKey 形状钉（+1）；package.test 路由 import 门禁（+1）。
+
 ## 0.1.37（2026-10-31）
 
 - **responses 线 usage 对齐「未缓存输入」口径**：真机实测（glm-5.2，同一 body

@@ -73,9 +73,9 @@ export interface PoolsData {
 export interface TrendRowData {
   model: string;
   credits: number;
-  /** Operator-configured pseudo multiplier (×N); absent when no key matched. */
   /** 该模型是否为出图模型（catalog 的 output_modalities 严格判定）。 */
   imageGen?: boolean;
+  /** Operator-configured pseudo multiplier (×N); absent when no key matched. */
   multiplier?: number;
 }
 
@@ -96,9 +96,9 @@ export interface ModelData {
   contextWindow?: number;
   /** Platform-declared output ceiling from `max_output_length`; 0/absent = unknown. */
   maxOutputLength?: number;
-  /** Operator pseudo credit multiplier (×N); absent when no config key matched. */
   /** 该模型是否为出图模型（catalog 的 output_modalities 严格判定）。 */
   imageGen?: boolean;
+  /** Operator pseudo credit multiplier (×N); absent when no config key matched. */
   multiplier?: number;
   /** Thinking levels the DSH selector offers for this model, escalation order. */
   thinkingLevels?: string[];
@@ -163,14 +163,6 @@ export interface QuotaErrorData {
   message?: string;
 }
 
-/**
- * The whole snapshot body `buildSnapshotBody` returns, as the panel reads it.
- *
- * `pollSeconds` drives the panel's own poll cadence (it is consumed, not
- * rendered); `cacheSeconds` is quoted into the footnote; `auth` drives the
- * self-renew chip; `pools`/`trend` are the two content sections; `llm` is the
- * setup tab; the rest are banner lines.
- */
 /** `identifyVisionModel` 的判读结果（parsers 的契约；2026-10-24 起 vision 三键
  * 已退役，此类型只服务于 roster 徽章与发布签名，不再进快照）。 */
 export interface VisionModelData {
@@ -211,6 +203,14 @@ export interface PoolDiagData {
   };
 }
 
+/**
+ * The whole snapshot body `buildSnapshotBody` returns, as the panel reads it.
+ *
+ * `pollSeconds` drives the panel's own poll cadence (it is consumed, not
+ * rendered); `cacheSeconds` is quoted into the footnote; `auth` drives the
+ * self-renew chip; `pools`/`trend` are the two content sections; `llm` is the
+ * setup tab; the rest are banner lines.
+ */
 export interface SnapshotData {
   /** Key 池诊断（无凭据服务/旧 Host 上缺省）。 */
   pool?: PoolDiagData | null;

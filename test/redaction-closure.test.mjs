@@ -37,7 +37,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { check, finish } from "./harness.mjs";
-import { redactSecrets } from "../src/host/util.ts";
+import { redactSecrets, errMsg } from "../src/host/util.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ROUTES = join(ROOT, "src", "host", "routes");
@@ -76,6 +76,17 @@ check("a named credential is still redacted",
 check("ordinary prose is not mangled by the rules",
   redactSecrets("the token is expired") === "the token is expired",
   redactSecrets("the token is expired"));
+// 规则 2 必须 /gi：全大写 AUTHORIZATION 的拼写不得漏网（规则 1/3 已是 /gi，
+// 唯独它曾是 /g——真机日志零样本，理论缺口，此钉把形状钉死；U1 审计复核补记 §二）。
+check("an ALL-CAPS Authorization header value is redacted too (rule 2 runs /gi)",
+  redactSecrets("AUTHORIZATION: someopaquevalue123") === "AUTHORIZATION: [REDACTED]",
+  redactSecrets("AUTHORIZATION: someopaquevalue123"));
+// errMsg feeds the same error-text path（http.ts 的 redactedError 先 errMsg 后
+// redactSecrets）：无原型对象没有 toString/valueOf，String() 会让这个「兜底读
+// 消息」的帮手在 catch 路径里自己掀翻（U1 审计顺带发现 2）。
+check("errMsg survives a null-prototype caught value",
+  (() => { try { return errMsg(Object.create(null)) === "[object Object]" && errMsg(new Error("boom")) === "boom"; } catch { return false; } })(),
+  Object.prototype.toString.call(Object.create(null)));
 
 // --- 2. every route module that catches a value goes through the collector -
 // A `catch {` without a binding answers with a FIXED wording — there is no

@@ -108,6 +108,40 @@ for (const file of seen) {
 }
 check("every host source reachable from the entry lives under src/host (shared type root excepted)",
   outside === 0, outside === 0 ? "" : `${outside} source(s) escaped src/host`);
+
+// --- 2b. the routes family's direct-import whitelist is CLOSED ---------------
+// routes/*.ts reach STATEFUL services through the injected `Wiring` bag
+// (types.ts). The direct relative imports that exist today are the closed list
+// below: route primitives (`./http.ts`), the shared contracts/primitives
+// (`types` / `host-config` / `util` / `codes`), the trace sinks, and seven
+// named stateless helpers/resolvers. A NEW service import here would silently
+// re-widen what routes may touch — the discipline the Wiring doc comment
+// claims — so an unlisted module fails this gate instead of slipping in
+// (U1 审计测试缺失 #2). The facade (`routes.ts`) is out of scope: importing the
+// route modules IS its job.
+{
+  const routesDir = join(root, "src", "host", "routes");
+  const routeFiles = readdirSync(routesDir).filter((f) => f.endsWith(".ts"));
+  const ALLOWED = new Set([
+    "./http.ts",
+    "../types.ts", "../host-config.ts", "../util.ts", "../codes.ts",
+    "../trace.ts", "../trace-log.ts",
+    "../catalog-store.ts", "../provider-publish.ts", "../switch-precedence.ts",
+    "../coalesced-fetch.ts", "../snapshot-aggregate.ts",
+  ]);
+  const offenders = [];
+  let scanned = 0;
+  for (const name of routeFiles) {
+    const source = readFileSync(join(routesDir, name), "utf8");
+    for (const m of source.matchAll(/from\s+["'](\.[^"']+)["']/g)) {
+      scanned += 1;
+      if (!ALLOWED.has(m[1])) offenders.push(`${name}: ${m[1]}`);
+    }
+  }
+  check("routes reach stateful services through Wiring — the direct-import whitelist is closed",
+    offenders.length === 0 && scanned > 0,
+    offenders.length === 0 ? `${scanned} relative import(s) across ${routeFiles.length} route file(s), all whitelisted` : offenders.join("; "));
+}
 // The full graph is published as the `lib` directory (one bundle), so the
 // whitelist must contain it.
 check("files whitelists the built lib/ output", hasLib, hasLib ? "" : "lib missing from files — the host bundle would ship nothing");

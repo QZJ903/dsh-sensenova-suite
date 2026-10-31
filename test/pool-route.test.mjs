@@ -21,6 +21,15 @@ const results = [];
 const check = (name, ok, detail = "") => results.push({ name, pass: ok === true, detail: String(detail) });
 const fail = (group, error) => results.push({ name: group, pass: false, detail: String(error) });
 
+// ── 0. util 形状钉（U1 审计修复轮的行为变更）──────────────────────────────
+// maskKey 的输出就是池路由提示语与池列表 label 的原文：常规长度遮中段，
+// 短值没有可安全露出的部分——兜底必须全遮，不得原样给出凭据。
+check("maskKey：常规长度遮中段、短值全遮（兜底不得原样给出凭据）",
+  maskKey("sk-123456789abc") === `sk-12${"·".repeat(6)}abc`
+    && maskKey("sk-short") === "·".repeat(14)
+    && maskKey("") === "·".repeat(14),
+  `${maskKey("sk-123456789abc")} / ${maskKey("sk-short")}`);
+
 try {
   const store = createFilePoolStore({ profile: null, logger: null });
   await store.setKeys([{ id: "key-2", name: "" }, { id: "key-3", name: "" }]);

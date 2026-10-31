@@ -15,6 +15,7 @@
 import { strict as assert } from "node:assert";
 import { classify429Full, classify429Body, rateKindCountsStrike, parseRetryAfterMs } from "../src/host/rate-classify.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "../src/host/key-orchestrator.ts";
+import { DEFAULT_KEY_POOL_PARAMS } from "../src/host/key-pool.ts";
 import { normalizeAccounts, normalizeModelGroups, CONFIG_DEFAULTS } from "../src/host/host-config.ts";
 
 const results = [];
@@ -289,6 +290,33 @@ try {
   check("normalizeAccounts：丢非法、补缺省、去空白",
     accounts.length === 2 && accounts[0].id === "account-1" && accounts[1].apiKeyRef === "K2",
     JSON.stringify(accounts));
+  // U1 审计确定问题 4：id 是池管理/显示的索引键（phaseById、disable/restoreById
+  // 都按 id 作用）——重 id 先到先得，保留 id "default"（面板主 key 恒占）丢弃。
+  const deduped = normalizeAccounts([
+    { id: "a", apiKeyRef: "K1" },
+    { id: "a", apiKeyRef: "K2" },
+    { id: "default", apiKeyRef: "K3" },
+    { apiKeyRef: "K4" },
+    { id: "account-4", apiKeyRef: "K5" },
+  ]);
+  check("normalizeAccounts：重 id 先到先得、default 保留、缺省 id 不撞已占 id",
+    deduped.length === 2 && deduped[0].id === "a" && deduped[0].apiKeyRef === "K1"
+      && deduped[1].id === "account-4" && deduped[1].apiKeyRef === "K4",
+    JSON.stringify(deduped));
+  const collided = normalizeAccounts([
+    { id: "account-2", apiKeyRef: "K1" },
+    { apiKeyRef: "K2" },
+    { apiKeyRef: "K3" },
+  ]);
+  check("normalizeAccounts：缺省 id 与先到显式 id 相撞时丢弃（先到先得）",
+    collided.length === 2 && collided[0].id === "account-2" && collided[1].id === "account-3",
+    JSON.stringify(collided));
+  // U1 审计复核补记 §四：kickThreshold 双默认——池层默认运行时恒被 orchestrator
+  // 层覆盖（index.ts 展开传入、poolDeps 转发），两处必须同步改（modelGroups 的
+  // 同形教训），此钉防再分叉。
+  check("kickThreshold 双默认同形（池层 = orchestrator 层）",
+    DEFAULT_KEY_POOL_PARAMS.kickThreshold === DEFAULT_ORCHESTRATOR_PARAMS.kickThreshold,
+    `${DEFAULT_KEY_POOL_PARAMS.kickThreshold} vs ${DEFAULT_ORCHESTRATOR_PARAMS.kickThreshold}`);
   // 2026-10-27 分组定版：Flash-Lite 专属池只有 flash-lite；u1.5 出图两模型走
   // 通用池（不映射 → general 裸轮转），专属池的限流标记不再误伤通用池模型。
   check("normalizeModelGroups：非对象回落默认（仅 flash-lite 归专属组）",
