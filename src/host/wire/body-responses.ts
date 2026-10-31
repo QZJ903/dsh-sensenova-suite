@@ -44,7 +44,8 @@ type ResponsesInputItem = Record<string, unknown>;
  * - tool-result → {type:'function_call_output',call_id,output}。
  *
  * 坏历史 tool_call 四防御与 Chat 路径一致（tasks 2.1）：空 name 丢弃（含孤立
- * tool-result）、arguments 空串补 '{}'、id 空串合成 sensenova-sanitized-N、
+ * tool-result）、arguments 空串补 '{}'、id 空串/超长（平台限 1–64，2026-10-31
+ * 真机 400 实证）合成 sensenova-sanitized-N、
  * 映射不到 call_id 的 tool-result 丢弃。
  */
 export function toResponsesInput(options: GenerateOptions, images?: Map<string, PreparedImage> | undefined): { instructions: string | undefined; input: ResponsesInputItem[] } {
@@ -67,7 +68,12 @@ export function toResponsesInput(options: GenerateOptions, images?: Map<string, 
       for (const call of toolCalls) {
         if (call.name === '' || call.name === undefined) continue; // 空 name 失败调用丢弃（含其孤立结果）
         syntheticToolCallSeq += 1;
-        const keptId = call.id !== '' && call.id !== undefined ? call.id : `sensenova-sanitized-${syntheticToolCallSeq}`;
+        // 平台约束 call_id 长度 1–64（真机 400 实证：宿主侧超长 id 原样透传被拒
+        // "Invalid 'call_id'… between 1 and 64"）。空串/超长一律合成短 id——
+        // remap 表保证 function_call 与其 output 用同一 id，关联不断。
+        const keptId = call.id !== '' && call.id !== undefined && call.id.length <= 64
+          ? call.id
+          : `sensenova-sanitized-${syntheticToolCallSeq}`;
         toolCallIdRemap.set(call.id, keptId);
         input.push({
           type: 'function_call',

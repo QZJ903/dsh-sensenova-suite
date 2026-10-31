@@ -39,6 +39,7 @@ import { createFileProviderStore } from "./provider-store.ts";
 import { profileSegment, profileStateDir } from "./state-store.ts";
 import { createApiKeyStore } from "./api-key-store.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "./key-orchestrator.ts";
+import { rateKindCountsStrike } from "./rate-classify.ts";
 import { createFilePoolStore } from "./pool-store.ts";
 import { createImageSwapper, installCapabilityOverride } from "./vision/bridge.ts";
 import { createProviderPublisher } from "./provider-publish.ts";
@@ -566,7 +567,21 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     // slots — null = nothing armed; `startSideEffects`
     // arms it when `providerRefreshMinutes > 0` AND the effective provider
     // switch is on, and `teardown` closes the interval.
-    providerRefresh: { current: null }
+    providerRefresh: { current: null },
+    // 额度驱动的池格写点（2026-10-31）：pools 是 **console 登录账号** 的 token
+    // plan 池，只对该账号自己的 key 有发言权。本插件目前拿不到「console 当前
+    // 登录的是哪个账号」（tokenStore 不暴露活动账号 id——方案 C 子系统的边界），
+    // 多 key 部署（README 规矩：每把 key 应来自不同账号）时**宁可不标也不错标**
+    // ——错标会把别家账号的健康 key 误伤 30 分钟，正是本机制要防的事。唯一无
+    // 歧义形态 = 池内只剩一把 key，此时 pools 必然描述它。活动账号身份暴露后
+    // 此处一行接上（key = orchestrator.keyOf(activeAccountId)）。
+    onQuotaPools: (pools: { pools?: unknown }) => {
+      const snap = orchestrator.snapshot();
+      const tracked = [...snap.running, ...snap.blocked.map((entry) => entry.key)];
+      if (tracked.length !== 1) return;
+      const only = tracked[0];
+      if (only !== undefined) orchestrator.reportQuotaPools(only, pools);
+    }
   };
 
   // The six route handlers (trust fence, method allowances, body ceilings,
@@ -581,8 +596,11 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   /** 视觉调用结局回池（单份定义，tools 与桥共用——两段手抄会漂）。 */
   const visionFeedback: import("./vision/run.ts").VisionFeedback = {
     on429: (key, kind) => {
+      // unknown（形状不明）与两个速率桶形态（rate-rps / rate-soft，14s 级自愈）
+      // 都不记 strike，与对话链同一教义（判据单一来源 = rateKindCountsStrike）。
+      // 落空 = 不记格不计数，key 留在轮转里，探测调度照常兜底；重形态才计数踢出。
       if (kind === "pool") orchestrator.reportPoolExhausted(key, orchestrator.groupOf(poolRecord.vision?.model ?? settings.visionModel));
-      else orchestrator.reportRateLimited(key);
+      else if (rateKindCountsStrike(kind)) orchestrator.reportRateLimited(key);
     },
     on401: (key) => orchestrator.reportAuthRejected(key),
     onSuccess: (key) => orchestrator.reportSuccess(key)

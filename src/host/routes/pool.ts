@@ -219,12 +219,15 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
         await poolAdmin.apply(action, id);
         if (action === "delete" && id === "default") await poolAdmin.forgetPanelKey();
         await poolAdmin.refresh();
-        // 删除后同步重解析池（与 add 同一条纪律）：不重解析则被删 id 滞留
-        // idToKey，statusById（快照相位的来源）继续按旧映射报它的相位。
-        // 失败不推翻本次删除，日志留痕，下一次改动会再试。
-        if (action === "delete") {
+        // 删除/恢复后同步重解析池（与 add 同一条纪律）：不重解析则该 id 滞留
+        // idToKey，statusById（快照相位的来源）继续按旧映射报它的相位。恢复更
+        // 甚：上次种池时该 id 还在停用名单里被排除的话 idToKey 根本不认识它，
+        // restoreById 静默 no-op（返回 false 无人读），面板永远「未入池」
+        // （2026-10-31 真机：运行中恢复仍显示未入池）。失败不推翻本次动作，
+        // 日志留痕，下一次改动会再试。
+        if (action === "delete" || action === "restore") {
           await poolAdmin.refreshKeys()
-            .catch((error: unknown) => logger?.warn?.(`${name}: pool reseed failed after key delete`, error));
+            .catch((error: unknown) => logger?.warn?.(`${name}: pool reseed failed after key ${action}`, error));
         }
         writeJson(response, 200, { ok: true }, { "cache-control": "no-store" });
       } catch (error) {

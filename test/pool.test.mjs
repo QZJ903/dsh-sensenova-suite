@@ -2,7 +2,10 @@
  * 池层与分类层单测——纯 Node、无 peer。
  *
  * 钉住的契约：
- *   - classify429Full 四分类（code 8 / 429001 / 池特征串 / 未知兜底）；
+ *   - classify429Full 七分类（code 8 / 429001 / 429003=rate-soft / insufficient_quota /
+ *     Endpoint* / ModelAccount* / 池特征串 / 未知兜底；insufficient_quota 2026-10-31
+ *     依上游 freeapi 订正从池特征串移出按 tpm 处理；429003 同日改 rate-soft——
+ *     轮换不记 strike）；
  *   - parseRetryAfterMs 秒数与 HTTP 日期两形态；
  *   - KeyOrchestrator：按组亲和（商汤组粘、通用组轮）、(key,组) 池格跳过
  *     与 groupFullyPoolMarked、连续 rate 踢出（阈值 3）、探测到期恢复、
@@ -10,9 +13,9 @@
  *   - normalizeAccounts / normalizeModelGroups 的丢弃与回落。
  */
 import { strict as assert } from "node:assert";
-import { classify429Full, classify429Body, parseRetryAfterMs } from "../src/host/rate-classify.ts";
+import { classify429Full, classify429Body, rateKindCountsStrike, parseRetryAfterMs } from "../src/host/rate-classify.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "../src/host/key-orchestrator.ts";
-import { normalizeAccounts, normalizeModelGroups } from "../src/host/host-config.ts";
+import { normalizeAccounts, normalizeModelGroups, CONFIG_DEFAULTS } from "../src/host/host-config.ts";
 
 const results = [];
 const check = (name, ok, detail = "") => results.push({ name, pass: ok === true, detail: String(detail) });
@@ -30,8 +33,46 @@ try {
   check("Allocated quota exceeded → pool", pool.kind === "pool", JSON.stringify(pool));
   const unknown = classify429Full("not json at all");
   check("非 JSON → unknown（兜底按 rate 处理）", unknown.kind === "unknown", JSON.stringify(unknown));
+  // 2026-10-31 真 key 实测：作用域写进 code。同一时刻 A/C 200、B 429 ⇒ 换 key 能绕开，
+  // 两类都按配额类处理（quota:true），且只认 code 不认 message（code=8 也带同一句 message）。
+  const endpoint = classify429Full('{"error":{"code":"RateLimitExceeded.EndpointTPMExceeded","message":"inference exceeds tpm/rpm limit"}}');
+  check("EndpointTPMExceeded → rate-endpoint（配额类，可轮换）", endpoint.kind === "rate-endpoint" && endpoint.retryFloorMs === 3_000, JSON.stringify(endpoint));
+  const endpointRpm = classify429Full('{"error":{"code":"RateLimitExceeded.EndpointRPMExceeded","message":"inference exceeds tpm/rpm limit"}}');
+  check("EndpointRPMExceeded → rate-endpoint", endpointRpm.kind === "rate-endpoint", JSON.stringify(endpointRpm));
+  const account = classify429Full('{"error":{"code":"ModelAccountRpmRateLimitExceeded","message":"inference exceeds tpm/rpm limit"}}');
+  check("ModelAccountRpmRateLimitExceeded → rate-account", account.kind === "rate-account", JSON.stringify(account));
+  const accountTpm = classify429Full('{"error":{"code":"ModelAccountTpmRateLimitExceeded"}}');
+  check("ModelAccountTpmRateLimitExceeded → rate-account", accountTpm.kind === "rate-account", JSON.stringify(accountTpm));
+  // 429003 → rate-soft（2026-10-31 他拍板）：样本 message 与 429001 全同、type 与
+  // Endpoint 族全同（内容区分不了），归类靠观测；实测它多呈 rpm 形态快速自愈——
+  // 计入踢出阈值会把贴线限流的健康 key 踢出池，故轮换不记 strike（adapter/vision
+  // 侧按 kind 路由，此处钉分类器形状）。
+  const code429003 = classify429Full('{"error":{"code":429003,"type":"rate_limit_error","message":"inference exceeds tpm/rpm limit"}}');
+  check("429003 → rate-soft（15s 下限，轮换不记 strike）", code429003.kind === "rate-soft" && code429003.retryFloorMs === 15_000, JSON.stringify(code429003));
+  const code429003Str = classify429Body('{"error":{"code":"429003"}}');
+  check("429003 字符串形态同样 rate-soft（quota:true）", code429003Str.quota === true && code429003Str.kind === "rate-soft", JSON.stringify(code429003Str));
+  const code8WithTpmMessage = classify429Body('{"error":{"code":8,"message":"inference exceeds tpm/rpm limit"}}');
+  check("code 8 带 tpm/rpm message 仍归 rate（message 不参与分类）", code8WithTpmMessage.kind === "rate" && code8WithTpmMessage.quota === true, JSON.stringify(code8WithTpmMessage));
+  const endpointQuota = classify429Body('{"error":{"code":"RateLimitExceeded.EndpointTPMExceeded"}}');
+  check("classify429Body 对 endpoint 也返回 quota:true（适配器据此换 key）", endpointQuota.quota === true && endpointQuota.kind === "endpoint", JSON.stringify(endpointQuota));
   const plainQuota = classify429Body('{"error":{"code":8}}');
   check("classify429Body 兼容面：code 8 quota:true", plainQuota.quota === true && plainQuota.kind === "rate");
+  // insufficient_quota：上游 freeapi 订正——命名像「配额耗尽」、实为 tpm/rpm 速率
+  // 限流（2026-10-31 从池类特征串 POOL_EXHAUSTED_MARKERS 移出，按 code 归 tpm 档）。
+  // 归池类的实害：速率窗被记成 (key,组) 积分格，组内全中招时错误触发「换无可换」
+  // 快速失败，而实测换 key 能绕开。
+  const aliasQuota = classify429Body('{"error":{"code":"insufficient_quota"}}');
+  check("insufficient_quota → tpm（quota:true，3s 起分级）", aliasQuota.quota === true && aliasQuota.kind === "tpm" && aliasQuota.retryFloorMs === 3_000, JSON.stringify(aliasQuota));
+  const aliasFull = classify429Full('{"error":{"code":"insufficient_quota","message":"inference exceeds tpm/rpm limit"}}');
+  check("insufficient_quota 全链分类 → rate-tpm（不再归 pool）", aliasFull.kind === "rate-tpm" && aliasFull.retryFloorMs === 3_000, JSON.stringify(aliasFull));
+  const aliasMsgOnly = classify429Full('{"error":{"code":1213,"message":"insufficient_quota"}}');
+  check("insufficient_quota 只出现在 message（code 不认识）→ 不归 pool（unknown 兜底）", aliasMsgOnly.kind === "unknown", JSON.stringify(aliasMsgOnly));
+  // 踢出阈值单一判据（2026-10-31）：只有重形态（窗口分钟级以上）计数；两个速率
+  // 桶形态（code 8 / 429003）14s 级自愈不计数，pool/unknown 另有口径。
+  check("strike 判据：rate-rps 不计（code 8，他拍板扩入）", rateKindCountsStrike("rate-rps") === false);
+  check("strike 判据：rate-soft 不计（429003）", rateKindCountsStrike("rate-soft") === false);
+  check("strike 判据：pool / unknown 不计", rateKindCountsStrike("pool") === false && rateKindCountsStrike("unknown") === false && rateKindCountsStrike(undefined) === false);
+  check("strike 判据：tpm / endpoint / account 计数", rateKindCountsStrike("rate-tpm") === true && rateKindCountsStrike("rate-endpoint") === true && rateKindCountsStrike("rate-account") === true);
 } catch (e) { fail("classify429Full", e); }
 
 // ── 2. parseRetryAfterMs ────────────────────────────────────────────────────
@@ -58,11 +99,13 @@ try {
     now: clock,
   });
 
-  // 3a. 商汤组亲和：同会话连续 pick 同一把；通用组两次 pick 推进游标。
+  // 3a. 具名组亲和：同会话连续 pick 同一把；通用组两次 pick 推进游标。
+  // （2026-10-31 判据改「组 ≠ general」：flash-lite 专属池组名在 0.1.18 改定后
+  // 亲和曾静默死路——本段用运行时组名 "flash-lite" 钉回归。）
   const first = await orch.pickStart({ sessionId: "s1", model: "sensenova-6.8-flash-lite" });
   const again = await orch.pickStart({ sessionId: "s1", model: "sensenova-6.8-flash-lite" });
-  check("商汤组：同会话粘同一把", first.key === again.key, `${first.key} vs ${again.key}`);
-  check("商汤组：groupOf 报 sensenova", first.group === "sensenova", first.group);
+  check("具名组：同会话粘同一把", first.key === again.key, `${first.key} vs ${again.key}`);
+  check("具名组：groupOf 报 flash-lite（运行时组名）", first.group === "flash-lite", first.group);
   const g1 = await orch.pickStart({ sessionId: "t1", model: "deepseek-v4-flash" });
   const g2 = await orch.pickStart({ sessionId: "t2", model: "glm-5.2" });
   check("通用组：不同会话轮转推进", g1.key !== g2.key, `${g1.key} vs ${g2.key}`);
@@ -92,24 +135,24 @@ try {
   check("到期探测发生且恢复", probed >= 1 && orch.snapshot().blocked.every((e) => e.key !== victim),
     `probed=${probed} blocked=${JSON.stringify(orch.snapshot().blocked)}`);
 
-  // 3e. 池格：mark (victim, sensenova) 后商汤组跳过它；general 组不受影响。
+  // 3e. 池格：mark (victim, flash-lite) 后具名组跳过它；general 组不受影响。
   now += 1;
-  const poolVictim = (await orch.pickStart({ sessionId: "p1", model: "sensenova-u1.5-lite" })).key;
-  orch.reportPoolExhausted(poolVictim, "sensenova");
-  let picked = await orch.pickStart({ sessionId: "p2", model: "sensenova-u1.5-lite" });
+  const poolVictim = (await orch.pickStart({ sessionId: "p1", model: "sensenova-6.8-flash-lite" })).key;
+  orch.reportPoolExhausted(poolVictim, "flash-lite");
+  let picked = await orch.pickStart({ sessionId: "p2", model: "sensenova-6.8-flash-lite" });
   let guard = 0;
   while (picked.key === poolVictim && guard < 10) {
-    picked = await orch.pickStart({ sessionId: `p${guard + 3}`, model: "sensenova-u1.5-lite" });
+    picked = await orch.pickStart({ sessionId: `p${guard + 3}`, model: "sensenova-6.8-flash-lite" });
     guard += 1;
   }
-  check("池格命中的 key 在商汤组被跳过", picked.key !== poolVictim, `${picked.key} vs ${poolVictim}`);
+  check("池格命中的 key 在具名组被跳过", picked.key !== poolVictim, `${picked.key} vs ${poolVictim}`);
   const generalPick = await orch.pickStart({ sessionId: "g9", model: "kimi-k3" });
-  check("general 组不受商汤组格子影响", generalPick.key !== undefined, generalPick.key);
+  check("general 组不受具名组格子影响", generalPick.key !== undefined, generalPick.key);
 
   // 3f. 全组标记判据。
-  for (const key of orch.snapshot().running) orch.reportPoolExhausted(key, "sensenova");
-  orch.reportPoolExhausted(orch.snapshot().blocked[0]?.key ?? "", "sensenova");
-  check("groupFullyPoolMarked：全池标记后为真", orch.groupFullyPoolMarked("sensenova") === true);
+  for (const key of orch.snapshot().running) orch.reportPoolExhausted(key, "flash-lite");
+  orch.reportPoolExhausted(orch.snapshot().blocked[0]?.key ?? "", "flash-lite");
+  check("groupFullyPoolMarked：全池标记后为真", orch.groupFullyPoolMarked("flash-lite") === true);
   check("groupFullyPoolMarked：general 组不受影响", orch.groupFullyPoolMarked("general") === false);
 
   // 3g. 401 永久移除。
@@ -186,6 +229,55 @@ try {
     st4.find((row) => row.id === "acc-1")?.phase === "blocked", JSON.stringify(st4));
 } catch (e) { fail("refreshKeys", e); }
 
+// ── 3j. reportQuotaPools：额度驱动的池格写点（2026-10-31 建）───────────────
+// 判据与 llm-models.exhaustedModelIds 同源：池耗尽 = (limit>0 && rem<=0)（任一窗口，
+// limit 未知不算）；组内出现模型全部耗尽 → 记格、全部有余 → 清格（「判定刷新了」）、
+// 混合态不动。30min TTL 兜底不变，此处不涉。
+try {
+  const orch = new KeyOrchestrator({
+    params: () => ({
+      ...DEFAULT_ORCHESTRATOR_PARAMS,
+      modelGroups: { "m-flash": "flash-lite", "m-kimi": "general" },
+      globalConcurrency: 2,
+    }),
+    resolveKeys: async () => [{ id: "acc-0", key: "sk-q" }],
+    probe: async () => true,
+  });
+  await orch.pickStart({ model: "m-flash" }); // 先种池：groupFullyPoolMarked 对空池（tracked=0）恒 false
+  const pools = (p) => ({ pools: p });
+  const win = (limit, remaining) => ({ limit, remaining, used: limit - remaining, resetAt: null });
+  // 耗尽池 → 记 flash-lite 组格。
+  orch.reportQuotaPools("sk-q", pools([{ id: "p1", modelIds: ["m-flash"], window5h: win(100, 0), window7d: win(500, 400) }]));
+  check("额度耗尽 → 记组格", orch.groupFullyPoolMarked("flash-lite") === true);
+  // 同池额度回正 → 清格（「额度刷新了」的判定）。
+  orch.reportQuotaPools("sk-q", pools([{ id: "p1", modelIds: ["m-flash"], window5h: win(100, 80), window7d: win(500, 400) }]));
+  check("额度回正 → 清格", orch.groupFullyPoolMarked("flash-lite") === false);
+  // limit 未知（0）+ remaining 0 → 不算耗尽（形状漂移防线，与 llm-models 同款）。
+  orch.reportQuotaPools("sk-q", pools([{ id: "p1", modelIds: ["m-flash"], window5h: win(0, 0), window7d: win(0, 0) }]));
+  check("limit 未知不算耗尽 → 不标", orch.groupFullyPoolMarked("flash-lite") === false);
+  // 组内一模型耗尽、另一模型有余（混合态）→ 格子维持原状（模型级并集教义：
+  // 只要组内还有模型可用就不动整组——预先手工放一格验证它不被误清）。
+  orch.reportPoolExhausted("sk-q", "flash-lite");
+  orch.reportQuotaPools("sk-q", pools([
+    { id: "p1", modelIds: ["m-flash"], window5h: win(100, 0), window7d: win(0, 0) },
+    { id: "p2", modelIds: ["m-flash2"], window5h: win(100, 50), window7d: win(0, 0) },
+  ]));
+  check("组内混合态 → 格子维持原状", orch.groupFullyPoolMarked("flash-lite") === true);
+  // 全部回正 → 清掉混合态遗留的格子。
+  orch.reportQuotaPools("sk-q", pools([
+    { id: "p1", modelIds: ["m-flash"], window5h: win(100, 30), window7d: win(0, 0) },
+    { id: "p2", modelIds: ["m-flash2"], window5h: win(100, 50), window7d: win(0, 0) },
+  ]));
+  check("全部回正 → 清格", orch.groupFullyPoolMarked("flash-lite") === false);
+  // general 组同样参与记账（kimi/glm 在 general）。
+  orch.reportQuotaPools("sk-q", pools([{ id: "p3", modelIds: ["m-kimi"], window5h: win(10, 0), window7d: win(0, 0) }]));
+  check("general 组同样记账", orch.groupFullyPoolMarked("general") === true);
+  // 轮询失败/空体 → 无模型 → 无动作（调用方还会加 error 守卫，此处钉纯函数侧）。
+  orch.reportPoolExhausted("sk-q", "flash-lite");
+  orch.reportQuotaPools("sk-q", pools([]));
+  check("空 pools → 不动格", orch.groupFullyPoolMarked("flash-lite") === true);
+} catch (e) { fail("reportQuotaPools", e); }
+
 // ── 4. 归一化 ───────────────────────────────────────────────────────────────
 try {
   const accounts = normalizeAccounts([
@@ -203,6 +295,11 @@ try {
     normalizeModelGroups("junk")["sensenova-6.8-flash-lite"] === "flash-lite"
     && !("sensenova-u1.5-lite" in normalizeModelGroups("junk"))
     && !("sensenova-u1.5-fast" in normalizeModelGroups("junk")));
+  // 2026-10-31 同形钉：orchestrator 死默认表必须与 host-config 运行时默认表一致
+  // （0.1.18 两表分叉致亲和静默死路三个月——测试用死默认测出绿的假象）。
+  check("orchestrator 默认表与 host-config 默认表同形",
+    JSON.stringify(DEFAULT_ORCHESTRATOR_PARAMS.modelGroups) === JSON.stringify(CONFIG_DEFAULTS.modelGroups),
+    JSON.stringify([DEFAULT_ORCHESTRATOR_PARAMS.modelGroups, CONFIG_DEFAULTS.modelGroups]));
   const custom = normalizeModelGroups({ "my-model": " custom ", "": "x", "k": 5 });
   check("normalizeModelGroups：收 string→string、去空白、丢非法值",
     custom["my-model"] === "custom" && !("k" in custom), JSON.stringify(custom));

@@ -164,7 +164,8 @@ export async function buildSnapshotBody({
   poolSnapshot,
   thinkingOverrides,
   wireProtocol,
-  onShapeDrift
+  onShapeDrift,
+  onQuotaPools
 }: {
   settings: import("./host-config.ts").ResolvedSettings;
   cache: Map<string, { body: unknown; at: number; gen: number }>;
@@ -197,6 +198,12 @@ export async function buildSnapshotBody({
    * not an import: the aggregator stays pure and the call site owns the logger.
    */
   onShapeDrift?: (message: string) => void;
+  /**
+   * 额度驱动的池格写点回调（2026-10-31 建）：pool-usage 轮询**成功**时以解析出
+   * 的 pools 调用一次（失败不调，绝不拿坏数据写格）。参数回调而非导入——聚合层
+   * 保持纯函数（同 onShapeDrift），key 归属与落格决策在调用方（index.ts）。
+   */
+  onQuotaPools?: (pools: { pools?: unknown }) => void;
 }): Promise<SnapshotData> {
   const providerState = publisher.state;
   const resolveApiKey = async () => (await apiKeyStore.resolve()).value;
@@ -252,6 +259,10 @@ export async function buildSnapshotBody({
     })()
   ]);
   const pools = parsePools(poolResult.value);
+  // 额度驱动的池格写点（2026-10-31 建）：只在轮询成功时喂——失败绝不写格，
+  // 与下方 unavailableModelIds 的 null 纪律同源。归属判定与落格决策在调用方
+  // （Wiring.onQuotaPools），聚合层保持纯函数（同 onShapeDrift 的纪律）。
+  if (poolResult.error === null) onQuotaPools?.(pools);
   const trend = parseTrend(trendResult.value, settings.trendHours);
   // Pseudo multipliers ride on the rows the Host computes, so the client
   // never re-implements the matching (and the tests drive the same math).

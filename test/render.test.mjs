@@ -15,6 +15,7 @@
  */
 import { render, styles as S, texts, findElement, findAll } from "./panel-render.js";
 import { h, surface, reactStandin } from "./client-surface.js";
+import { applyChainSlotEdit } from "../src/client/model-picker.ts";
 import { results, check, finish } from "./harness.mjs";
 
 
@@ -556,6 +557,27 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
         return slots.length === 3 && slots[0].props.disabled !== true
           && slots[1].props.disabled !== true && slots[2].props.disabled === true;
       })(), texts(thinkingTree).join("\n"));
+    check("a chat in the prefix disables the slots after it (real-time narrowing, 2026-10-31)",
+      (() => {
+        const chatTree = treeOf(render.ModelRoster, {
+          models: rich, enabledIds: [], tt: ttZh,
+          onThinkingToggle: () => {}, visionIds: [], onVisionToggle: () => {},
+          openThinkingId: "deepseek-v4-flash", onThinkingOpen: () => {},
+          modelProtocols: { "deepseek-v4-flash": ["responses", "chat-completions"] }, onChainSlotChange: () => {},
+        });
+        const slots = findAll(chatTree, (props) => typeof props["aria-label"] === "string" && props["aria-label"].includes("协议"));
+        // chat 无降级条件、其后槽位死位：槽 3 禁用且为空；chat 自己的槽（槽 2）保持可编辑。
+        return slots.length === 3 && slots[0].props.disabled !== true && slots[1].props.disabled !== true
+          && slots[2].props.disabled === true && slots[2].props.value === "";
+      })(), texts(thinkingTree).join("\n"));
+    check("applyChainSlotEdit: chat selection narrows in place (post-chat wires dropped)",
+      JSON.stringify(applyChainSlotEdit(["anthropic", "responses", "chat-completions"], 0, "chat-completions")) === JSON.stringify(["chat-completions"])
+        && JSON.stringify(applyChainSlotEdit(["anthropic", "responses", "chat-completions"], 1, "chat-completions")) === JSON.stringify(["anthropic", "chat-completions"]),
+      "slot0/slot1 chat edits");
+    check("applyChainSlotEdit: non-chat edits keep the keep-unused-tail semantics",
+      JSON.stringify(applyChainSlotEdit(["anthropic", "responses", "chat-completions"], 0, "responses")) === JSON.stringify(["responses", "chat-completions"])
+        && JSON.stringify(applyChainSlotEdit(["anthropic", "responses"], 2, "")) === JSON.stringify(["anthropic", "responses"]),
+      "tail-keep + blank");
     const unopened = treeOf(render.ModelRoster, {
       models: rich, enabledIds: [], tt: ttZh,
       thinkingById: { "deepseek-v4-flash": ["off"] },

@@ -1,5 +1,69 @@
 # 更新日志（Changelog）
 
+## 0.1.36（2026-10-31）
+
+- **responses 线 call_id 长度约束**：平台限 `call_id` 1–64 字符，宿主侧超长工具
+  调用 id 原样透传被 400（`Invalid 'call_id'`）——链改 responses 优先后带工具
+  历史的会话首次踩中。现空串/超长一律合成 `sensenova-sanitized-N` 短 id，remap
+  表保证调用与结果用同一 id（关联不断）；合规 id 原样透传。chat 线不限长未动。
+- **面板「恢复」后同步重解析池**：恢复与删除同一条重解析纪律——上次种池时该
+  账号还在停用名单里被排除的话 idToKey 不认识它，restoreById 静默 no-op，面板
+  永远「未入池」（真机实录）。恢复路由现在先摘名单再触发 refreshKeys，key 带
+  最新凭据值回池。
+- **断尾日志加 stop 维度**：anthropic 流断尾标记行带 `stop=N`（请求携带的停止
+  序列数量），实证「平台命中 stop_sequence 时少发终止事件」的假设是否成立。
+
+## 0.1.35（2026-10-31）
+
+- **anthropic 断尾专用码 + 内存级换线降级**：平台 an 线时好时坏（流在 message_stop
+  前中断）——新错误码 `ANTHROPIC_TRUNCATED`（peer 的 retryableCodes 不锁枚举，
+  asar 实证后显式入名单可重试），适配器命中即把该模型记进 `anthropicUnsupported`
+  （进程内、重启清除，与 400 运行时不符同池），重试与后续请求经 resolveWirePlan
+  自动走生效链下一跳。本请求不原地重发（内容已流出，重发会重复输出）。
+- **统一降级链 re→an→chat**：kimi/glm 的 anthropic 加回、分岔撤销（10-30 的静态
+  排除由上面的运行时降级接管），再把顺序定为 responses 优先。三槽 UI 编辑态实时
+  收窄同批落地。
+- **速率桶形态免踢**：踢出阈值（连续 3 次）只计重形态 tpm/endpoint/account；两个
+  速率桶形态 code 8（rpm 桶本体）与 429003（`rate-soft`，观测多呈 rpm 快速自愈）
+  轮换但不计数——贴线限流不再把健康 key 踢出池。判据单一来源
+  `rateKindCountsStrike`，对话链与识图/出图链同取。429 日志 kind 显示区分
+  rate/rate-soft。
+- **目录抓取降级（catalog-gate）**：目录 10s 超时进 60s 退避期后，旧实现回空数组
+  （「加载失败后模型列表空白干等一分钟」）——现退避期内空缓存先回落模块级种子
+  （同凭据同端点），再每段退避期补发一次（补发再失败安静到期，防秒级循环不变）。
+  判定抽纯模块 `catalog-gate.ts` 单测钉。
+- **429 日志格式**：去 sid（几乎用不上）；换 key 行写出真实过渡链
+  `旧key → 新key`（首版误打两个新 key——apiKey 赋值先于打印，已修）；识图/出图
+  链 429 口径同步（unknown/速率桶不记 strike）。
+- **chat 后截断**：chat 是参考方言、无降级条件，链走到它即服务——其后槽位是
+  永不可达的死位。存储层（pool-store 归一化）与生效合成层（sanitizeChain）经
+  同一 `truncateChainAtChat` 截断，面板编辑态选中 chat 实时收窄（与选空同款），
+  `applyChainSlotEdit` 抽纯函数同源钉。
+
+## 0.1.34（2026-10-31）
+
+- **429 分类订正（交接文档 5 §四）**：`insufficient_quota` 从池类特征串移出，
+  按 code 归 tpm 档（上游 freeapi 实测：命名误导、message 同为 tpm/rpm 限流措辞，
+  实为速率限流）——归池类会把速率窗误记成积分格、组内全中招时错误快速失败，
+  而实测换 key 能绕开。**删 `buildRetryPolicyConfig`**（零生产读者、已与
+  `adapter.ts` providerRetryPolicy 的内联字面量漂移；连带删 retry.test 相应段）。
+  **识图/出图链 429 口径对齐对话链**：unknown（形状不明）不再记 strike，与
+  key-health 教义一致——两条链共用一个池，识图侧曾能把对话侧按教义保下的
+  key 记满踢出。
+- **key 路由三修（池格写读同组 / 亲和复活 / 额度驱动写点）**：
+  - 轮换契约带上模型：`rotateApiKey(key, rejection, model)`，池格的组由
+    `groupOf(model)` 现算——此前写侧硬编码 general、读侧按请求组查，专属池
+    模型的格子两边都落空（专属池耗尽拦不住自己，反而误伤通用组健康 key）。
+    `groupFullyPoolMarked` 首次接线：全池标满直接快速失败，不再借被标记的
+    阻塞 key 硬试。
+  - 会话粘性判据从组名清单改「组 ≠ general」：0.1.18 分专属池改组名时判据
+    漏改，亲和自那时起静默死路。orchestrator 死默认表与 host-config 运行时
+    默认表对齐 + pool.test 同形钉。
+  - 额度驱动的池格写点 `reportQuotaPools`：发布链每次额度轮询成功（失败不喂）
+    按池剩余记/清格——耗尽记格、回正清格、混合态不动，30min TTL 降为兜底。
+    覆盖边界：额度数据是 console 登录账号的池子，多 key 部署在活动账号身份
+    暴露前宁可不标也不错标（单 key 部署无歧义放行）。
+
 ## 0.1.33（2026-10-31）
 
 - **每模型降级链（全量制，用户拍板）**：模型设置「协议降级链」列（原「协议」）

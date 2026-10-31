@@ -17,6 +17,7 @@
  * @module dsh-sensenova-suite/wire/sse-anthropic
  */
 import { LlmError, errorChain } from '@deepseek-ai/dsh-llm';
+import { ANTHROPIC_TRUNCATED_CODE } from '../llm-retry.ts';
 import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm';
 import { ToolCallId } from '../brand.ts';
 import { traceLog } from '../trace-log.ts';
@@ -349,10 +350,12 @@ export async function* parseAnthropicSse(
     if (!state.finished) {
       if (!state.messageStopped) {
         // 流断尾（无 message_stop）：Anthropic 客户端严格依赖该终止事件，
-        // 缺失即视为传输中断，而非静默收口。
+        // 缺失即视为传输中断，而非静默收口。专用码 ANTHROPIC_TRUNCATED（在
+        // llm-retry 的 retryableCodes 里显式可重试）供两层消费：宿主重试层重试，
+        // 适配器按码做内存级换线降级（anthropicUnsupported，见 adapter.ts）。
         throw new LlmError(
           'llm-sensenova: SenseNova Anthropic stream ended before message_stop；SenseNova 流式响应在 message_stop 之前中断，重试通常可恢复',
-          'TRANSPORT',
+          ANTHROPIC_TRUNCATED_CODE,
         );
       }
       for (const chunk of closeAllOpen(state)) yield chunk;

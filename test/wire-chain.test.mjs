@@ -35,9 +35,29 @@ import { results, check, fail } from "./harness.mjs";
       JSON.stringify(chainsOf(auto)));
 
     const dedup = record({ m1: ["chat-completions", "chat-completions", "responses", "anthropic"] });
-    check("duplicates collapse and the chain truncates to three (head kept)",
-      JSON.stringify(chainsOf(dedup).m1) === JSON.stringify(["chat-completions", "responses", "anthropic"]),
+    check("duplicates collapse, then the chain truncates at chat (2026-10-31)",
+      JSON.stringify(chainsOf(dedup).m1) === JSON.stringify(["chat-completions"]),
       JSON.stringify(chainsOf(dedup)));
+
+    // chat 后截断（2026-10-31 他拍板）：chat 无降级条件，其后槽位永不可达——
+    // 存储层即截断，面板槽位与实际行为一致。
+    const chatHead = record({ m1: ["chat-completions", "responses"] });
+    check("a chain is truncated at chat-completions (later slots are dead weight)",
+      JSON.stringify(chainsOf(chatHead).m1) === JSON.stringify(["chat-completions"]),
+      JSON.stringify(chainsOf(chatHead)));
+    const chatMid = record({ m1: ["responses", "chat-completions", "anthropic"] });
+    check("entries after chat drop, entries before stay",
+      JSON.stringify(chainsOf(chatMid).m1) === JSON.stringify(["responses", "chat-completions"]),
+      JSON.stringify(chainsOf(chatMid)));
+    // 生效链合成层同样截断（面板值经 sanitizeChain 进 effectiveChain）。
+    const { effectiveChain } = await import("../src/host/wire/chain.ts");
+    const { factsFor } = await import("../src/host/wire/facts.ts");
+
+  
+    check("effectiveChain truncates a panel override at chat (merge layer)",
+      JSON.stringify(effectiveChain({}, factsFor("m", undefined), ["chat-completions", "responses"]))
+        === JSON.stringify(["chat-completions"]),
+      JSON.stringify(effectiveChain({}, factsFor("m", undefined), ["chat-completions", "responses"])));
 
     const junk = record({ m1: ["nope"], m2: 42, m3: [] });
     check("an all-invalid / empty value drops the override entirely",
@@ -54,6 +74,27 @@ let strictRefused = false;
   try {
     const plan = await import("../src/host/wire/plan.ts");
     const { factsFor } = await import("../src/host/wire/facts.ts");
+const { toResponsesInput } = await import("../src/host/wire/body-responses.ts");
+    const longId = `toolu_${"A".repeat(64)}`; // 70 字符 > 64
+    const ciOpts = {
+      model: "m",
+      messages: [
+        { role: "assistant", content: [{ type: "tool-call", id: longId, name: "f", arguments: "{}" }] },
+        { role: "tool", toolCallId: longId, content: [{ type: "text", text: "ok" }] },
+        { role: "assistant", content: [{ type: "tool-call", id: "short_ok", name: "g", arguments: "{}" }] },
+      ],
+    };
+    const { ciInput } = toResponsesInput(ciOpts);
+    const ciLongCall = ciInput.find((i) => i.type === "function_call" && i.name === "f");
+    const ciOutput = ciInput.find((i) => i.type === "function_call_output");
+    const ciShortCall = ciInput.find((i) => i.type === "function_call" && i.name === "g");
+    check("超长 call_id 合成短 id（平台限 1–64）",
+      ciLongCall !== undefined && ciLongCall.call_id.length <= 64 && String(ciLongCall.call_id).startsWith("sensenova-sanitized-"),
+      JSON.stringify(ciLongCall));
+    check("remap 保证 function_call_output 用同一合成 id（关联不断）",
+      ciOutput !== undefined && ciOutput.call_id === ciLongCall.call_id,
+      JSON.stringify(ciOutput));
+    check("合规短 id 原样透传", ciShortCall !== undefined && ciShortCall.call_id === "short_ok", JSON.stringify(ciShortCall));
 
     const opts = (extra = {}) => ({ model: "m", messages: [], ...extra });
     const resolve = (options, config = {}, modelChain, runtime = {}, model = "m") =>
@@ -61,21 +102,23 @@ let strictRefused = false;
     const shape = (wire, reason, chain, chainIndex) =>
       JSON.stringify([wire, reason, chain, chainIndex]);
 
-    // 档案默认链：常规模型 an>re>chat 起步即 anthropic。
-    check("a standard model walks its an>re>chat default and serves anthropic",
+    // 档案默认链：全模型统一 re>an>chat（2026-10-31 他拍板）起步即 responses。
+    check("a standard model walks its re>an>chat default and serves responses",
       shape(resolve(opts()).wire, resolve(opts()).reason, resolve(opts()).chain, resolve(opts()).chainIndex)
-        === shape("anthropic", "anthropic-default", ["anthropic", "responses", "chat-completions"], 0),
+        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"], 0),
       JSON.stringify(resolve(opts())));
 
-    // kimi/glm 档案默认链 re>chat（2026-10-30 实测排除 anthropic）。
+    // kimi/glm 档案默认链与标准链同形（2026-10-31 他拍板：加回 anthropic 撤销分岔，
+    // 再统一为 re>an>chat）。钉「不分岔」本身。
     const kimi = resolve(opts(), {}, undefined, {}, "kimi-k3");
-    check("kimi's facts default chain is re>chat and serves responses",
+    check("kimi's facts default chain is the standard (anthropic restored, no fork)",
       shape(kimi.wire, kimi.reason, kimi.chain, kimi.chainIndex)
-        === shape("responses", "responses-default", ["responses", "chat-completions"], 0),
+        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"], 0),
       JSON.stringify(kimi));
     const glm = resolve(opts(), {}, undefined, {}, "glm-5.2");
-    check("glm's facts default chain is re>chat too",
-      JSON.stringify(glm.chain) === JSON.stringify(["responses", "chat-completions"]) && glm.wire === "responses",
+    check("glm's facts default chain is the standard too (no fork)",
+      shape(glm.wire, glm.reason, glm.chain, glm.chainIndex)
+        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"], 0),
       JSON.stringify(glm));
 
     // 面板覆盖三层之首：单线链钉死；显式加回 anthropic 也照走。

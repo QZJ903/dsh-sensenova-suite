@@ -116,20 +116,32 @@ export function createAdapterFactory(pool: PoolFacade) {
       // 全局在途上限：排队等待而非报错。
       requestSlot: async (signal?: AbortSignal) => orchestrator.acquireSlot(signal),
       // 轮换：401 → 永久移除并取下一把；rate/pool 类 429 → 记数/记格并取下一把。
-      // 拒绝类型不带组信息（适配器契约），轮换侧一律按 general 组推进格子判断；
-      // pool 类的组级标记由 publish 链的额度刷新路径补写（同一池层的另一入口）。
-      rotateApiKey: async (rejectedKey, rejection) => {
+      // 组一律按 groupOf(本次请求模型) 现算（2026-10-31 修：此前写侧硬编码
+      // "general"，读侧按请求模型的组查——专属池模型的格子写读两侧组名错位，
+      // 专属池耗尽拦不住自己、反而误伤通用组的健康 key）。额度侧的主动记/清走
+      // 发布链 reportQuotaPools（snapshot-aggregate 的 onQuotaPools 回调），
+      // 两条路写同一份格子，此处注释不再假设另一条不存在。
+      rotateApiKey: async (rejectedKey, rejection, model) => {
+        const group = orchestrator.groupOf(model);
         const exclude = new Set([rejectedKey]);
         if (rejection === "invalid-credential") {
           orchestrator.reportAuthRejected(rejectedKey);
-          return orchestrator.pickNext(exclude, "general");
+          return orchestrator.pickNext(exclude, group);
         }
         if (rejection === "pool-exhausted") {
-          orchestrator.reportPoolExhausted(rejectedKey, "general");
-          return orchestrator.pickNext(exclude, "general");
+          orchestrator.reportPoolExhausted(rejectedKey, group);
+          // 全池中招快速失败（PLAN §5.2 判据首次接线，2026-10-31）：该组每把
+          // key（含阻塞态）都标着池耗尽时不再借阻塞 key 硬试，直接让本请求
+          // 落「换无可换」——borrow 语义会无视格子，这里必须显式拦。
+          if (orchestrator.groupFullyPoolMarked(group)) return undefined;
+          return orchestrator.pickNext(exclude, group);
         }
-        orchestrator.reportRateLimited(rejectedKey);
-        return orchestrator.pickNext(exclude, "general");
+        // rate-unclassified（未知形状 429 / 402 / 403）：只换，不记 strike——
+        // 一次未知形态不足以断定这把 key 坏了；真正的判断留给后续重复命中。
+        // rate-soft（两个速率桶形态 code 8 / 429003，2026-10-31 他拍板）：rpm 桶
+        // 14s 级自愈，计入踢出阈值会把贴线限流的健康 key 踢出池——同样只换不记。
+        if (rejection !== "rate-unclassified" && rejection !== "rate-soft") orchestrator.reportRateLimited(rejectedKey);
+        return orchestrator.pickNext(exclude, group);
       },
       // 2xx 上报：清连续限流计数、救回被借用的阻塞 key。
       reportOutcome: (key) => orchestrator.reportSuccess(key),

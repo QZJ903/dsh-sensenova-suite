@@ -20,6 +20,7 @@
  */
 
 import { SensenovaKeyPool, DEFAULT_KEY_POOL_PARAMS, type KeyPoolParams, type KeyPoolSnapshot } from "./key-pool.ts";
+import { exhaustedModelIds } from "./llm-models.ts";
 
 /** 裸轮转的空排除集（pickNext 的「从 lastPicked 环回推进」形态）。 */
 const EMPTY_EXCLUDE: ReadonlySet<string> = new Set<string>();
@@ -53,11 +54,11 @@ export const DEFAULT_ORCHESTRATOR_PARAMS: Readonly<OrchestratorParams> = Object.
   affinityTtlMs: 300_000,
   affinityMax: 512,
   globalConcurrency: 0, // 0 = 跟随 key 数（index.ts 归一化）
-  modelGroups: {
-    "sensenova-6.8-flash-lite": "sensenova",
-    "sensenova-u1.5-lite": "sensenova",
-    "sensenova-u1.5-fast": "sensenova",
-  },
+  // 与 host-config.ts CONFIG_DEFAULTS.modelGroups 同形（2026-10-31 对齐——旧表
+  // 三模型→"sensenova" 是 0.1.18 改专属池前的化石）。运行时本默认不被消费
+  // （index.ts 恒传 settings.modelGroups），只有测试与直接构造时生效；两处默认
+  // 必须同步改，否则测试钉的形状和运行时形状再次分叉（问题 3 的教训）。
+  modelGroups: { "sensenova-6.8-flash-lite": "flash-lite" },
 });
 
 /** pool-429 格子条目：命中时刻（TTL 自愈 + 探测成功清除）。 */
@@ -140,9 +141,14 @@ export class KeyOrchestrator {
     return this.params().modelGroups[model] ?? "general";
   }
 
-  /** 商汤组才用亲和；通用组裸轮转（PLAN §5.4）。 */
+  /**
+   * 具名组（专属池）会话粘性；通用组裸轮转（PLAN §5.4）。
+   * 判据是「组 ≠ general」而非组名清单（2026-10-31 用户拍板恢复粘性）：0.1.18
+   * 分专属池把组名改成 "flash-lite" 时本判据漏改，亲和自那时起静默死路——清单式
+   * 判据每加一组都要记得同步；集合式判据（general=轮转，具名=粘）不会再断。
+   */
   private groupUsesAffinity(group: string): boolean {
-    return group === "sensenova";
+    return group !== "general";
   }
 
   /** 确保池里至少 seed 过一次（凭据服务的懒解析在 resolveKeys 里）。 */
@@ -385,6 +391,53 @@ export class KeyOrchestrator {
 
   reportPoolExhausted(key: string, group: string): void {
     this.poolGrid.set(`${key}\u0000${group}`, this.now());
+  }
+
+  /** 清一格（reportQuotaPools 额度回正与探测成功清格共用同一份键拼接）。 */
+  clearPoolCell(key: string, group: string): void {
+    this.poolGrid.delete(`${key}\u0000${group}`);
+  }
+
+  /**
+   * 额度驱动的池格写点（2026-10-31 建，接发布链 onQuotaPools 回调）。
+   *
+   * `pools` 是**一份控制台账号**的 token plan 池（每池 modelIds + window5h/7d
+   * 剩余）；调用方负责 key 与该账号的归属关系（见 index.ts 接线注释的覆盖边界
+   * ——归属不明时宁可不调用，错标 = 误伤健康 key，正是本机制要防的事）。
+   * 判据与 llm-models.exhaustedModelIds 同源（直接复用它做模型级判定）：
+   *   - 池耗尽 = (limit5>0 && rem5<=0) || (limit7>0 && rem7<=0)，limit 未知不算
+   *     （形状漂移防线同款）；
+   *   - 组内出现的模型全部耗尽 → 记格（沿用模型级并集教义：组内还有一个模型
+   *     有余量就不标整组，避免重演「专属池 0 余量清空整个 picker」）；
+   *   - 组内出现的模型全部有余量 → 清格（「额度刷新了」的判定；resetAt 可空，
+   *     不作判据）；
+   *   - 混合态不动，等下一拍或真实 429 校准。
+   * 30min TTL 保留为兜底：轮询停摆时格子照旧自愈，不会标了永不清。
+   */
+  reportQuotaPools(key: string, pools: { pools?: unknown }): void {
+    const list: unknown[] = Array.isArray(pools?.pools) ? pools.pools : [];
+    const drainedModels = new Set(exhaustedModelIds({ pools: list }));
+    const groups = new Map<string, string>();
+    for (const pool of list) {
+      const ids = Array.isArray((pool as { modelIds?: unknown } | undefined)?.modelIds)
+        ? (pool as { modelIds?: unknown[] }).modelIds!
+        : [];
+      for (const id of ids) {
+        if (typeof id !== "string" || id === "" || groups.has(id)) continue;
+        groups.set(id, this.groupOf(id));
+      }
+    }
+    const agg = new Map<string, { served: number; drained: number }>();
+    for (const [id, group] of groups) {
+      const row = agg.get(group) ?? { served: 0, drained: 0 };
+      row.served += 1;
+      if (drainedModels.has(id)) row.drained += 1;
+      agg.set(group, row);
+    }
+    for (const [group, row] of agg) {
+      if (row.drained === 0) this.clearPoolCell(key, group);
+      else if (row.drained === row.served) this.reportPoolExhausted(key, group);
+    }
   }
 
   /** 该组是否已全池标记（池类 429 轮完一圈后的快速失败判据）。 */

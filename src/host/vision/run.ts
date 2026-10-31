@@ -31,7 +31,7 @@ export type ResolveKey = () => Promise<string>;
  * 401 永久移除、成功清零。index.ts 注入；纯函数模块不 import 池。
  */
 export interface VisionFeedback {
-  on429: (key: string, kind: "rate-rps" | "rate-tpm" | "pool" | "unknown") => void;
+  on429: (key: string, kind: import("../rate-classify.ts").RateLimitKind) => void;
   on401: (key: string) => void;
   onSuccess: (key: string) => void;
 }

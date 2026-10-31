@@ -5,7 +5,7 @@
  * ```
  * 面板覆盖（pool.json modelProtocols[model]）
  *   ?? wireProtocol 配置（强制值映射为单线链；auto = 档案默认）
- *   ?? 档案默认链（facts.defaultChain：常规 an>re>chat；kimi/glm re>chat）
+ *   ?? 档案默认链（facts.defaultChain：全模型统一 re>an>chat，2026-10-31）
  * ```
  *
  * 决策 = 沿生效链走查：第一条「模型声明支持（supportedWires 求交）且未命中

@@ -18,6 +18,7 @@ import { obj, degrade } from "./util.ts";
 import { name } from "./host-config.ts";
 import { profileStateDir, readStateJson, createStateReadCache, createVersionedJsonWriter } from "./state-store.ts";
 import { nativeThinkingDefaults } from "./wire/facts.ts";
+import { truncateChainAtChat } from "./wire/chain.ts";
 import type { StoreOptions } from "./types.ts";
 
 /** 形状版本；不兼容变更时递增。 */
@@ -112,7 +113,9 @@ function normalizeChainValue(value: unknown): string[] | undefined {
     if (out.includes(entry)) continue;
     out.push(entry);
   }
-  return out.length > 0 ? out.slice(0, 3) : undefined;
+  // chat 后截断（2026-10-31 他拍板）：chat 无降级条件，其后槽位永不可达——
+  // 存储层即截断，面板槽位与实际行为一致（规则单一来源 = chain.truncateChainAtChat）。
+  return out.length > 0 ? truncateChainAtChat(out).slice(0, 3) : undefined;
 }
 
 export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {

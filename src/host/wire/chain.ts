@@ -9,7 +9,7 @@
  * ```
  * 面板覆盖（pool.json modelProtocols[model]，有序子集 ≤3）
  *   ?? wireProtocol 配置（auto 之外的值映射为单线链）
- *   ?? 档案默认链（facts.defaultChain：常规 an>re>chat；kimi/glm re>chat）
+ *   ?? 档案默认链（facts.defaultChain：全模型统一 re>an>chat，2026-10-31）
  * ```
  * @module dsh-sensenova-suite/wire/chain
  */
@@ -18,6 +18,14 @@ import type { WirePlanConfig } from './plan.ts';
 
 /** 链走查耗尽后的全局兜底：chat 是三线中表达最全的参考方言，无降级条件（plan 走查消费）。 */
 export const GLOBAL_FALLBACK_CHAIN: readonly WireKind[] = ['chat-completions'];
+
+/** chat 后截断（2026-10-31 他拍板）：chat 是参考方言、无降级条件，链走到它即
+ * 服务——其后的槽位是永不可达的死位，`[chat, X, Y] ≡ [chat]`。存储层与生效
+ * 合成层都调这一个函数截断，面板槽位与实际行为一致（chat 之后的条目 ≡ 不存在）。 */
+export function truncateChainAtChat<T extends string>(chain: readonly T[]): readonly T[] {
+  const stop = chain.findIndex((entry) => entry === 'chat-completions');
+  return stop === -1 ? chain : chain.slice(0, stop + 1);
+}
 
 /** 面板/手编链值防线：只认三条 wire，去重保序，截到 3（三槽上限，截头保留用户优先线）。 */
 function sanitizeChain(chain: readonly unknown[] | undefined): readonly WireKind[] | undefined {
@@ -30,7 +38,7 @@ function sanitizeChain(chain: readonly unknown[] | undefined): readonly WireKind
     seen.add(entry);
     out.push(entry);
   }
-  return out.length > 0 ? out : undefined;
+  return out.length > 0 ? truncateChainAtChat(out) : undefined;
 }
 
 /**

@@ -90,6 +90,8 @@ export const SUITES = Object.freeze([
   { name: "wiring.test.mjs", kind: "suite", note: "host wiring + publish serialisation" },
   { name: "contract.test.mjs", kind: "suite", note: "the outbound inference contract" },
   { name: "retry.test.mjs", kind: "suite", note: "429 backoff / triage" },
+  { name: "key-health.test.mjs", kind: "suite", note: "unclassified-failure key rotation (unknown 429 / 402 / 403)" },
+  { name: "catalog-gate.test.mjs", kind: "suite", note: "catalog fetch gate: TTL / failure backoff / seed+resend degraded serves (peer-free)" },
   { name: "wire-chain.test.mjs", kind: "suite", note: "per-model protocol chain: pool-store parse + plan walk (peer-gated)" },
   { name: "doctor.test.mjs", kind: "suite", note: "doctor symptom codes" },
   { name: "state-segmentation.test.mjs", kind: "suite", note: "per-profile state directories" },

@@ -1,21 +1,23 @@
 /**
  * Peer-free checks for the 429 self-healing work:
  *
- * - `llm-retry.js`: the quota-aware retry-policy config (which failure classes
- *   this shared-pool provider retries, and how gently).
+ * - `llm-retry.js`: `QUOTA_CODES` / `retryableCodes` (which failure classes
+ *   this shared-pool provider retries). The full policy config (maxRetries,
+ *   backoff) is assembled inline at `adapter.ts` `providerRetryPolicy` — the
+ *   former `buildRetryPolicyConfig` had no production reader and had drifted
+ *   from that call site, so it was removed (2026-10-31).
  * - `llm-models.js`: `exhaustedModelIds` (pool -> blocked model set),
  *   `buildDescriptors` excluding blocked models, and `rosterWithAvailability`
  *   (the panel's self-identifying roster).
  *
  * Nothing here imports a Host peer, so the policy decisions stay covered on a
- * clean checkout. Where the peer is resolvable (a real Host runtime) an
- * optional block also pins the *resolved* policy, but its absence must not fail
- * the suite.
+ * clean checkout. The peer-resolved integration (resolveRetryPolicy against
+ * the real config) is covered by `test/e2e.mjs` on a real runtime.
  */
 import {
-  buildRetryPolicyConfig,
   retryableCodes,
-  QUOTA_CODES
+  QUOTA_CODES,
+  ANTHROPIC_TRUNCATED_CODE
 } from "../src/host/llm-retry.ts";
 import {
   exhaustedModelIds,
@@ -24,55 +26,11 @@ import {
   rosterWithAvailability,
   supportedThinkingLevels
 } from "../src/host/llm-models.ts";
-import { branchSkip } from "./env-skip.mjs";
-import { loadPeer } from "./peer-roots.mjs";
 import { results, check, fail } from "./harness.mjs";
-
-let strictRefused = false;
 
 const BASE_URL = "https://token.sensenova.cn/v1";
 
-// --- 1. buildRetryPolicyConfig: shape + intent ----------------------------
-{
-  try {
-    const cfg = buildRetryPolicyConfig();
-    check("policy mode is 'normal'", cfg.mode === "normal", cfg.mode);
-    check("maxRetries is a safe integer and rides out daytime rate-limiting (>=8)",
-      Number.isSafeInteger(cfg.maxRetries) && cfg.maxRetries >= 8, String(cfg.maxRetries));
-
-    const codes = cfg.retryableCodes;
-    check("retryableCodes is a non-empty string array",
-      Array.isArray(codes) && codes.length > 0 && codes.every((c) => typeof c === "string"));
-    check("retryableCodes includes RATE_LIMIT (transient throttle is retried)",
-      codes.includes(QUOTA_CODES.rateLimit));
-    check("retryableCodes includes EMPTY_RESPONSE/SERVER/TIMEOUT/TRANSPORT",
-      codes.includes(QUOTA_CODES.emptyResponse) &&
-      codes.includes(QUOTA_CODES.server) &&
-      codes.includes(QUOTA_CODES.timeout) &&
-      codes.includes(QUOTA_CODES.transport));
-    check("retryableCodes EXCLUDES QUOTA (depleted pool is not retried)",
-      !codes.includes(QUOTA_CODES.quota), JSON.stringify(codes));
-    check("retryableCodes EXCLUDES ACCOUNT_QUOTA",
-      !codes.includes(QUOTA_CODES.accountQuota), JSON.stringify(codes));
-    check("retryableCodes has no duplicates",
-      new Set(codes).size === codes.length);
-
-    const b = cfg.backoff;
-    check("backoff.initialDelayMs is a positive finite number <= maxDelayMs",
-      Number.isFinite(b.initialDelayMs) && b.initialDelayMs > 0 && b.initialDelayMs <= b.maxDelayMs,
-      JSON.stringify(b));
-    check("backoff.initialDelayMs is gentle on the shared pool (>=1000ms)",
-      b.initialDelayMs >= 1000, String(b.initialDelayMs));
-    check("backoff.maxDelayMs caps the worst-case wait (>=10000ms)",
-      b.maxDelayMs >= 10_000, String(b.maxDelayMs));
-    check("backoff.jitterRatio is within [0, 1]",
-      b.jitterRatio >= 0 && b.jitterRatio <= 1, String(b.jitterRatio));
-  } catch (error) {
-    fail("buildRetryPolicyConfig", error);
-  }
-}
-
-// --- 2. QUOTA_CODES spellings match the peer protocol ----------------------
+// --- 1. QUOTA_CODES spellings match the peer protocol ----------------------
 {
   try {
     check("QUOTA_CODES.quota === 'QUOTA'", QUOTA_CODES.quota === "QUOTA");
@@ -84,14 +42,15 @@ const BASE_URL = "https://token.sensenova.cn/v1";
         QUOTA_CODES.rateLimit,
         QUOTA_CODES.server,
         QUOTA_CODES.timeout,
-        QUOTA_CODES.transport
+        QUOTA_CODES.transport,
+        ANTHROPIC_TRUNCATED_CODE
       ]));
   } catch (error) {
     fail("QUOTA_CODES spellings", error);
   }
 }
 
-// --- 3. exhaustedModelIds: pool -> blocked model set -----------------------
+// --- 2. exhaustedModelIds: pool -> blocked model set -----------------------
 {
   try {
     const pools = {
@@ -241,7 +200,7 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
 }
 
-// --- 4. buildDescriptors excludes quota-exhausted models -------------------
+// --- 3. buildDescriptors excludes quota-exhausted models -------------------
 {
   try {
     const entries = [
@@ -272,7 +231,7 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
 }
 
-// --- 5. rosterWithAvailability: the panel's self-identifying roster -------
+// --- 4. rosterWithAvailability: the panel's self-identifying roster -------
 {
   try {
     const entries = [
@@ -354,52 +313,10 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
 }
 
-// --- 6. optional: the peer resolves the config the way we claim -----------
-// Guarded: a clean checkout (no Host peer) must still pass; a real runtime
-// additionally proves `resolveRetryPolicy` accepts our config and excludes
-// the quota codes exactly as the snapshot-driven re-registration expects.
-//
-// `loadPeer`, not a bare `import("@deepseek-ai/dsh-llm")`: only `require` can
-// be rooted at an arbitrary `node_modules`, and this suite must reach the CLI's
-// tree on a runner that has no dev-checkout peers. The bare specifier resolved
-// on a developer machine and NOT on CI, where `npm install -g @deepseek-ai/dsh`
-// is the only runtime present — so the block read as a coverage gap and
-// `branchSkip` correctly failed the suite instead of passing it silently.
-{
-  try {
-    const mod = await loadPeer("dsh-llm").catch(() => null);
-    if (mod && typeof mod.resolveRetryPolicy === "function") {
-      const resolved = mod.resolveRetryPolicy(buildRetryPolicyConfig(), "retry.test");
-      check("peer resolveRetryPolicy accepts our config", resolved != null && resolved.mode === "normal");
-      check("peer-resolved retryableCodes excludes QUOTA",
-        !resolved.retryableCodes.includes(QUOTA_CODES.quota), JSON.stringify(resolved.retryableCodes));
-      check("peer-resolved retryableCodes includes RATE_LIMIT",
-        resolved.retryableCodes.includes(QUOTA_CODES.rateLimit));
-    } else {
-      // Same semantics as peer-contract.test.mjs: a SKIP must not push a fake
-      // pass into the totals — say it loudly and leave the check count honest.
-      strictRefused = branchSkip(
-        "retry.test.mjs",
-        "peer @deepseek-ai/dsh-llm not resolvable here; the resolveRetryPolicy integration is covered by test/e2e.mjs",
-        ["peer resolveRetryPolicy accepts our config + excludes QUOTA / includes RATE_LIMIT did NOT run (covered by test/e2e.mjs on a real runtime)"]
-      );
-    }
-  } catch (error) {
-    fail("peer resolveRetryPolicy integration", error);
-  }
-}
-
 console.log(JSON.stringify(results, null, 2));
 const failedChecks = results.filter((r) => !r.pass);
 if (failedChecks.length > 0) {
   console.error(`\n${failedChecks.length}/${results.length} check(s) FAILED`);
-  process.exit(1);
-}
-if (strictRefused) {
-  console.error(
-    `\n[skip refused] retry.test.mjs left a coverage gap that STRICT mode treats as a regression ` +
-      `(DSH_TEST_STRICT_SKIP=1 / CI). Re-run with the @deepseek-ai/dsh-llm peer resolvable.`
-  );
   process.exit(1);
 }
 console.log(`\nall ${results.length} checks passed`);

@@ -35,8 +35,10 @@ import type {
   StreamChunk,
   TokenUsage,
 } from '@deepseek-ai/dsh-llm';
-import { parseRetryAfterMs, classify429Body, classify429Full, QUOTA_RATE_RETRY_FLOOR_MS, TPM_PROBE_BACKOFF_STEPS_MS } from './rate-classify.ts';
-import { retryableCodes } from './llm-retry.ts';
+import { parseRetryAfterMs, classify429Body, classify429Full, rateKindCountsStrike, QUOTA_RATE_RETRY_FLOOR_MS, TPM_PROBE_BACKOFF_STEPS_MS } from './rate-classify.ts';
+import { shouldRotateUnclassified } from './key-health.ts';
+import { retryableCodes, ANTHROPIC_TRUNCATED_CODE } from './llm-retry.ts';
+import { MODELS_TIMEOUT_MS, CATALOG_FAILURE_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
 import { KNOWN_UNROUTABLE_MODELS } from './llm-models.ts';
 import { IMAGE_INPUT_MODALITIES, inputModalitiesFor } from './modality.ts';
@@ -48,15 +50,6 @@ import { maskKey } from './util.ts';
  * （DeepSeek 系列与 SenseNova 常见模型窗口）；目录有字段时优先采用。
  */
 const DEFAULT_CONTEXT_WINDOW = 131_072;
-const MODELS_TIMEOUT_MS = 10_000;
-/**
- * 目录缓存 TTL（毫秒）：宿主（模型选择器/策略 UI）会以秒级周期反复调用
- * listModels()（2026-10-10 Loon 实测 ~5s 一次），而模型目录变化极慢。
- * 缓存命中期间从内存应答，不发 HTTP；用户明确「一天一次够用」。
- */
-const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
-/** 目录刷新失败后的退避（毫秒）：防止故障时退化为秒级重试循环。 */
-const CATALOG_FAILURE_RETRY_MS = 60_000;
 /**
  * 提交给 provider 重试层的延迟上限（毫秒）：本地退避与非配额 429 的
  * Retry-After 均受此约束，同时作为重试策略退避单次上限。
@@ -129,11 +122,14 @@ export interface SensenovaAdapterDeps {
    * 轮换到下一个 key：401（'invalid-credential'）永久禁用被拒账号；
    * 速率/TPM 类 429（'quota-exhausted'）与积分池类 429（'pool-exhausted'，
    * dsh-sensenova-suite 扩展）不写任何账号状态，仅用于换 key。
-   * 返回 undefined 表示无更多 key。
+   * 第三参 model：本次请求的模型 id——拒绝类型不带组信息，池格的组由实现侧
+   * groupOf(model) 现算（2026-10-31 起，写读同组；此前硬编码 general 是错位源）。
+   * 返回 undefined 表示无更多 key（含全池格子标记的快速失败）。
    */
   rotateApiKey: (
     rejectedKey: string,
-    rejection: 'invalid-credential' | 'quota-exhausted' | 'pool-exhausted',
+    rejection: 'invalid-credential' | 'quota-exhausted' | 'pool-exhausted' | 'rate-unclassified' | 'rate-soft',
+    model: string | undefined,
   ) => Promise<string | undefined>;
   /**
    * 请求结局上报（dsh-sensenova-suite 扩展，可选）：2xx 时回调 'success'，
@@ -944,6 +940,8 @@ export class SensenovaAdapter extends LlmAdapter {
   private catalogFetchedAt = 0;
   /** 目录刷新失败后的下次重试时间（毫秒 epoch）；仅失败时写入。 */
   private catalogNextRetryAt = 0;
+  /** 本段失败退避期内「空缓存补发一次」是否已用掉（语义见 catalog-gate.ts）。 */
+  private catalogEmptyRetryUsed = false;
   /** 目录单飞去重：并发的 listModels 共享同一 in-flight Promise。 */
   private catalogInflight: Promise<CatalogEntry[]> | undefined;
   /**
@@ -1039,8 +1037,6 @@ export class SensenovaAdapter extends LlmAdapter {
       throw error;
     }
     const now = Date.now();
-    const credentialChanged = this.catalogCredential !== undefined && this.catalogCredential !== apiKey;
-    const apiBaseChanged = this.catalogApiBase !== undefined && this.catalogApiBase !== connection.apiBase;
     // 冷启动播种：新实例（catalogFetchedAt === 0）认领模块级种子的条件 = 同凭据、
     // 同端点。认领后 TTL 判定照常——种子过期照样实发，不会无限续命。
     if (this.catalogFetchedAt === 0 && catalogSeed !== undefined
@@ -1050,23 +1046,48 @@ export class SensenovaAdapter extends LlmAdapter {
       this.catalogApiBase = catalogSeed.apiBase;
       this.catalogFetchedAt = catalogSeed.fetchedAt;
     }
-    // 缓存命中：同 key、同 base、未过期。
-    if (
-      !credentialChanged && !apiBaseChanged
-      && this.catalogFetchedAt > 0
-      && now - this.catalogFetchedAt < CATALOG_TTL_MS
-    ) {
+    // 发/不发/发之前回什么——判定走 catalog-gate 纯模块（peer-free 单测钉），
+    // TTL、失败退避与退避期内的两条降级路（种子回落 / 空缓存每段补发一次）
+    // 一个判据源，见 catalog-gate.ts 模块头。
+    const seed = catalogSeed;
+    const gate = planCatalogFetch(
+      {
+        cachedEntries: this.catalog.length,
+        fetchedAt: this.catalogFetchedAt,
+        nextRetryAt: this.catalogNextRetryAt,
+        emptyRetryUsed: this.catalogEmptyRetryUsed,
+      },
+      {
+        now,
+        credential: apiKey,
+        apiBase: connection.apiBase,
+        cacheCredential: this.catalogCredential,
+        cacheApiBase: this.catalogApiBase,
+        seed,
+      },
+    );
+    if (gate.action === "serve-cache") return this.catalog;
+    if (gate.action === "serve-seed") {
+      // 退避期内的种子回落按冷启动认领同款语义落进实例：后续调用走缓存/TTL
+      // 判定；fetchedAt 保持种子原值，种子过期照样实发，不会无限续命。gate 只
+      // 在种子可用时返回本分支——防御性兜底：seed 缺席（不可能）时回现有缓存。
+      if (seed !== undefined) {
+        this.catalog = seed.entries;
+        this.catalogCredential = apiKey;
+        this.catalogApiBase = connection.apiBase;
+        this.catalogFetchedAt = seed.fetchedAt;
+      }
       return this.catalog;
     }
-    // 失败退避期内也直接返回现有缓存（可能为空数组=首次加载仍失败），不再实发。
-    if (this.catalogNextRetryAt > now) {
-      return this.catalog;
-    }
+    if (gate.action === "serve-empty") return this.catalog;
+    // send = 正常路径（补发额度重置，新失败段又有一次）；send-forced = 退避期
+    // 内空缓存的每段一次补发（标记置位，本段不再补）。
+    this.catalogEmptyRetryUsed = gate.action === "send-forced";
     // 单飞去重：并发调用共享同一请求。
     if (this.catalogInflight !== undefined) {
       return this.catalogInflight;
     }
-    const inflight = this.fetchCatalogUncached(connection, apiKey, credentialChanged || apiBaseChanged);
+    const inflight = this.fetchCatalogUncached(connection, apiKey, gate.invalidateFailedModels);
     this.catalogInflight = inflight;
     // 完成后无论成败都清掉 inflight；失败时设定退避时间戳。
     inflight.then(
@@ -1210,6 +1231,9 @@ export class SensenovaAdapter extends LlmAdapter {
     let body = await buildBody(wire);
     // 400 兜底只在本请求内切换一次（§5.3：标记 + 立即换 Chat 重试一次）。
     let responsesFallbackUsed = false;
+    // 未分类失败（未知 429 / 402 / 403）的兜底换 key 也只在 402/403 上单次；
+    // 未知 429 走完整轮池（见下方兜底段的注释）。
+    let unclassifiedFallbackUsed = false;
     const tried = new Set<string>();
     const limit = connection.concurrency;
     // 三段超时（design D4/D6，2026-09-04 实测）：生产用常量，测试可注入小值。
@@ -1303,7 +1327,7 @@ export class SensenovaAdapter extends LlmAdapter {
           const tpmHits = this.tpmHitCounts.get(options.sessionId);
           const trailLen = this.session429Trail.get(options.sessionId)?.length ?? 0;
           if (tpmHits !== undefined || trailLen > 0) {
-            traceLog(`[dsh-sensenova-suite] 429 恢复 sid=${options.sessionId ?? "-"} model=${options.model} key=${maskKey(apiKey)} ` +
+            traceLog(`[dsh-sensenova-suite] 429 恢复 model=${options.model} key=${maskKey(apiKey)} ` +
               (tpmHits !== undefined
                 ? "连续限流结束，探测档归零"
                 : `连续 ${trailLen} 次限流后成功`));
@@ -1362,11 +1386,11 @@ export class SensenovaAdapter extends LlmAdapter {
         // 请求；环回无新 key 则停留在当前 key 抛 RATE_LIMIT。401 轮换路径不变。
         // 并发闸已在源头抑制并发超限，此处为兜底。
         const classified = classify429Body(errText);
+        const full = classify429Full(errText);
         const quota429 = attempt.status === 429 && classified.quota;
         // suite 扩展：积分池类 429（Allocated quota exceeded 形态）同样参与
         // 粘性换 key；池类不冷却不禁用，只由池层记 (key, 组) 格子。
-        const pool429 = attempt.status === 429 && !classified.quota
-          && classify429Full(errText).kind === 'pool';
+        const pool429 = attempt.status === 429 && !classified.quota && full.kind === 'pool';
         // 429001 分级探测档位：连续命中计数决定本次退避（3/5/10/15s，封顶后保持），
         // 命中即 +1——每次宿主重试都带一个递增的探测等待，成功后清零回到最短档。
         let dynamicFloorMs: number | undefined;
@@ -1381,8 +1405,8 @@ export class SensenovaAdapter extends LlmAdapter {
         const trail429 = this.session429Trail.get(options.sessionId) ?? [];
         if (!trail429.includes(apiKey)) trail429.push(apiKey);
         this.session429Trail.set(options.sessionId, trail429);
-        traceLog(`[dsh-sensenova-suite] 429 sid=${options.sessionId ?? "-"} model=${options.model} key=${maskKey(apiKey)} ` +
-          `kind=${pool429 ? "pool" : classified.quota ? classified.kind : "rate"} ` +
+        traceLog(`[dsh-sensenova-suite] 429 model=${options.model} key=${maskKey(apiKey)} ` +
+          `kind=${pool429 ? "pool" : classified.quota ? classified.kind : "unknown"} ` +
           `退避=${dynamicFloorMs !== undefined ? `${Math.round(dynamicFloorMs / 1000)}s` : retryAfterMs !== undefined ? `${Math.round(retryAfterMs / 1000)}s(retry-after)` : "宿主默认"}`);
         // 配额类 429 且开关开启：轮换到下一把本请求未试过的 key（tried 集合做单次
         // 请求内防乒乓——每次宿主重试都会清空 tried、重新探测各 key，因此配额恢复
@@ -1396,15 +1420,20 @@ export class SensenovaAdapter extends LlmAdapter {
             apiKey,
             attempt.status === 401
               ? 'invalid-credential'
-              : pool429 ? 'pool-exhausted' : 'quota-exhausted',
+              // 软限流（code 8 与 429003 两个速率桶形态，rateKindCountsStrike=false）
+              // 轮换但不记 strike——rpm 桶 14s 级自愈，计入踢出阈值会误伤贴线限流
+              // 的健康 key（2026-10-31 他拍板，先 429003 后 code 8）。
+              : pool429 ? 'pool-exhausted' : rateKindCountsStrike(full.kind) ? 'quota-exhausted' : 'rate-soft',
+            options.model,
           );
           if (next !== undefined && !tried.has(next)) {
             // 预流轮换：先释放旧 key 额度，下一轮为新 key 重新获取。
             release();
             release = undefined;
+            const previousKey = apiKey;
             apiKey = next;
             rotations += 1;
-            traceLog(`[dsh-sensenova-suite] 429 换 key sid=${options.sessionId ?? "-"} model=${options.model} → 新 key（粘性已更新，已轮换 ${rotations}/${connection.accountCount}）`);
+            traceLog(`[dsh-sensenova-suite] 429 换 key model=${options.model} ${maskKey(previousKey)} → ${maskKey(next)}（粘性已更新，已轮换 ${rotations}/${connection.accountCount}）`);
             if (quotaRotate) {
               this.quotaStickyKeys.set(options.sessionId, next); // 粘住新 key
               this.tpmHitCounts.delete(options.sessionId); // 新 key 配额新鲜，探测档位归零
@@ -1412,15 +1441,47 @@ export class SensenovaAdapter extends LlmAdapter {
             continue;
           }
         }
+        // 兜底轮换（key-health.ts shouldRotateUnclassified）：401 / 配额 429 / 池 429
+        // 之外的失败里，只有「分类器不认识的 429」（旧实现原地重试到预算耗尽，
+        // Endpoint 族补分类前就是这种形态）与「402/403 账号态拒绝」（欠费/禁用，
+        // 不在宿主可重试清单里，不换就直接上屏）值得换 key 再试。
+        // 400/404/413/422 与 5xx/超时/传输不换：换了也不会变好。
+        // 429 走完整轮池（2026-10-31 实测：每个 429 都是某种限速，换 key 有实证支持；
+        // 单次兜底会让宿主重试在同一个 2 把里反复撞墙）。402/403 仍只兜底一次——
+        // 它们是账号态，不是瞬时负载，把整池轮一遍没有额外信息。
+        // 两者都不记 strike：形状不明时判死一把 key 太武断（key-health.ts 的边界）。
+        if (shouldRotateUnclassified(attempt.status, quota429 || pool429)
+          && options.signal?.aborted !== true
+          && rotations < connection.accountCount
+          && (attempt.status === 429 || !unclassifiedFallbackUsed)) {
+          const next = await this.deps.rotateApiKey(apiKey, 'rate-unclassified', options.model);
+          if (next !== undefined && !tried.has(next)) {
+            release();
+            release = undefined;
+            const previousKey = apiKey;
+            apiKey = next;
+            rotations += 1;
+            if (attempt.status !== 429) unclassifiedFallbackUsed = true;
+            traceLog(`[dsh-sensenova-suite] 未分类失败换 key model=${options.model} ` +
+              `status=${attempt.status} ${maskKey(previousKey)} → ${maskKey(next)}（${attempt.status === 429 ? "本请求内轮满池" : "仅兜底一次"}，已轮换 ${rotations}/${connection.accountCount}）`);
+            continue;
+          }
+        }
         if (attempt.status === 429) {
           // 文案三分（2026-10-31 他问「都试了吗，试了哪些 key 怎么不写出来」——
           // 旧「换无可换」对 rate 类是张冠李戴：rate 是设计上不换，不是没得换）：
-          // rate=设计上不轮换（换 key 同样限速）；quota/pool 想换但池里没得换；
-          // quota/pool 且轮换开关关闭=根本没尝试换。已试列表 = 跨宿主重试累计。
+          // rate=设计上不轮换；quota/pool/endpoint/account 想换但池里没得换；
+          // 且轮换开关关闭=根本没尝试换。已试列表 = 跨宿主重试累计。
+          // 「换 key 同样限速」的半句已删：2026-10-31 实测 A/C 200、B 429，
+          // 换 key 能绕开，原措辞没有实测支撑（交接文档 5 的旧结论已推翻）。
+          // 未分类 429 的兜底已在上方走过：标注本请求轮过几把，避免读起来像是
+          // 「不轮换」却其实换过。
           const label = quota429 || pool429
             ? (quotaRotation ? "429 换无可换" : "429 未轮换（quotaRotation 未开）")
-            : "429 rate 不轮换（换 key 同样限速）";
-          traceLog(`[dsh-sensenova-suite] ${label} sid=${options.sessionId ?? "-"} model=${options.model} ` +
+            : rotations > 0
+              ? `429 未识别形状，已轮换 ${rotations} 把`
+              : "429 未识别形状，无可轮换";
+          traceLog(`[dsh-sensenova-suite] ${label} model=${options.model} ` +
             `已试 ${trail429.map((key) => maskKey(key)).join("/")} 共 ${trail429.length}/${connection.accountCount} 把，交宿主重试层（预算内自动重试）`);
         }
         release();
@@ -1435,11 +1496,28 @@ export class SensenovaAdapter extends LlmAdapter {
       if (response.body === null) {
         throw new LlmError('llm-sensenova: SenseNova API returned no response body', 'PROVIDER_PROTOCOL_ERROR');
       }
-      yield* wire === 'anthropic'
-        ? parseAnthropicSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId)
-        : wire === 'responses'
-          ? parseResponsesSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId)
-          : parseOpenAiSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
+      if (wire === 'anthropic') {
+        // 流断尾（无 message_stop）命中即内存级换线降级（2026-10-31 他拍板）：
+        // 平台 anthropic 线时好时坏，与本进程已有的 400 运行时不符标记共用
+        // anthropicUnsupported 集合——本请求内容已流出、不能原地重发（会重复
+        // 输出），抛给宿主重试层；重试与后续请求经 resolveWirePlan 自动走生效链
+        // 下一跳（responses/chat）。标记不持久化，重启清除。
+        try {
+          yield* parseAnthropicSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
+        } catch (error) {
+          if (error instanceof LlmError && error.code === ANTHROPIC_TRUNCATED_CODE && !this.anthropicUnsupported.has(options.model)) {
+            this.anthropicUnsupported.add(options.model);
+            // stop=N：实证「断尾是否伴随 stop 序列」（平台命中 stop_sequence 时
+            // 少发终止事件的假设，跑一段时间即可定论）。
+            traceLog(`[dsh-sensenova-suite] anthropic 流断尾（无 message_stop）model="${options.model}" stop=${options.stop?.length ?? 0}——本进程内标记该模型 anthropic 线不支持，后续请求走生效链下一跳（重启清除）`);
+          }
+          throw error;
+        }
+      } else if (wire === 'responses') {
+        yield* parseResponsesSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
+      } else {
+        yield* parseOpenAiSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
+      }
     } finally {
       for (const cleanup of connectCleanups) cleanup();
       release?.();

@@ -2,15 +2,18 @@
  * The directly-registered SenseNova provider's 429 retry policy — the peer-FREE
  * half of the 429 self-healing work.
  *
- * The *decision* (which failure classes this shared-pool provider retries, and
- * how gently) is pure, so it lives here — importable on a clean checkout where
- * the `@deepseek-ai/dsh-llm` peer is not resolvable — and is handed to the peer's
- * `resolveRetryPolicy` from `llm-adapter.ts`. `test/retry.test.mjs` pins its
- * shape without importing that peer.
+ * The *decision* (which failure classes this shared-pool provider retries) is
+ * pure, so it lives here — importable on a clean checkout where the
+ * `@deepseek-ai/dsh-llm` peer is not resolvable. `retryableCodes` is handed to
+ * the peer's `resolveRetryPolicy` from `adapter.ts` (`providerRetryPolicy`,
+ * which assembles the policy inline there — maxRetries/backoff live at that
+ * call site, not here). `test/retry.test.mjs` and `test/contract.test.mjs` pin
+ * the code list without importing that peer.
  *
  * The peer classifies a SenseNova 429 into two codes (`isQuotaExceededError` →
- * `rate.?limit` inside `classifyPiAiError`, pinned against the real source by
- * `test/peer-contract.test.mjs`):
+ * `rate.?limit` inside `classifyPiAiError`; the resolved policy is pinned by
+ * the optional peer block at the end of `test/retry.test.mjs`, a SKIP when the
+ * peer is absent):
  *
  *   - `QUOTA` / `ACCOUNT_QUOTA` — the Token Plan pool is depleted. Retrying
  *     cannot refill it, and the pool is SHARED across every model on this key,
@@ -57,11 +60,23 @@ export const QUOTA_CODES = Object.freeze({
 });
 
 /**
+ * Anthropic 线流断尾专用码（2026-10-31）：平台 anthropic 线时好时坏，流在
+ * message_stop 之前中断。自造码而不借用 TRANSPORT，是为了让「这个形态可重试」
+ * 成为重试策略里的显式决策（而不是搭 TRANSPORT 的便车）——peer 的
+ * `resolveRetryPolicy` 对 retryableCodes 只验非空字符串、不锁枚举（真机 asar
+ * 实证），重试判定即 `retryableCodes.includes(failure.code)`。适配器还按它做
+ * 内存级换线降级（adapter.ts 命中即 anthropicUnsupported.add）。
+ */
+export const ANTHROPIC_TRUNCATED_CODE = "ANTHROPIC_TRUNCATED";
+
+/**
  * The failure classes this provider retries, in peer-canonical order.
  *
  * Excludes both quota codes on purpose: a depleted pool cannot be retried into
  * health, and retrying it against a shared credit pool only prolongs the
  * cool-down. `RATE_LIMIT` stays — transient throttles self-clear.
+ * `ANTHROPIC_TRUNCATED_CODE` is the one non-peer code: ours, retried on purpose
+ * (see its docstring) — the peer validates only non-empty unique strings.
  * @returns {string[]} the retryable code list (no duplicates, non-empty).
  */
 export function retryableCodes() {
@@ -70,37 +85,7 @@ export function retryableCodes() {
     QUOTA_CODES.rateLimit,
     QUOTA_CODES.server,
     QUOTA_CODES.timeout,
-    QUOTA_CODES.transport
+    QUOTA_CODES.transport,
+    ANTHROPIC_TRUNCATED_CODE
   ];
-}
-
-/**
- * Build the provider's retry-policy config.
- *
- * The shape is exactly what `@deepseek-ai/dsh-llm`'s `resolveRetryPolicy`
- * accepts (`mode: "normal"` → `{ mode, maxRetries, retryableCodes, backoff }`).
- * We pin it explicitly rather than passing `undefined` so a future change to
- * the peer's default policy cannot silently alter this provider's behaviour.
- *
- * Tuned for SenseNova's daytime rate ceiling (rpm/tpm), which the peer mislabels
- * as `QUOTA`——pi-ai 流出口的改写层把它们拉回 `RATE_LIMIT`（随 pi-ai 组装退役），协议层 side
- * reach this policy. The numbers: more attempts (8) and a gentler, longer
- * backoff than the peer default (initial 1.5s → cap 20s, jitter 0.25) so a
- * single shared credit pool is not stampeded while the rate window refills.
- * Still bounded: a genuine outage fails after ~90s of backed-off retries rather
- * than spinning forever. QUOTA stays excluded (a depleted pool cannot be retried
- * into health; retrying it only prolongs the cool-down — ROADMAP §1).
- * @returns {{mode: "normal", maxRetries: number, retryableCodes: string[], backoff: {initialDelayMs: number, maxDelayMs: number, jitterRatio: number}}}
- */
-export function buildRetryPolicyConfig() {
-  return {
-    mode: "normal",
-    maxRetries: 8,
-    retryableCodes: retryableCodes(),
-    backoff: {
-      initialDelayMs: 1_500,
-      maxDelayMs: 20_000,
-      jitterRatio: 0.25
-    }
-  };
 }

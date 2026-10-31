@@ -197,8 +197,9 @@ const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
               : null),
             // 分隔线：档位行与协议行之间。
             h("div", { style: { borderTop: "1px solid var(--dsw-alias-border-l1)", margin: "2px 0" } }),
-            // 协议降级链并入面板：一行 label + 三个槽位 select（an>re>chat；
-            // 不重复、选一个少一个、槽1 必填、槽2 空则槽3 禁用），与档位同属「保存才生效」。
+            // 协议降级链并入面板：一行 label + 三个槽位 select（统一链 re>an>chat；
+            // 不重复、选一个少一个、槽1 必填、前一槽为空或为 chat 则后槽禁用），
+            // 与档位同属「保存才生效」。
             onChainSlotChange !== undefined
               ? h("label", {
                   style: { display: "flex", gap: 8, alignItems: "center", fontSize: 12, cursor: busy ? "default" : "pointer" },
@@ -209,8 +210,11 @@ const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
                   const chain = Array.isArray(stored) ? stored : [];
                   // 禁用判据 =「前一槽为空」（slot 1 只依赖恒有值的槽 0，永不锁）；
                   // 旧写法 chain.length <= slot 把刚置空的槽自己也锁死——置空后
-                  // 再也填不回去（2026-10-31 他报）。
-                  const disabled = busy === true || (slot >= 1 && chain.length < slot);
+                  // 再也填不回去（2026-10-31 他报）。前缀含 chat → 其后槽位是死位
+                  // （chat 无降级条件），同样禁用——实时收窄，与选空同款表现。
+                  const disabled = busy === true
+                    || (slot >= 1 && chain.length < slot)
+                    || (slot >= 1 && chain.slice(0, slot).includes("chat-completions"));
                   // 槽间箭头（2026-10-31 他令「提升观感」）：链序视觉化。
                   const arrow = slot > 0 ? [h("span", {
                     key: `chain-arrow-${slot}`,
@@ -244,6 +248,25 @@ const CHAIN_WIRES = ["anthropic", "responses", "chat-completions"] as const;
 export function chainSlotWires(chain: readonly string[], slot: number): (typeof CHAIN_WIRES)[number][] {
   const chosen = chain.slice(0, slot);
   return CHAIN_WIRES.filter((wire) => !chosen.includes(wire));
+}
+
+/**
+ * 三槽链草稿的单槽编辑（纯函数，ModelPicker 的 onChange 与 render 套件共用）。
+ *
+ * 改槽 = 前缀 + 新值，后槽保留未被占用的旧线（换槽 1 不无谓清空槽 2/3）；置空 =
+ * 从该槽截短。chat 例外（2026-10-31 他拍板「实时收窄，与选空同款表现」）：chat 无
+ * 降级条件、其后槽位是死位——选中即截短（后槽旧线不保留），保存侧
+ * normalizeChainValue 同规则兜底。
+ */
+export function applyChainSlotEdit(base: readonly string[], slot: number, value: string): string[] {
+  const head = base.slice(0, slot);
+  if (value !== "" && !head.includes(value)) head.push(value);
+  if (value !== "" && value !== "chat-completions") {
+    for (const wire of base.slice(slot + 1)) {
+      if (!head.includes(wire)) head.push(wire);
+    }
+  }
+  return head;
 }
 
 /**
@@ -543,23 +566,13 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
                 onThinkingOpen: (id: string | null) => setOpenThinkingId(id),
                 modelProtocols: effectiveProtocols,
                 onChainSlotChange: (id: string, slot: number, value: string) => {
-                  // 三槽链草稿（保存时与其它草稿一起落库）。改槽 = 前缀 + 新值，
-                  // 后槽保留未被占用的旧线（换槽1 不无谓清空槽2/3）；置空 = 从该槽
-                  // 截短。槽1 无空选项（链必非空），防御性忽略。
+                  // 三槽链草稿（保存时与其它草稿一起落库）。单槽编辑语义抽在
+                  // applyChainSlotEdit（纯函数，render 套件同源钉）；槽 1 无空选项
+                  // （链必非空），防御性忽略。
                   setDraftProtocols((current) => {
                     if (value === "" && slot === 0) return current;
                     const base = [...({ ...hostProtocols, ...current })[id] ?? []];
-                    const next: string[] = value === ""
-                      ? base.slice(0, slot)
-                      : (() => {
-                        const head = base.slice(0, slot);
-                        if (!head.includes(value)) head.push(value);
-                        for (const wire of base.slice(slot + 1)) {
-                          if (!head.includes(wire)) head.push(wire);
-                        }
-                        return head;
-                      })();
-                    return { ...current, [id]: next };
+                    return { ...current, [id]: applyChainSlotEdit(base, slot, value) };
                   });
                   setNotice(null);
                 },

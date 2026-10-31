@@ -2052,7 +2052,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				].flatMap((slot) => {
 					const stored = modelProtocols?.[id];
 					const chain = Array.isArray(stored) ? stored : [];
-					const disabled = busy === true || slot >= 1 && chain.length < slot;
+					const disabled = busy === true || slot >= 1 && chain.length < slot || slot >= 1 && chain.slice(0, slot).includes("chat-completions");
 					const arrow = slot > 0 ? [h("span", {
 						key: `chain-arrow-${slot}`,
 						style: {
@@ -2090,6 +2090,22 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	function chainSlotWires(chain, slot) {
 		const chosen = chain.slice(0, slot);
 		return CHAIN_WIRES.filter((wire) => !chosen.includes(wire));
+	}
+	/**
+	* 三槽链草稿的单槽编辑（纯函数，ModelPicker 的 onChange 与 render 套件共用）。
+	*
+	* 改槽 = 前缀 + 新值，后槽保留未被占用的旧线（换槽 1 不无谓清空槽 2/3）；置空 =
+	* 从该槽截短。chat 例外（2026-10-31 他拍板「实时收窄，与选空同款表现」）：chat 无
+	* 降级条件、其后槽位是死位——选中即截短（后槽旧线不保留），保存侧
+	* normalizeChainValue 同规则兜底。
+	*/
+	function applyChainSlotEdit(base, slot, value) {
+		const head = base.slice(0, slot);
+		if (value !== "" && !head.includes(value)) head.push(value);
+		if (value !== "" && value !== "chat-completions") {
+			for (const wire of base.slice(slot + 1)) if (!head.includes(wire)) head.push(wire);
+		}
+		return head;
 	}
 	/**
 	* The curated model allow-list: which of this key's models get pushed to
@@ -2324,15 +2340,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 						...hostProtocols,
 						...current
 					}[id] ?? []];
-					const next = value === "" ? base.slice(0, slot) : (() => {
-						const head = base.slice(0, slot);
-						if (!head.includes(value)) head.push(value);
-						for (const wire of base.slice(slot + 1)) if (!head.includes(wire)) head.push(wire);
-						return head;
-					})();
 					return {
 						...current,
-						[id]: next
+						[id]: applyChainSlotEdit(base, slot, value)
 					};
 				});
 				setNotice(null);
@@ -4265,7 +4275,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-10-31T08:18";
+		const CLIENT_BUILD = "2026-10-31T16:53";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			try {

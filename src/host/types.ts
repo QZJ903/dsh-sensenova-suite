@@ -171,6 +171,8 @@ export interface Wiring {
   poolAdmin?: import("./routes/pool.ts").PoolAdmin;
   /** 池状态刷新（models 路由保存协议后调用；测试可省略）。 */
   poolRefresh?: () => Promise<void>;
+  /** 额度驱动的池格写点（发布链每次额度轮询成功时回调 → orchestrator.reportQuotaPools；key 归属判定在本字段实现内，测试可省略）。 */
+  onQuotaPools?: (pools: { pools?: unknown }) => void;
   /** `ctx.logger` (Host logging); optional so tests may omit it. */
   logger?: { warn?: (message: string, ...args: unknown[]) => void };
   /** The background provider refresher's handle (review #1b). A SLOT in the

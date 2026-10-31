@@ -183,6 +183,21 @@ try {
     admin.refreshKeysCalls > refreshBeforeDelete,
     `${refreshBeforeDelete} -> ${admin.refreshKeysCalls}`);
 
+  // 9.5 restore：名单摘除 + refreshKeys 触发（2026-10-31 真机回归——上次种池时
+  // 该 id 还在停用名单里被排除的话 idToKey 不认识它，restoreById 静默 no-op，
+  // 面板永远「未入池」；与 delete 同一条重解析纪律）。
+  await post({ action: "disable", id: "key-2" });
+  const refreshBeforeRestore = admin.refreshKeysCalls;
+  const restored = await post({ action: "restore", id: "key-2" });
+  const afterRestore = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
+  check("restore 返回 ok 且名单摘除",
+    restored.status === 200 && restored.body?.ok === true
+      && !afterRestore.disabledIds.includes("key-2"),
+    `${restored.status} ${JSON.stringify(afterRestore.disabledIds)}`);
+  check("restore 后触发 refreshKeys",
+    admin.refreshKeysCalls > refreshBeforeRestore,
+    `${refreshBeforeRestore} -> ${admin.refreshKeysCalls}`);
+
   // 10. delete default：forget 面板凭据 + refreshKeys（面板 key 不在 keys 清单）。
   panelValue = "sk-panelpkey";
   const removedDefault = await post({ action: "delete", id: "default" });

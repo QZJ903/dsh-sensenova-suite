@@ -8,9 +8,12 @@ import type { FactsCatalogEntry, ModelFacts, WireKind } from './types.ts';
  * （交平台 API 自行裁决）。已知分支缺省与未知分支开图共用同一份（duplication 门）。 */
 const GENERIC_IMAGE_FORMATS = ['jpeg', 'png', 'webp', 'gif'];
 
-/** 常规模型默认降级链（2026-10-30 用户拍板：所有模型默认 an>re>chat，kimi/glm
- * 例外见各自条目）。策略层——链走查仍与 supportedWires 求交，能力外的线被跳过。 */
-const STANDARD_CHAIN: readonly WireKind[] = ['anthropic', 'responses', 'chat-completions'];
+/** 全模型统一默认降级链（2026-10-31 用户拍板，两步：先加回 kimi/glm 的
+ * anthropic 撤销分岔，再把顺序定为 re→an→chat——responses 线没出现过空流/断尾
+ * 形态，anthropic 的时好时坏由运行时降级兜底：ANTHROPIC_TRUNCATED / 400 命中即
+ * 内存级标记换线，重启清除）。策略层——链走查仍与 supportedWires 求交，能力外
+ * 的线被跳过。 */
+const STANDARD_CHAIN: readonly WireKind[] = ['responses', 'anthropic', 'chat-completions'];
 
 /** 未收录模型 id 的通用兜底档案（不抛错；Chat 行为与迁移前「未知模型」路径一致）。 */
 const GENERIC_FACTS: ModelFacts = {
@@ -124,9 +127,10 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['glm-5.2', {
     id: 'glm-5.2',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
-    // 2026-10-30 真机实测：glm 走 anthropic 线偶发 200 空流（ds 系无此现象），
-    // 默认链排除 anthropic。能力面不动——平台修复后面板可手动加回。
-    defaultChain: ['responses', 'chat-completions'],
+    // 2026-10-30 曾因偶发 200 空流静态排除 anthropic；2026-10-31 加回（他拍板）：
+    // 空流/断尾由运行时降级兜底（ANTHROPIC_TRUNCATED/400 → 内存级标记换线），
+    // 档案层不再分岔。
+    defaultChain: STANDARD_CHAIN,
     efforts: ['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none'],
     defaultEffort: 'max',
     responsesDefaultEffort: 'max',
@@ -150,10 +154,9 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['kimi-k3', {
     id: 'kimi-k3',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
-    // 2026-10-30 真机实测：kimi 走 anthropic 线 200 空流连续 4 次（0B、无
-    // message_start，ds 系无此现象），用户定案「kimi 完全不支持 an 线」——
-    // 默认链排除 anthropic。能力面不动——平台修复后面板可手动加回。
-    defaultChain: ['responses', 'chat-completions'],
+    // 2026-10-30 曾因 200 空流连续 4 次静态排除 anthropic（定案「不支持 an 线」）；
+    // 2026-10-31 加回（他拍板）：与 glm 同理，运行时降级兜底，档案层不再分岔。
+    defaultChain: STANDARD_CHAIN,
     // none 入表依据：官方文档思考强度梯子明确列 `none`＝关闭推理；2026-09-29
     // 全模型探测口径 thinkingLevelMap off→none 同证（其余模型 efforts 均含 none）。
     efforts: ['low', 'medium', 'high', 'max', 'none'],

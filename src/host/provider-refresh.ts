@@ -67,7 +67,7 @@ export interface ProviderRefresher {
  *   re-checked, a non-positive value is a no-op, not a bug report).
  * @returns {ProviderRefresher|null} the handle, or null when nothing armed.
  */
-export function armProviderRefresher(wiring: Pick<Wiring, "settings" | "cache" | "inflight" | "tokenStore" | "apiKeyStore" | "catalogStore" | "providerStore" | "publisher" | "logger" | "providerRefresh">, minutes: number): ProviderRefresher | null {
+export function armProviderRefresher(wiring: Pick<Wiring, "settings" | "cache" | "inflight" | "tokenStore" | "apiKeyStore" | "catalogStore" | "providerStore" | "publisher" | "logger" | "providerRefresh" | "onQuotaPools">, minutes: number): ProviderRefresher | null {
   if (!Number.isFinite(minutes) || minutes <= 0) return null;
   const { settings, cache, inflight, tokenStore, apiKeyStore, publisher, catalogStore, providerStore } = wiring;
   const everyMs = Math.min(24 * 60, Math.max(1, Math.floor(minutes))) * 60_000;
@@ -107,7 +107,9 @@ export function armProviderRefresher(wiring: Pick<Wiring, "settings" | "cache" |
         panelSwitch: () => providerStore.enabled().catch(() => null),
         // The background tick discards the body but must not discard the one
         // signal the body cannot carry to a reader — see `onShapeDrift`.
-        onShapeDrift: (message: string) => degrade(message, null, wiring.logger, null)
+        onShapeDrift: (message: string) => degrade(message, null, wiring.logger, null),
+        // exactOptionalPropertyTypes：可选回调缺省用条件展开，不显式传 undefined。
+        ...(wiring.onQuotaPools !== undefined ? { onQuotaPools: wiring.onQuotaPools } : {})
       });
     } catch (error) {
       // A throwing tick is REPORTED, and the clock survives: a transient

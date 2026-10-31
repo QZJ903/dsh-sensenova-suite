@@ -13,11 +13,11 @@ export interface ModelFacts {
   /** 本模型可用的 wire 协议（目录不含该信息，纯静态）。 */
   supportedWires: readonly WireKind[];
   /**
-   * 本模型的默认降级链（协议策略层，2026-10-30 用户拍板）：面板覆盖缺席时
-   * 的生效链。常规模型 an>re>chat；kimi/glm 真机实测 anthropic 线空流/偶发
-   * 空流，默认链排除 anthropic（re>chat）。能力面（supportedWires）不受
-   * 影响——平台修复后用户可在面板把 anthropic 加回链里。链走查仍与
-   * supportedWires 求交：链上声明了能力不存在的线会被跳过。
+   * 本模型的默认降级链（协议策略层）：面板覆盖缺席时的生效链。全模型统一
+   * re>an>chat（2026-10-31 用户拍板：kimi/glm 的 anthropic 加回、顺序定为
+   * responses 优先；anthropic 线的空流/断尾由运行时降级兜底，不再档案层预防）。
+   * 能力面（supportedWires）不受影响。链走查仍与 supportedWires 求交：链上
+   * 声明了能力不存在的线会被跳过。
    */
   defaultChain: readonly WireKind[];
   /** 推理档位 wire 原值（按文档参数表权威列）；空数组 = 未知/不支持声明。 */
