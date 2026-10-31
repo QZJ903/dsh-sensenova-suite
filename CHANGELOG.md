@@ -1,5 +1,31 @@
 # 更新日志（Changelog）
 
+## 0.1.39（2026-10-31）
+
+- **U7 修复轮（状态落盘原语，两批处置）**：
+  - **诊断日志打开路径自愈（P2）**：openTraceFile 首写 BOM 无目录守卫——全新安装/新
+    profile 首挂/清过 state 目录时 ENOENT 从 apply() 打出、整插件挂载失败且自锁
+    （store 写点全在挂载之后，目录永远没人建）。现先建目录（0700）；目录建不出来/
+    首写失败退化为 no-op sink（纯 console），挂载绝不被诊断文件打穿。
+  - **EPERM 搁浅 temp 收扫**：Windows 上 rename 撞 EPERM/EBUSY 保留 temp 报成功，
+    旧注释声称「下次写回收」但全仓无任何清扫（真机实证：10-27 一份 1076B 的
+    pool.json temp 搁浅四天仍在）。现每次写前收扫**本进程**同名过龄 temp（60s
+    窗口保住在飞写、pid 即所有权证明；他进程与跨生命期残留不动）。
+  - **profile 分段判据与宿主对齐**：旧 ASCII 白名单把宿主完全合法的 CJK 等非
+    ASCII profile 名静默打回共享目录（两个 profile 互踩——宿主 resolveProfileDir
+    只拒空、`/`、`\`、`.`、`..`、`node_modules`，asar 实证）。改宿主同款黑名单 +
+    多挡一层控制字符；doctor 的目录扫描随之覆盖 CJK profile。
+  - **pool-store 拒绝表面化 + 变更串行化**：ADR-006 拒绝（盘上是更新构建写的
+    pool.json）从静默 no-op（面板显示已保存、缓存 TTL 过期回跳旧值）改为抛拒因
+    走路由 ok:false（provider-store 同款；全部写点核实都在路由面）。八个变更方法
+    入 promise 队列，并发变更不再互相整份冲掉（面板多 tab、动作与分区保存并发）。
+  - **PITFALLS §23 去硬计数**：「全部 6 个带版本 store」改为不按个数引用（pool 与
+    token-store/accounts 其后并入同一原语，计数已漂移）。
+  - **测试**：新增 peer-free 套件 state-store.test.mjs（11 钉：分段黑名单/原子写
+    往返/temp 收扫）；pool.test 3 组新钉（未知版本抛因+磁盘不覆盖、三并发变更全
+    落盘——修复前必红、拒绝不毒化队列）；trace-log 新钉目录缺失先建/建不出退化
+    no-op；provider 8c 与 state-segmentation 源码钉随黑名单同步。
+
 ## 0.1.38（2026-10-31）
 
 - **U1 审计修复轮（共享契约与基础件）**：

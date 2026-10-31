@@ -862,16 +862,23 @@ const BASE_URL = "https://token.sensenova.cn/v1";
 
 // --- 8c. exactly which names may become a path segment (PITFALLS §23) ------
 // `profileContext.name` is FOREIGN input that ends up as a directory name, so
-// it is validated rather than trusted. Rejecting costs nothing here — the
-// caller falls back to the shared directory, i.e. today's layout — so the rule
-// can afford to be strict.
+// it is validated rather than trusted. The blacklist matches the Host's own
+// validation (dsh-app-boot resolveProfileDir) — every traversal shape a single
+// segment can carry is banned, and control characters beyond that (no
+// legitimate name carries them). Host-legal names the validator used to ban
+// (CJK, spaces, drive-colon) MUST segment: banning them silently dropped those
+// profiles back into the shared directory, i.e. exactly the §23 crosstalk the
+// partition exists to prevent (2026-10-31 audit, U7-S1).
 {
   const accepted = [
     ["web", "web"],
     ["desktop", "desktop"],
     ["  web  ", "web"],
     ["a_b-c.1", "a_b-c.1"],
-    ["9", "9"]
+    ["9", "9"],
+    ["我的配置", "我的配置"],
+    ["a b", "a b"],
+    ["c:", "c:"]
   ];
   for (const [input, expected] of accepted) {
     const got = profileSegment({ get: () => ({ name: input }) });
@@ -881,7 +888,7 @@ const BASE_URL = "https://token.sensenova.cn/v1";
 
   const rejected = [
     "..", ".", "../etc", "..\\windows", "a/b", "a\\b", "", "   ",
-    "x".repeat(65), "/absolute", "c:", "a b", "a\u0000b"
+    "x".repeat(65), "/absolute", "a\u0000b"
   ];
   for (const input of rejected) {
     const got = profileSegment({ get: () => ({ name: input }) });

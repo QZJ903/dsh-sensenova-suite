@@ -27,7 +27,7 @@
  *
  * @module dsh-sensenova-suite/state-store
  */
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname, basename } from "node:path";
@@ -55,27 +55,37 @@ export function stateDir(name: string) {
  * 单个 profile 名的形态约束。它会直接成为磁盘路径的一段，所以这里按
  * **外部输入**处理，而不是信任 Host 给的值。
  *
- * 规则与它的用途一一对应：
- *   - 字符集限制（`[A-Za-z0-9._-]`）——排除路径分隔符与任何 traversal 形状；
- *   - 不以点开头——顺带排掉 `.` 与 `..` 这两个唯一能让单段路径逃逸的名字；
- *   - 长度上限——防超长目录名（Windows 路径上限、以及某些文件系统的 NAME_MAX）。
+ * 黑名单与宿主对 profile 名的全部校验逐条对齐（`dsh-app-boot` 的
+ * `resolveProfileDir`：拒空串、含 `/` 或 `\`、`.`、`..`、`node_modules`）。
+ * 单段路径要逃逸只有这些形状，宿主已经全挡——插件若再按字符集白名单（如
+ * ASCII）拒一遍，只会把宿主眼里的合法 profile **静默降级回共享目录**，两个
+ * profile 重新互踩（PITFALLS §23 要防的形态；2026-10-31 审计从宿主 asar 坐实：
+ * CJK 等非 ASCII 名宿主完全放行，Windows/Node 路径本就支持）。
  *
- * 为什么不用白名单枚举已知 profile 名：集合是开放的（用户可以任意新建
- * profile，本插件不该认识它们），白名单会把新 profile 错判成"拿不到名字"。
+ * 控制字符是插件比宿主多挡的一层：合法名字不会含它们（宿主自己的路径 API 撞
+ * NUL 直接抛），多挡没有代价；空格、冒号等宿主合法的形状则必须放行——分段
+ * 判据跟宿主的「合法名」语义对齐正是本函数的目的。
+ *
+ * 长度上限保留：防超长目录名（Windows 路径上限、以及某些文件系统的 NAME_MAX）。
+ * 不枚举已知 profile 名：集合是开放的（用户可以任意新建 profile），白名单会把
+ * 新 profile 错判成"拿不到名字"。
  */
 const PROFILE_SEGMENT_MAX = 64;
-const PROFILE_SEGMENT_RE = /^(?!\.)[A-Za-z0-9._-]+$/;
+const PROFILE_SEGMENT_CONTROL_RE = /[\u0000-\u001f\u007f]/;
 
 /**
  * Is this string safe to use as ONE path segment?
  * @param {unknown} value - candidate profile name.
- * @returns {boolean} true when it survives {@link PROFILE_SEGMENT_RE}.
+ * @returns {boolean} true when it matches the Host-aligned blacklist.
  */
 export function isProfileSegment(value: unknown) {
   if (typeof value !== "string") return false;
   const name = value.trim();
   if (name === "" || name.length > PROFILE_SEGMENT_MAX) return false;
-  return PROFILE_SEGMENT_RE.test(name);
+  if (name.includes("/") || name.includes("\\")) return false;
+  if (name === "." || name === ".." || name === "node_modules") return false;
+  if (PROFILE_SEGMENT_CONTROL_RE.test(name)) return false;
+  return true;
 }
 
 /**
@@ -211,6 +221,45 @@ export function temporaryOf(dir: string, base: string, now = Date.now) {
 }
 
 /**
+ * 本进程搁浅 temp 的收扫门槛。一笔状态写的 writeFile→rename 全程毫秒级，同
+ * 进程同一 base 的并发写也只悬置几毫秒——越过这个年龄还在的同 pid temp 只能
+ * 是 EPERM/EBUSY 路径搁浅的残留，收扫不会误杀在飞的写（真机实证：2026-10-27
+ * 搁浅的 pool.json temp 无人回收，见审计台账 U7-D2）。
+ */
+const TEMP_RECLAIM_MIN_AGE_MS = 60_000;
+
+/**
+ * 收扫本进程为同一个 base 搁浅的陈旧 temp（`writeStateFile` 每次写前调用，
+ * best effort——任何失败都吞掉，收扫永远不能打断它前面的那次写）。
+ *
+ * temp 名里的 pid 是所有权证明：只碰 `${base}.${本进程pid}.` 开头的；他进程
+ * 的 temp 不归本进程动（它的写者可能正在飞行），本进程刚搁浅的新鲜 temp 由
+ * 年龄窗口保护（它可能还没走到 rename，删了等于弄丢一笔在飞写）。跨进程
+ * 生命期的残留（pid 已换）留着等 pid 复用或人工清理。
+ */
+async function reclaimOwnStaleTemporaries(dir: string, base: string): Promise<void> {
+  const prefix = `${base}.${process.pid}.`;
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return; // 目录尚不存在或读不到：没有可收扫的。
+  }
+  await Promise.all(
+    names
+      .filter((n) => n.startsWith(prefix) && n.endsWith(".tmp"))
+      .map(async (name) => {
+        try {
+          const st = await stat(join(dir, name));
+          if (Date.now() - st.mtimeMs > TEMP_RECLAIM_MIN_AGE_MS) await unlink(join(dir, name));
+        } catch {
+          // 已被并发的下一次写收扫掉 / 暂时 stat 不到——留下一次写再试。
+        }
+      }),
+  );
+}
+
+/**
  * Write one state file atomically: a 0600 temporary file, then a rename.
  *
  * The payload string is written with a trailing newline, exactly as every
@@ -232,9 +281,14 @@ export function temporaryOf(dir: string, base: string, now = Date.now) {
  * fresh temp anyway. A name-based copy-on-write like this has no persistence
  * guarantee against a file that never becomes writable, but a busy target is
  * transient by nature: every later write retries the rename, so the newest
- * value wins as soon as the holder lets go. The stale temp is reclaimed by the
- * next successful write of the same base (its random suffix is this process's
- * own; a sibling's half-written temp is nobody's to unlink).
+ * value wins as soon as the holder lets go. The stranded temp is NOT reused or
+ * read again by anyone — every write sweeps this process's own stale temps for
+ * the same base first ({@link reclaimOwnStaleTemporaries}): the pid in the
+ * name is the ownership proof (a sibling's temp is nobody's to unlink — its
+ * writer may legitimately be mid-write), and the age window keeps an in-flight
+ * write of this very process out of the sweep. Strays from previous process
+ * lives (a different pid) are left in place; the sweep never breaks the write
+ * it precedes.
  *
  * Any OTHER error (ENOENT on the directory, a read-only Home rejecting the
  * write itself) is not a busy-destination case: unlink the temp (best effort,
@@ -245,6 +299,7 @@ export function temporaryOf(dir: string, base: string, now = Date.now) {
  * @returns {Promise<void>}
  */
 export async function writeStateFile(file: string, payload: string, { temporary }: { temporary: string }) {
+  await reclaimOwnStaleTemporaries(dirname(file), basename(file));
   try {
     await writeFile(temporary, `${payload}\n`, { encoding: "utf8", mode: 0o600 });
   } catch (error) {

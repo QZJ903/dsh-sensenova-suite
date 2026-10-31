@@ -351,6 +351,76 @@ try {
     JSON.stringify(explicit?.thinking));
 } catch (e) { fail("thinking-defaults", e); }
 
+// ── N. pool-store 文件面：ADR-006 拒绝表面化 + 读-改-写串行化（2026-10-31 处置轮）──
+try {
+  const { createFilePoolStore } = await import("../src/host/pool-store.ts");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const homes = [];
+  const withHome = (work) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "suite-poolstore-"));
+    homes.push(home);
+    const prev = process.env.DSH_HOME;
+    process.env.DSH_HOME = home;
+    return Promise.resolve()
+      .then(work)
+      .finally(() => {
+        if (prev === undefined) delete process.env.DSH_HOME;
+        else process.env.DSH_HOME = prev;
+      });
+  };
+  // pool-store 的路径在创建时定型（profileStateDir(name, null)），env 必须先设。
+  const poolFileOf = (home) => path.join(home, "state", "dsh-sensenova-suite", "pool.json");
+  const logger = { warn: () => {} };
+
+  // 1) ADR-006 拒绝表面化：盘上是「更新构建」写的 pool.json（本构建只认 v1），
+  //    任何变更必须抛拒因、磁盘不被覆盖、缓存不 remember 未落盘的值。
+  await withHome(async () => {
+    const home = homes[homes.length - 1];
+    fs.mkdirSync(path.dirname(poolFileOf(home)), { recursive: true });
+    fs.writeFileSync(poolFileOf(home), JSON.stringify({ version: 2, disabledIds: ["x"] }), "utf8");
+    const store = createFilePoolStore({ logger });
+    let refused = "";
+    try { await store.setGlobalConcurrency(4); } catch (e) { refused = e instanceof Error ? e.message : String(e); }
+    check("盘上未知版本的 pool.json：变更抛 ADR-006 拒因（不再静默 no-op）",
+      refused.includes("refusing to overwrite") && refused.includes("pool.json"), refused);
+    check("拒绝后磁盘仍是外来版本（未被本构建覆盖）",
+      JSON.parse(fs.readFileSync(poolFileOf(home), "utf8")).version === 2);
+  });
+
+  // 2) 读-改-写串行化：并发的三个变更各自拿到同一份底稿时后写者会整份冲掉
+  //    先写者——排队后三笔都必须落盘（修复前此钉必红）。
+  await withHome(async () => {
+    const store = createFilePoolStore({ logger });
+    await Promise.all([
+      store.setGlobalConcurrency(4),
+      store.setDefaultNote("备注"),
+      store.disable("key-1")
+    ]);
+    const record = await store.read();
+    check("并发变更不丢更新（读-改-写串行化）",
+      record.globalConcurrency === 4 && record.defaultNote === "备注" && record.disabledIds.includes("key-1"),
+      JSON.stringify(record));
+  });
+
+  // 3) 队列隔离失败：一次拒绝不毒化后续变更。
+  await withHome(async () => {
+    const home = homes[homes.length - 1];
+    fs.mkdirSync(path.dirname(poolFileOf(home)), { recursive: true });
+    fs.writeFileSync(poolFileOf(home), JSON.stringify({ version: 2, disabledIds: [] }), "utf8");
+    const store = createFilePoolStore({ logger });
+    await store.setGlobalConcurrency(4).catch(() => {});
+    // 外来构建退场：换回本构建可认的载荷，下一个变更必须照常落盘。
+    fs.writeFileSync(poolFileOf(home), JSON.stringify({ version: 1, disabledIds: [], deletedIds: [], globalConcurrency: null, keys: [] }), "utf8");
+    await store.setDefaultNote("拒绝之后仍要落盘");
+    const onDisk = JSON.parse(fs.readFileSync(poolFileOf(home), "utf8"));
+    check("拒绝不毒化队列：后一个变更照常落盘（且被拒的全局并发数没有被 remember）",
+      onDisk.defaultNote === "拒绝之后仍要落盘" && onDisk.globalConcurrency === null,
+      JSON.stringify(onDisk));
+  });
+} catch (e) { fail("pool-store-file-surface", e); }
+
 let failed = 0;
 for (const r of results) if (!r.pass) failed += 1;
 console.log(JSON.stringify(results, null, 2));

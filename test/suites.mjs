@@ -95,6 +95,7 @@ export const SUITES = Object.freeze([
   { name: "wire-chain.test.mjs", kind: "suite", note: "per-model protocol chain: pool-store parse + plan walk (peer-gated)" },
   { name: "doctor.test.mjs", kind: "suite", note: "doctor symptom codes" },
   { name: "state-segmentation.test.mjs", kind: "suite", note: "per-profile state directories" },
+  { name: "state-store.test.mjs", kind: "suite", note: "state-file primitives: host-aligned profile-segment blacklist + own-pid stale temp reclaim (peer-free)" },
   { name: "silent-catch.test.mjs", kind: "suite", note: "source hygiene: every statement-less catch explains itself" },
   { name: "pool.test.mjs", kind: "suite", note: "key pool orchestration + 429 classification" },
   { name: "pool-route.test.mjs", kind: "suite", note: "pool management routes (rename/note persistence)" },

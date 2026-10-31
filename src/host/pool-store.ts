@@ -247,19 +247,33 @@ export function createFilePoolStore(options: StoreOptions = {}) {
     now
   });
 
-  let held: PoolStoreRecord | null | undefined;
   const cacheOptions: Parameters<typeof createStateReadCache<PoolStoreRecord | null>>[1] = { now };
   if (ttlMs !== undefined) cacheOptions.ttlMs = ttlMs;
   const cache = createStateReadCache(async () => parsePoolPayload(await readStateJson(file)), cacheOptions);
-  const seen = async (): Promise<PoolStoreRecord> => {
-    held = await cache.read();
-    return held ?? emptyPoolRecord();
-  };
-  // 写后把新记录灌进读缓存（remember）：自己的写入必须立刻对自己可见，不等 TTL。
+  const seen = async (): Promise<PoolStoreRecord> => (await cache.read()) ?? emptyPoolRecord();
+  // 写后把新记录灌进读缓存（remember）：自己的写入必须立刻对自己可见，不等
+  // TTL。ADR-006 拒绝必须表面化（provider-store 同款纪律；2026-10-31 审计顺带
+  // ①）：盘上是更新构建写的 pool.json 时，静默 no-op 会让面板显示「已保存」、
+  // 缓存 TTL 过期后回跳磁盘旧值——拒因抛给路由的 catch（routes/pool 与
+  // routes/models 都整段包 try），面板拿到 ok:false 与原话；缓存不 remember
+  // 未落盘的值。
   const apply = async (record: PoolStoreRecord): Promise<void> => {
-    held = record;
-    await writePool(held);
-    cache.remember(held);
+    const refusal = await writePool(record);
+    if (refusal !== null) throw new Error(refusal);
+    cache.remember(record);
+  };
+
+  // 读-改-写串行化（2026-10-31 审计顺带②）：每个变更方法都是「读整份 → 改一
+  // 处 → 写整份」，并发的两个变更各自读到同一份底稿、后写者把先写者的变更
+  // 整份冲掉（丢更新）。面板多 tab、动作与分区保存并发时在此排队；队列隔离
+  // 失败——前一个变更的拒绝（上面 throw）不挡后一个。跨进程并发不在此列：
+  // §22 双构建并存的机器按既定纪律升级时先杀干净旧 Host 进程，写侧版本护栏
+  // 管「别覆盖别的版本」。
+  let tail: Promise<unknown> = Promise.resolve();
+  const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
+    const run = tail.catch(() => undefined).then(work);
+    tail = run;
+    return run;
   };
 
   return {
@@ -269,33 +283,41 @@ export function createFilePoolStore(options: StoreOptions = {}) {
     },
     /** 面板保存全局并发数；null = 清除面板值回落配置。 */
     async setGlobalConcurrency(value: number | null): Promise<void> {
-      const record = await seen();
-            await apply({ ...record, globalConcurrency: value === null ? null : Math.max(0, Math.floor(value)) });
+      await enqueue(async () => {
+        const record = await seen();
+        await apply({ ...record, globalConcurrency: value === null ? null : Math.max(0, Math.floor(value)) });
+      });
     },
     /** 停用一个账号 id（可恢复）。 */
     async disable(id: string): Promise<void> {
-      const record = await seen();
-      await apply({
-        ...record,
-        disabledIds: record.disabledIds.includes(id) ? record.disabledIds : [...record.disabledIds, id]
+      await enqueue(async () => {
+        const record = await seen();
+        await apply({
+          ...record,
+          disabledIds: record.disabledIds.includes(id) ? record.disabledIds : [...record.disabledIds, id]
+        });
       });
     },
     /** 恢复一个账号 id（从停用与删除名单中同时清除）。 */
     async restore(id: string): Promise<void> {
-      const record = await seen();
-      await apply({
-        ...record,
-        disabledIds: record.disabledIds.filter((item) => item !== id),
-        deletedIds: record.deletedIds.filter((item) => item !== id)
+      await enqueue(async () => {
+        const record = await seen();
+        await apply({
+          ...record,
+          disabledIds: record.disabledIds.filter((item) => item !== id),
+          deletedIds: record.deletedIds.filter((item) => item !== id)
+        });
       });
     },
     /** 删除一个账号 id（不可自动恢复；配置重加同名 id 时需先在此恢复）。 */
     async delete(id: string): Promise<void> {
-      const record = await seen();
-      await apply({
-        ...record,
-        disabledIds: record.disabledIds.filter((item) => item !== id),
-        deletedIds: record.deletedIds.includes(id) ? record.deletedIds : [...record.deletedIds, id]
+      await enqueue(async () => {
+        const record = await seen();
+        await apply({
+          ...record,
+          disabledIds: record.disabledIds.filter((item) => item !== id),
+          deletedIds: record.deletedIds.includes(id) ? record.deletedIds : [...record.deletedIds, id]
+        });
       });
     },
     /**
@@ -305,57 +327,65 @@ export function createFilePoolStore(options: StoreOptions = {}) {
      */
     /** 面板默认 key 的备注写入（default 不在 keys 清单，单独存）。 */
     async setDefaultNote(note: string): Promise<void> {
-      const record = await seen();
-      await apply({ ...record, defaultNote: note });
+      await enqueue(async () => {
+        const record = await seen();
+        await apply({ ...record, defaultNote: note });
+      });
     },
     /** 面板 key 清单写入（add/rename/remove 的落盘半边）。 */
     async setKeys(keys: PoolKeyEntry[]): Promise<void> {
-      const record = await seen();
-            await apply({ ...record, keys });
+      await enqueue(async () => {
+        const record = await seen();
+        await apply({ ...record, keys });
+      });
     },
     /** 设置/清除一个模型的降级链覆盖（null/非法 = 清除覆盖，回落档案默认链）。 */
     async setModelProtocol(modelId: string, chain: readonly string[] | null): Promise<void> {
-      const record = await seen();
-      const protocols = { ...record.modelProtocols };
-      const normalized = chain === null ? undefined : normalizeChainValue(chain);
-      if (normalized === undefined) delete protocols[modelId];
-      else protocols[modelId] = normalized;
-      await apply({ ...record, modelProtocols: protocols });
+      await enqueue(async () => {
+        const record = await seen();
+        const protocols = { ...record.modelProtocols };
+        const normalized = chain === null ? undefined : normalizeChainValue(chain);
+        if (normalized === undefined) delete protocols[modelId];
+        else protocols[modelId] = normalized;
+        await apply({ ...record, modelProtocols: protocols });
+      });
     },
     async setSection(
       section: "toolsEnabled" | "text2img" | "img2img" | "vision" | "thinking",
       values: Record<string, unknown>
     ): Promise<void> {
-      const record = await seen();
-      // 合并进目标分区，而不是整体替换：`[section]: values` 会把该分区原有的
-      // 其它键一起抹掉 —— 例如 toolsEnabled 只有 text2img 时，再开 img2img 就
-      // 把 text2img 的 true 冲掉（三个工具永远只能开一个的根因，2026-10-25）。
-      const merged = section === "toolsEnabled"
-        ? { ...record.toolsEnabled, ...values }
-        : section === "text2img"
-          ? { ...record.text2img, ...values }
-          : section === "img2img"
-            ? { ...record.img2img, ...values }
-            : section === "vision"
-              ? { ...record.vision, ...values }
-              : { ...record.thinking, ...values };
-      const parsed = parsePoolPayload({
-        version: POOL_STORE_VERSION,
-        disabledIds: record.disabledIds,
-        deletedIds: record.deletedIds,
-        modelProtocols: record.modelProtocols,
-        // keys 必须带上：漏掉它会让每次分区保存把 key 清单清空
-        // （2026-10-24 实测：加完 key 再改一个多模态设置，key 就消失了）。
-        keys: record.keys,
-        toolsEnabled: record.toolsEnabled,
-        text2img: record.text2img,
-        img2img: record.img2img,
-        vision: record.vision,
-        thinking: record.thinking,
-        [section]: merged
+      await enqueue(async () => {
+        const record = await seen();
+        // 合并进目标分区，而不是整体替换：`[section]: values` 会把该分区原有的
+        // 其它键一起抹掉 —— 例如 toolsEnabled 只有 text2img 时，再开 img2img 就
+        // 把 text2img 的 true 冲掉（三个工具永远只能开一个的根因，2026-10-25）。
+        const merged = section === "toolsEnabled"
+          ? { ...record.toolsEnabled, ...values }
+          : section === "text2img"
+            ? { ...record.text2img, ...values }
+            : section === "img2img"
+              ? { ...record.img2img, ...values }
+              : section === "vision"
+                ? { ...record.vision, ...values }
+                : { ...record.thinking, ...values };
+        const parsed = parsePoolPayload({
+          version: POOL_STORE_VERSION,
+          disabledIds: record.disabledIds,
+          deletedIds: record.deletedIds,
+          modelProtocols: record.modelProtocols,
+          // keys 必须带上：漏掉它会让每次分区保存把 key 清单清空
+          // （2026-10-24 实测：加完 key 再改一个多模态设置，key 就消失了）。
+          keys: record.keys,
+          toolsEnabled: record.toolsEnabled,
+          text2img: record.text2img,
+          img2img: record.img2img,
+          vision: record.vision,
+          thinking: record.thinking,
+          [section]: merged
+        });
+        if (parsed === null) return;
+        await apply(parsed);
       });
-      if (parsed === null) return;
-      await apply(parsed);
     },
   };
 }

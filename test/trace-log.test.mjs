@@ -5,7 +5,9 @@
  * stdout 后文件出口是排障生命线，见模块头注释）：
  * - traceLog 保留 console.warn 原出口 + sink 收到带 ISO 时间戳的同一行；
  * - sink 抛错不外溢（诊断失败不反噬请求路径）；
- * - openTraceFile：追加语义、超限启动轮转 .old、文件不存在 = 全新创建。
+ * - openTraceFile：追加语义、超限启动轮转 .old、文件不存在 = 全新创建；
+ *   父目录缺失先建目录、建不出来退化 no-op sink——挂载绝不被诊断文件打穿
+ *   （U7-D1，2026-10-31：首挂/全新安装曾在此 ENOENT 崩掉整个 apply()）。
  */
 import { strict as assert } from "node:assert";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -66,6 +68,29 @@ try {
       existsSync(`${file}.old`) && readFileSync(file, "utf8") === "\uFEFF新起一行\n",
       `old=${existsSync(`${file}.old`)} new=${JSON.stringify(readFileSync(file, "utf8"))}`);
     rmSync(dir, { recursive: true, force: true });
+
+    // ── 3b. 父目录缺失：先建目录再开（U7-D1：曾在此 ENOENT 打穿 apply()）─────
+    const virginRoot = mkdtempSync(join(tmpdir(), "suite-trace-virgin-"));
+    const virginFile = join(virginRoot, "not-yet", "nested", "dsh-sensenova-suite.log");
+    const virginSink = openTraceFile(virginFile);
+    virginSink("首挂行\n");
+    check("状态目录缺失时先建目录并正常落笔（挂载不再被打穿）",
+      readFileSync(virginFile, "utf8") === "\uFEFF首挂行\n", JSON.stringify(readFileSync(virginFile, "utf8")));
+    rmSync(virginRoot, { recursive: true, force: true });
+
+    // ── 3c. 目录建不出来：open 不抛、sink 退化为 no-op（诊断缺席不挡挂载）─────
+    const blockedRoot = mkdtempSync(join(tmpdir(), "suite-trace-blocked-"));
+    const occupied = join(blockedRoot, "occupied");
+    writeFileSync(occupied, "我是一个文件，不是目录", "utf8");
+    let openThrew = "";
+    let blockedSink = null;
+    try { blockedSink = openTraceFile(join(occupied, "log.txt")); } catch (e) { openThrew = String(e); }
+    let sinkThrew = "";
+    try { blockedSink?.("不该落盘的行\n"); } catch (e) { sinkThrew = String(e); }
+    check("父目录被文件占住：open 不抛、sink no-op、无文件落盘",
+      openThrew === "" && sinkThrew === "" && !existsSync(join(occupied, "log.txt")),
+      `open=${openThrew} sink=${sinkThrew}`);
+    rmSync(blockedRoot, { recursive: true, force: true });
 
     // ── 4. 摘掉 sink：恢复纯 console ─────────────────────────────────────────
     setTraceSink(undefined);

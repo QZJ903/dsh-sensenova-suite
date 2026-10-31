@@ -45,12 +45,20 @@ const doctorTs = src("doctor.ts");
   check("profileStateDir(name, null) falls back to the shared stateDir", fallback,
     fallback ? "" : "profileStateDir body does not degrade to stateDir(name) on null");
 
-  // The segment validator keeps its strict character set and 64-char cap — a
-  // loose regex here would let an attacker pick a profile that escapes the dir.
-  check("isProfileSegment keeps the strict character set",
-    stateStore.includes("PROFILE_SEGMENT_RE = /^(?!\\.)[A-Za-z0-9._-]+$/") &&
+  // The segment validator matches the Host's OWN profile-name validation
+  // (dsh-app-boot resolveProfileDir: "", "/", "\\", ".", "..", "node_modules")
+  // plus the 64-char cap — banning more than that used to silently drop
+  // Host-legal non-ASCII (CJK) profiles back into the shared directory
+  // (2026-10-31 audit, U7-S1). Control characters stay banned beyond the Host:
+  // no legitimate name carries them. Either way, every traversal shape a
+  // single path segment can carry must stay banned — that is the invariant.
+  check("isProfileSegment bans every traversal shape a segment can carry",
+    stateStore.includes('name.includes("/")') &&
+      stateStore.includes('name.includes("\\\\")') &&
+      stateStore.includes('"node_modules"') &&
+      stateStore.includes("PROFILE_SEGMENT_CONTROL_RE") &&
       stateStore.includes("PROFILE_SEGMENT_MAX = 64"),
-    "missing /^(?![.])[A-Za-z0-9._-]+$/ or PROFILE_SEGMENT_MAX = 64");
+    "state-store.ts lost part of the profile-segment blacklist");
 
   // Primary read path is the optional-service lookup (which itself calls
   // ctx.get("profileContext") — see readOptionalService). Reading the
