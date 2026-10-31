@@ -58,14 +58,14 @@
  * are the slowest and the most likely to be SKIPped by a missing devDependency.
  *
  * `e2e-gate` is last on purpose: it boots a real Host process, so it must not
- * hold up the 32 cheap verdicts that precede it (`render-dom.test.mjs` is
+ * hold up the cheap verdicts that precede it (`render-dom.test.mjs` is
  * cheap only when its devDeps resolve; without them it prints SKIP and exits
  * 0 in milliseconds).
  *
  * @type {ReadonlyArray<{name: string, kind: "suite"|"gate", note: string}>}
  */
 export const SUITES = Object.freeze([
-  // ── the 32 *.test.mjs suites (this exact set is what package.test.mjs pins
+  // ── the *.test.mjs suites (this exact set is what package.test.mjs pins
   //    against disk; the five gate files below are exempt there, as e2e-gate
   //    has been since it stopped being a *.test.mjs) ───────────────────────
   { name: "auth.test.mjs", kind: "suite", note: "login / PKCE / JWE / throttle classification" },

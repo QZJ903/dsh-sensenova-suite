@@ -1,5 +1,21 @@
 # 更新日志（Changelog）
 
+## 0.1.37（2026-10-31）
+
+- **responses 线 usage 对齐「未缓存输入」口径**：真机实测（glm-5.2，同一 body
+  连打三次）`input_tokens` **已含** `cached_tokens`——`total_tokens` 恒等于
+  `input + output`，缓存热时 cached 占输入 95%。初版直取会把缓存命中部分多报
+  进未缓存输入（缓存热时 ≈20 倍），现改为 `input_tokens − cached_tokens`，与
+  chat 线（adapter.ts mapUsage）、anthropic 线（sse-anthropic.ts
+  mapAnthropicUsage）三线同口径；`total_tokens` 直取不变。
+- **URL 图像限制由待实测改为实测结论**：prepareImages 的「URL 总量 200MB」注记
+  改写——平台抓取失败形状 `code 3 "image download failed"`（302 跳转源与签名
+  过期同形状）、平台抓外国源仅 15–25KB/s、视觉 token 与文件字节无关；200MB
+  拒绝/放行形状留空（需国内快速源方可测到）。TODO 标记清零。
+- **工具与名册头注**：repro-pool.mjs 去掉硬编码本机用户路径（参数 > 环境变量
+  `DSH_SENSENOVA_POOL_JSON` > homedir 三级取值）；suites.mjs 头注去掉两处硬编码
+  套件计数（名册增长防再漂，计数由 package.test.mjs 的钉动态管）。
+
 ## 0.1.36（2026-10-31）
 
 - **responses 线 call_id 长度约束**：平台限 `call_id` 1–64 字符，宿主侧超长工具

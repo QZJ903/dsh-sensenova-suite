@@ -102,7 +102,10 @@ function isLiveImage(block: ContentBlock): block is ImageBlock {
  * - 格式校验：mediaType → 扩展名后对照模型 imageFormats（Responses wire 再与
  *   png/jpeg/gif/webp 求交）；不支持 → 报错（文案含支持列表，spec「格式不支持」）。
  * - 限制校验：deepseek-flash 单图 50MB / 总 64MB / 200 张（spec「大小与数量超限」）；
- *   「URL 总量 200MB」需要服务端字节信息，客户端无从测量，注记待实测（TODO）。
+ *   「URL 总量 200MB」是文档侧约束，客户端无从测量字节、不预校验——超限/不可达由
+ *   平台侧报错（2026-10-31 实测：URL 抓取失败为 code 3「image download failed」，
+ *   302 跳转源与签名过期同样落到它；平台抓外国源仅 15–25KB/s，200MB 是否真拒
+ *   未测——需国内快速源方能触到该分界）。
  * - 编码：本地只读路径 → base64 data URL；URL 来源原样保留（kimi-k3 仅 base64：
  *   URL 图像不进载荷表，builders 会以占位文本顶替并在此打日志，design 决策 3）。
  * - 解析不到来源的图像同样不进载荷表（builders 投影 textOnlyImageText 占位）。
@@ -182,7 +185,8 @@ export async function prepareImages(
           );
           continue;
         }
-        // TODO(实测)：URL 图像字节量未知，「URL 总量 200MB」客户端暂无法校验。
+        // URL 图像字节量客户端无从测量（不预校验「URL 总量 200MB」）；超限/抓取
+        // 失败由平台侧报错，实测形状见 prepareImages 头注（2026-10-31）。
         prepared.set(key, { url: access.url, fromUrlSource: true });
         continue;
       }

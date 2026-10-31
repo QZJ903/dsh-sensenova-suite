@@ -3,10 +3,12 @@
  * 打印每个响应体。用途：定位面板「无法连接本机 Host」背后的真实错误
  * （客户端会把 ok:false 的 error 文本吞掉，这里看原文）。
  *
- * 运行：node tools/repro-pool.mjs
+ * 运行：node tools/repro-pool.mjs [pool.json 路径]
+ *   路径也可用环境变量 DSH_SENSENOVA_POOL_JSON；都不给时取当前用户的
+ *   桌面面状态（~/.dsh/state/desktop/dsh-sensenova-suite/pool.json）。
  */
 import { mkdtempSync, mkdirSync, copyFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 
 const home = mkdtempSync(join(tmpdir(), "dsh-repro-"));
@@ -15,7 +17,8 @@ const stateDir = join(home, "state", "dsh-sensenova-suite");
 mkdirSync(stateDir, { recursive: true });
 
 // 用桌面面真实 pool.json 做起点（有协议覆盖、无 keys）
-const real = "C:/Users/17605/.dsh/state/desktop/dsh-sensenova-suite/pool.json";
+const real = process.argv[2] || process.env.DSH_SENSENOVA_POOL_JSON
+  || join(homedir(), ".dsh", "state", "desktop", "dsh-sensenova-suite", "pool.json");
 try {
   copyFileSync(real, join(stateDir, "pool.json"));
 } catch {
