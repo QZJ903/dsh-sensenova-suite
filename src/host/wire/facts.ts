@@ -2,16 +2,22 @@
  *
  * 数值与 align-request-fields-with-docs 落地后的 KNOWN_EFFORTS/KNOWN_SAMPLING_PARAMS
  * 同源（原文 /tmp/sn_docs_zh.md；Chat 出站行为零变化，见 adapter.ts 消费注释）。 */
-import type { FactsCatalogEntry, ModelFacts } from './types.ts';
+import type { FactsCatalogEntry, ModelFacts, WireKind } from './types.ts';
 
 /** 未知/未声明格式模型的通用宽容集：格式白名单只拦「已知不支持」，未知不预拦
  * （交平台 API 自行裁决）。已知分支缺省与未知分支开图共用同一份（duplication 门）。 */
 const GENERIC_IMAGE_FORMATS = ['jpeg', 'png', 'webp', 'gif'];
 
+/** 常规模型默认降级链（2026-10-30 用户拍板：所有模型默认 an>re>chat，kimi/glm
+ * 例外见各自条目）。策略层——链走查仍与 supportedWires 求交，能力外的线被跳过。 */
+const STANDARD_CHAIN: readonly WireKind[] = ['anthropic', 'responses', 'chat-completions'];
+
 /** 未收录模型 id 的通用兜底档案（不抛错；Chat 行为与迁移前「未知模型」路径一致）。 */
 const GENERIC_FACTS: ModelFacts = {
   id: '',
   supportedWires: ['chat-completions'],
+  // 未知模型能力面只有 chat；链仍写标准链（策略统一），走查会跳过能力外的线。
+  defaultChain: STANDARD_CHAIN,
   efforts: [],
   defaultEffort: null,
   responsesDefaultEffort: null,
@@ -40,6 +46,7 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['sensenova-6.8-flash-lite', {
     id: 'sensenova-6.8-flash-lite',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
+    defaultChain: STANDARD_CHAIN,
     efforts: ['low', 'medium', 'high', 'max', 'none'],
     defaultEffort: 'high',
     responsesDefaultEffort: 'high',
@@ -64,6 +71,7 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['deepseek-v4-flash', {
     id: 'deepseek-v4-flash',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
+    defaultChain: STANDARD_CHAIN,
     efforts: ['low', 'medium', 'high', 'max', 'none'],
     defaultEffort: 'high',
     responsesDefaultEffort: 'high',
@@ -88,6 +96,7 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     // V4.1 Flash：原生档 none/low/high/max + 兼容映射；Responses 上限文档未列（待实测）。
     id: 'deepseek-flash',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
+    defaultChain: STANDARD_CHAIN,
     efforts: ['none', 'low', 'high', 'max'],
     defaultEffort: 'high',
     responsesDefaultEffort: 'high',
@@ -115,6 +124,9 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['glm-5.2', {
     id: 'glm-5.2',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
+    // 2026-10-30 真机实测：glm 走 anthropic 线偶发 200 空流（ds 系无此现象），
+    // 默认链排除 anthropic。能力面不动——平台修复后面板可手动加回。
+    defaultChain: ['responses', 'chat-completions'],
     efforts: ['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none'],
     defaultEffort: 'max',
     responsesDefaultEffort: 'max',
@@ -138,6 +150,10 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['kimi-k3', {
     id: 'kimi-k3',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
+    // 2026-10-30 真机实测：kimi 走 anthropic 线 200 空流连续 4 次（0B、无
+    // message_start，ds 系无此现象），用户定案「kimi 完全不支持 an 线」——
+    // 默认链排除 anthropic。能力面不动——平台修复后面板可手动加回。
+    defaultChain: ['responses', 'chat-completions'],
     // none 入表依据：官方文档思考强度梯子明确列 `none`＝关闭推理；2026-09-29
     // 全模型探测口径 thinkingLevelMap off→none 同证（其余模型 efforts 均含 none）。
     efforts: ['low', 'medium', 'high', 'max', 'none'],

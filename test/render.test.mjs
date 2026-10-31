@@ -507,7 +507,7 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
       onThinkingToggle: () => {},
       visionIds: [], onVisionToggle: () => {},
       openThinkingId: "deepseek-v4-flash", onThinkingOpen: () => {},
-      modelProtocols: { "deepseek-v4-flash": "auto" }, onProtocolChange: () => {},
+      modelProtocols: { "deepseek-v4-flash": ["anthropic", "responses", "chat-completions"] }, onChainSlotChange: () => {},
     });
     const thinkingTexts = texts(thinkingTree).join("\n");
     const levelBoxes = findAll(thinkingTree, (p) => p.type === "checkbox")
@@ -526,9 +526,36 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
         const rightAligned = findAll(thinkingTree, (props) => props.style?.marginLeft === "auto");
         return visionBox.length === 1 && rightAligned.length >= 1;
       })(), texts(thinkingTree).join("\n"));
-    check("the protocol control lives INSIDE the open panel on its own line",
-      findAll(thinkingTree, (props) => typeof props["aria-label"] === "string" && props["aria-label"].includes("协议")).length === 1,
-      texts(thinkingTree).join("\n"));
+    check("the three chain slot selects live INSIDE the open panel on their own line",
+      (() => {
+        const slots = findAll(thinkingTree, (props) => typeof props["aria-label"] === "string" && props["aria-label"].includes("协议"));
+        return slots.length === 3
+          && slots.map((el) => el.props["aria-label"]).join(",") === "deepseek-v4-flash 协议1,deepseek-v4-flash 协议2,deepseek-v4-flash 协议3"
+          && slots.every((el) => el.props.disabled !== true);
+      })(), texts(thinkingTree).join("\n"));
+    check("slot options follow the no-duplicate rule (chosen wires vanish from later slots)",
+      (() => {
+        const slots = findAll(thinkingTree, (props) => typeof props["aria-label"] === "string" && props["aria-label"].includes("协议"));
+        // h shim 把 children 放在元素上（el.children），不在 props 上。
+        const optionsOf = (el) => (Array.isArray(el.children) ? el.children : []).map((o) => o?.props?.value);
+        return JSON.stringify(optionsOf(slots[0])) === JSON.stringify(["anthropic", "responses", "chat-completions"])
+          && JSON.stringify(optionsOf(slots[1])) === JSON.stringify(["", "responses", "chat-completions"])
+          && JSON.stringify(optionsOf(slots[2])) === JSON.stringify(["", "chat-completions"]);
+      })(), texts(thinkingTree).join("\n"));
+    check("only a slot whose PREDECESSOR is unfilled is disabled (a blanked slot itself stays editable)",
+      (() => {
+        const shortTree = treeOf(render.ModelRoster, {
+          models: rich, enabledIds: [], tt: ttZh,
+          onThinkingToggle: () => {}, visionIds: [], onVisionToggle: () => {},
+          openThinkingId: "deepseek-v4-flash", onThinkingOpen: () => {},
+          modelProtocols: { "deepseek-v4-flash": ["responses"] }, onChainSlotChange: () => {},
+        });
+        const slots = findAll(shortTree, (props) => typeof props["aria-label"] === "string" && props["aria-label"].includes("协议"));
+        // 链长 1：槽 2 空着但必须可编辑（否则置空后永远填不回去——2026-10-31 他报的 bug）；
+        // 槽 3 才因前一槽未填而禁用。
+        return slots.length === 3 && slots[0].props.disabled !== true
+          && slots[1].props.disabled !== true && slots[2].props.disabled === true;
+      })(), texts(thinkingTree).join("\n"));
     const unopened = treeOf(render.ModelRoster, {
       models: rich, enabledIds: [], tt: ttZh,
       thinkingById: { "deepseek-v4-flash": ["off"] },

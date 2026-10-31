@@ -46,16 +46,16 @@ const NO_IDS: string[] = [];
  * only") earns no badge, and a figure the catalogue does not declare draws no
  * segment - the list quotes facts, never guesses.
  */
-export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }: {
+export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onChainSlotChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }: {
   models: ModelData[];
   enabledIds: unknown;
   busy: boolean | undefined;
   tt: Tt;
   onToggle?: (id: string) => void;
-  /** 每模型协议覆盖（缺省 = auto）；面板"协议"列的数据源。 */
-  /** 用户勾选的「可识图」模型 id 集合（含草稿）；缺省 = 空（不显示识图勾选）。 */
-  modelProtocols?: Record<string, string>;
-  onProtocolChange?: (id: string, protocol: string) => void;
+  /** 每模型生效降级链（面板"协议"三槽的数据源；host 已合成 面板覆盖??配置??档案默认）。 */
+  modelProtocols?: Record<string, string[]>;
+  /** 改某模型链的一个槽（value="" = 从该槽截短；写本地草稿，保存时 POST modelProtocols）。 */
+  onChainSlotChange?: (id: string, slot: number, value: string) => void;
   visionIds?: string[];
   /** 勾选/取消某模型的识图能力（写本地草稿；保存时 POST vision.visionModels）。 */
   onVisionToggle?: (id: string, on: boolean) => void;
@@ -70,7 +70,6 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
 }): unknown {
   const list = Array.isArray(models) ? models : [];
   const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
-const PROTOCOLS = ["auto", "anthropic", "responses", "chat-completions"] as const;
 const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
   return h(
     "ul",
@@ -198,25 +197,53 @@ const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
               : null),
             // 分隔线：档位行与协议行之间。
             h("div", { style: { borderTop: "1px solid var(--dsw-alias-border-l1)", margin: "2px 0" } }),
-            // 协议并入面板：一行 label + 下拉（auto/三协议），与档位同属「保存才生效」。
-            onProtocolChange !== undefined
+            // 协议降级链并入面板：一行 label + 三个槽位 select（an>re>chat；
+            // 不重复、选一个少一个、槽1 必填、槽2 空则槽3 禁用），与档位同属「保存才生效」。
+            onChainSlotChange !== undefined
               ? h("label", {
                   style: { display: "flex", gap: 8, alignItems: "center", fontSize: 12, cursor: busy ? "default" : "pointer" },
                 },
                 h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, tt("llm.protocol")),
-                h("select", {
-                  style: { ...S.input, width: "auto", height: 26, fontSize: 12, padding: "0 6px" },
-                  value: String(modelProtocols?.[id] ?? "auto"),
-                  disabled: busy === true,
-                  "aria-label": `${label} 协议`,
-                  onChange: (event: { target: { value: string } }) => onProtocolChange(id, event.target.value)
-                }, PROTOCOLS.map((option) => h("option", { key: option, value: option },
-                  option === "auto" ? tt("llm.protocolAuto") : option))))
+                [0, 1, 2].flatMap((slot) => {
+                  const stored = modelProtocols?.[id];
+                  const chain = Array.isArray(stored) ? stored : [];
+                  // 禁用判据 =「前一槽为空」（slot 1 只依赖恒有值的槽 0，永不锁）；
+                  // 旧写法 chain.length <= slot 把刚置空的槽自己也锁死——置空后
+                  // 再也填不回去（2026-10-31 他报）。
+                  const disabled = busy === true || (slot >= 1 && chain.length < slot);
+                  // 槽间箭头（2026-10-31 他令「提升观感」）：链序视觉化。
+                  const arrow = slot > 0 ? [h("span", {
+                    key: `chain-arrow-${slot}`,
+                    style: { color: "var(--dsw-alias-label-secondary)", fontSize: 12, userSelect: "none" }
+                  }, "→")] : [];
+                  const select = h("select", {
+                    key: slot,
+                    style: { ...S.input, width: "auto", height: 26, fontSize: 12, padding: "0 4px" },
+                    value: chain[slot] ?? "",
+                    disabled,
+                    "aria-label": `${label} 协议${slot + 1}`,
+                    onChange: (event: { target: { value: string } }) => onChainSlotChange(id, slot, event.target.value)
+                  }, [
+                    ...(slot > 0 ? [h("option", { key: "", value: "" }, "—")] : []),
+                    // 选项文本 = wire 原文直出（与旧单选一致；an/re/chat 是他口述
+                    // 简写，界面用全名——2026-10-31 他令「把协议名字补全」）。
+                    ...chainSlotWires(chain, slot).map((wire) =>
+                      h("option", { key: wire, value: wire }, wire))
+                  ]);
+                  return [...arrow, select];
+                }))
               : null)
           : null
       });
     })
   );
+}
+
+const CHAIN_WIRES = ["anthropic", "responses", "chat-completions"] as const;
+/** 第 slot 槽的可选线（用户规则：不重复、选一个少一个）——前缀已占用的线不再出现。 */
+export function chainSlotWires(chain: readonly string[], slot: number): (typeof CHAIN_WIRES)[number][] {
+  const chosen = chain.slice(0, slot);
+  return CHAIN_WIRES.filter((wire) => !chosen.includes(wire));
 }
 
 /**
@@ -256,7 +283,7 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   const [inflight, setInflight] = useState<{
     thinking?: { values: Record<string, string[]>; at: number };
     vision?: { values: string[]; at: number };
-    protocols?: { values: Record<string, string>; at: number };
+    protocols?: { values: Record<string, string[]>; at: number };
   }>({});
   const visionHost = inflight.vision?.values ?? rawVision;
   const thinkingHost = { ...rawThinking, ...inflight.thinking?.values };
@@ -307,9 +334,13 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
   })();
   const thinkingDirty = JSON.stringify(effectiveThinking) !== JSON.stringify(thinkingHost);
   const visionDirty = JSON.stringify(effectiveVision.sort()) !== JSON.stringify([...visionHost].sort());
-  const [draftProtocols, setDraftProtocols] = useState<Record<string, string>>({});
+  // 协议链草稿（模型 → 生效链的覆盖；即改即存已废，改的是草稿，按保存才落库）。
+  const [draftProtocols, setDraftProtocols] = useState<Record<string, string[]>>({});
   const effectiveProtocols = { ...hostProtocols, ...draftProtocols };
-  const protocolsDirty = JSON.stringify(effectiveProtocols) !== JSON.stringify(hostProtocols);
+  // 协议链判脏按模型逐条比（草稿 vs 宿主生效链）：POST 只带变化了的模型——
+  // 全量覆盖会把「没改过的模型」也钉成覆盖，档案默认链的后续修正被存量冻结。
+  const protocolsDirty = Object.entries(draftProtocols).some(([id, chain]) =>
+    JSON.stringify(chain) !== JSON.stringify(hostProtocols[id]));
   const anyDirty = dirty || protocolsDirty || thinkingDirty || visionDirty;
   // 覆盖层摘除：快照追平在途写入（或 30s 兜底）即放手，显示与基座交还快照。
   const snapKey = JSON.stringify([rawThinking, rawVision, rawProtocols]);
@@ -375,7 +406,11 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
       const thinkingNext = Object.fromEntries(
         Object.entries({ ...thinkingHost, ...draftThinking }).filter(([, levels]) => Array.isArray(levels) && levels.length > 0)
       );
-      const protocolsNext = { ...hostProtocols, ...draftProtocols };
+      // 协议链只提交变化了的模型（逐条 patch，见 protocolsDirty 注释）。
+      const protocolsNext: Record<string, string[]> = Object.fromEntries(
+        Object.entries(draftProtocols).filter(([id, chain]) =>
+          JSON.stringify(chain) !== JSON.stringify(hostProtocols[id]))
+      );
       const posts: Promise<unknown>[] = [];
       if (dirty) {
         posts.push(postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids }).then(() => { touchedRef.current = false; }));
@@ -506,10 +541,26 @@ export function ModelPicker({ llm, pool, onDone, tt }: {
                 tt,
                 openThinkingId,
                 onThinkingOpen: (id: string | null) => setOpenThinkingId(id),
-                modelProtocols: { ...hostProtocols, ...draftProtocols },
-                onProtocolChange: (id: string, protocol: string) => {
-                  // 协议草稿（保存时与其它草稿一起落库）。
-                  setDraftProtocols((current) => ({ ...current, [id]: protocol }));
+                modelProtocols: effectiveProtocols,
+                onChainSlotChange: (id: string, slot: number, value: string) => {
+                  // 三槽链草稿（保存时与其它草稿一起落库）。改槽 = 前缀 + 新值，
+                  // 后槽保留未被占用的旧线（换槽1 不无谓清空槽2/3）；置空 = 从该槽
+                  // 截短。槽1 无空选项（链必非空），防御性忽略。
+                  setDraftProtocols((current) => {
+                    if (value === "" && slot === 0) return current;
+                    const base = [...({ ...hostProtocols, ...current })[id] ?? []];
+                    const next: string[] = value === ""
+                      ? base.slice(0, slot)
+                      : (() => {
+                        const head = base.slice(0, slot);
+                        if (!head.includes(value)) head.push(value);
+                        for (const wire of base.slice(slot + 1)) {
+                          if (!head.includes(wire)) head.push(wire);
+                        }
+                        return head;
+                      })();
+                    return { ...current, [id]: next };
+                  });
                   setNotice(null);
                 },
                 // One row is toggled against the WHOLE roster, not the

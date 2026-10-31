@@ -111,8 +111,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.keyField": "API Key",
 			"llm.placeholder": "粘贴 sk- 开头的 API Key",
 			"llm.save": "保存 API Key",
-			"llm.protocol": "协议",
-			"llm.protocolAuto": "自动",
+			"llm.protocol": "协议降级链",
 			"llm.saving": "保存中…",
 			"llm.saved": "API Key 已保存在 DSH 凭据中；下次轮询自动拉取模型目录。",
 			"llm.empty": "请输入 sk- 开头的 API Key",
@@ -138,7 +137,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterSave": "保存",
 			"llm.rosterSaving": "保存中…",
 			"llm.rosterDiscard": "撤销",
-			"llm.rosterSaved": "已保存，模型列表已更新。",
+			"llm.rosterSaved": "已保存。",
 			"llm.rosterUnsaved": "有未保存的改动",
 			"llm.rosterError": "保存失败：{error}",
 			"llm.rosterNoMatch": "没有匹配的模型。",
@@ -278,8 +277,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.keyField": "API key",
 			"llm.placeholder": "Paste your sk- API key",
 			"llm.save": "Save API key",
-			"llm.protocol": "Protocol",
-			"llm.protocolAuto": "auto",
+			"llm.protocol": "Protocol fallback chain",
 			"llm.saving": "Saving…",
 			"llm.saved": "API key stored in the DSH credentials; the next poll fetches the model catalog.",
 			"llm.empty": "Enter an API key starting with sk-",
@@ -305,7 +303,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterSave": "Save",
 			"llm.rosterSaving": "Saving…",
 			"llm.rosterDiscard": "Discard",
-			"llm.rosterSaved": "Saved — the model list has been updated.",
+			"llm.rosterSaved": "Saved.",
 			"llm.rosterUnsaved": "Unsaved changes",
 			"llm.rosterError": "Save failed: {error}",
 			"llm.rosterNoMatch": "No model matches.",
@@ -1203,7 +1201,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				width: 7,
 				height: 7,
 				borderRadius: 999,
-				flexShrink: 0
+				flexShrink: 0,
+				position: "relative",
+				top: 1.5
 			},
 			pillReading: { fontVariantNumeric: "tabular-nums" },
 			pillPlan: {
@@ -1917,15 +1917,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* only") earns no badge, and a figure the catalogue does not declare draws no
 	* segment - the list quotes facts, never guesses.
 	*/
-	function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onProtocolChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }) {
+	function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProtocols, onChainSlotChange, visionIds, onVisionToggle, thinkingById, onThinkingToggle, openThinkingId, onThinkingOpen }) {
 		const list = Array.isArray(models) ? models : [];
 		const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
-		const PROTOCOLS = [
-			"auto",
-			"anthropic",
-			"responses",
-			"chat-completions"
-		];
 		const THINKING_CHOICES = [
 			"off",
 			"low",
@@ -2045,30 +2039,57 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				}), tt("llm.rosterVision")) : null), h("div", { style: {
 					borderTop: "1px solid var(--dsw-alias-border-l1)",
 					margin: "2px 0"
-				} }), onProtocolChange !== void 0 ? h("label", { style: {
+				} }), onChainSlotChange !== void 0 ? h("label", { style: {
 					display: "flex",
 					gap: 8,
 					alignItems: "center",
 					fontSize: 12,
 					cursor: busy ? "default" : "pointer"
-				} }, h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, tt("llm.protocol")), h("select", {
-					style: {
-						...S.input,
-						width: "auto",
-						height: 26,
-						fontSize: 12,
-						padding: "0 6px"
-					},
-					value: String(modelProtocols?.[id] ?? "auto"),
-					disabled: busy === true,
-					"aria-label": `${label} 协议`,
-					onChange: (event) => onProtocolChange(id, event.target.value)
-				}, PROTOCOLS.map((option) => h("option", {
-					key: option,
-					value: option
-				}, option === "auto" ? tt("llm.protocolAuto") : option)))) : null) : null
+				} }, h("span", { style: { color: "var(--dsw-alias-label-secondary)" } }, tt("llm.protocol")), [
+					0,
+					1,
+					2
+				].flatMap((slot) => {
+					const stored = modelProtocols?.[id];
+					const chain = Array.isArray(stored) ? stored : [];
+					const disabled = busy === true || slot >= 1 && chain.length < slot;
+					const arrow = slot > 0 ? [h("span", {
+						key: `chain-arrow-${slot}`,
+						style: {
+							color: "var(--dsw-alias-label-secondary)",
+							fontSize: 12,
+							userSelect: "none"
+						}
+					}, "→")] : [];
+					const select = h("select", {
+						key: slot,
+						style: {
+							...S.input,
+							width: "auto",
+							height: 26,
+							fontSize: 12,
+							padding: "0 4px"
+						},
+						value: chain[slot] ?? "",
+						disabled,
+						"aria-label": `${label} 协议${slot + 1}`,
+						onChange: (event) => onChainSlotChange(id, slot, event.target.value)
+					}, [...slot > 0 ? [h("option", {
+						key: "",
+						value: ""
+					}, "—")] : [], ...chainSlotWires(chain, slot).map((wire) => h("option", {
+						key: wire,
+						value: wire
+					}, wire))]);
+					return [...arrow, select];
+				})) : null) : null
 			});
 		}));
+	}
+	/** 第 slot 槽的可选线（用户规则：不重复、选一个少一个）——前缀已占用的线不再出现。 */
+	function chainSlotWires(chain, slot) {
+		const chosen = chain.slice(0, slot);
+		return CHAIN_WIRES.filter((wire) => !chosen.includes(wire));
 	}
 	/**
 	* The curated model allow-list: which of this key's models get pushed to
@@ -2127,7 +2148,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			...hostProtocols,
 			...draftProtocols
 		};
-		const protocolsDirty = JSON.stringify(effectiveProtocols) !== JSON.stringify(hostProtocols);
+		const protocolsDirty = Object.entries(draftProtocols).some(([id, chain]) => JSON.stringify(chain) !== JSON.stringify(hostProtocols[id]));
 		const anyDirty = dirty || protocolsDirty || thinkingDirty || visionDirty;
 		const snapKey = JSON.stringify([
 			rawThinking,
@@ -2172,10 +2193,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 					...thinkingHost,
 					...draftThinking
 				}).filter(([, levels]) => Array.isArray(levels) && levels.length > 0));
-				const protocolsNext = {
-					...hostProtocols,
-					...draftProtocols
-				};
+				const protocolsNext = Object.fromEntries(Object.entries(draftProtocols).filter(([id, chain]) => JSON.stringify(chain) !== JSON.stringify(hostProtocols[id])));
 				const posts = [];
 				if (dirty) posts.push(postJsonOrThrow(MODELS_PATH, { enabledModelIds: ids }).then(() => {
 					touchedRef.current = false;
@@ -2298,15 +2316,25 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			tt,
 			openThinkingId,
 			onThinkingOpen: (id) => setOpenThinkingId(id),
-			modelProtocols: {
-				...hostProtocols,
-				...draftProtocols
-			},
-			onProtocolChange: (id, protocol) => {
-				setDraftProtocols((current) => ({
-					...current,
-					[id]: protocol
-				}));
+			modelProtocols: effectiveProtocols,
+			onChainSlotChange: (id, slot, value) => {
+				setDraftProtocols((current) => {
+					if (value === "" && slot === 0) return current;
+					const base = [...{
+						...hostProtocols,
+						...current
+					}[id] ?? []];
+					const next = value === "" ? base.slice(0, slot) : (() => {
+						const head = base.slice(0, slot);
+						if (!head.includes(value)) head.push(value);
+						for (const wire of base.slice(slot + 1)) if (!head.includes(wire)) head.push(wire);
+						return head;
+					})();
+					return {
+						...current,
+						[id]: next
+					};
+				});
 				setNotice(null);
 			},
 			onToggle: (id) => {
@@ -2377,7 +2405,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			role: "alert"
 		}, notice) : null));
 	}
-	var NO_MODELS, NO_IDS;
+	var NO_MODELS, NO_IDS, CHAIN_WIRES;
 	var init_model_picker = __esmMin((() => {
 		init_const();
 		init_format();
@@ -2388,6 +2416,11 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		init_styles();
 		NO_MODELS = [];
 		NO_IDS = [];
+		CHAIN_WIRES = [
+			"anthropic",
+			"responses",
+			"chat-completions"
+		];
 	}));
 
 //#endregion
@@ -4232,7 +4265,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-10-30T07:46";
+		const CLIENT_BUILD = "2026-10-31T08:18";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			try {

@@ -19,9 +19,9 @@ import type { Wiring } from "../types.ts";
 /** The model-roster route (docs/API.md). */
 export const MODELS_PATH = `/api/${name}/models`;
 
-/** 协议覆盖的最小存储面（pool-store 的子集；测试可替身）。 */
+/** 协议降级链的最小存储面（pool-store 的子集；测试可替身）。 */
 interface ProtocolStore {
-  setModelProtocol(modelId: string, protocol: string | null): Promise<void>;
+  setModelProtocol(modelId: string, chain: readonly string[] | null): Promise<void>;
 }
 
 /**
@@ -71,11 +71,11 @@ export function registerModelsRoute(ctx: any, wiring: Pick<Wiring, "settings" | 
             { "cache-control": "no-store" });
           return;
         }
-        // 协议覆盖先行落盘（每模型一条；"auto"/null 即清除覆盖）。
+        // 协议降级链覆盖先行落盘（每模型一条；null/非法即清除覆盖，回落档案默认链）。
         if (hasProtocols && poolStore !== undefined) {
           for (const [modelId, protocol] of Object.entries(body.value.modelProtocols as Record<string, unknown>)) {
             if (typeof modelId !== "string" || modelId === "") continue;
-            await poolStore.setModelProtocol(modelId, typeof protocol === "string" ? protocol : null);
+            await poolStore.setModelProtocol(modelId, Array.isArray(protocol) ? (protocol as string[]) : null);
           }
         }
         // 协议覆盖写盘后立刻刷新编排层的本地记录：快照的 modelProtocols 读的

@@ -32,6 +32,8 @@ import { catalogSignature, syncSignaturesAfterPublish, quotaSignatureOf } from "
 import type { PublishResult } from "./provider-publish.ts";
 import { str, errMsg } from "./util.ts";
 import { resolveSwitchEnabled, switchSource } from "./switch-precedence.ts";
+import { factsFor } from "./wire/facts.ts";
+import { effectiveChain } from "./wire/chain.ts";
 import type { SnapshotData } from "../shared/wire.ts";
 
 /**
@@ -161,6 +163,7 @@ export async function buildSnapshotBody({
   panelSwitch,
   poolSnapshot,
   thinkingOverrides,
+  wireProtocol,
   onShapeDrift
 }: {
   settings: import("./host-config.ts").ResolvedSettings;
@@ -185,6 +188,8 @@ export async function buildSnapshotBody({
   poolSnapshot?: () => unknown;
   /** 每模型可用思考档位（pool.json `thinking` 分区；面板行内勾选）。可选。 */
   thinkingOverrides?: Record<string, string[]> | null;
+  /** provider 配置的 wire 模式（per-model-protocol-chain：强制值=单线链，进生效链合成）。可选，缺省 auto。 */
+  wireProtocol?: import("./wire/plan.ts").WireProtocol;
   /**
    * Called when the quota payload is READABLE but a drained pool names no
    * usable models — the one drift that silently disables quota protection
@@ -195,12 +200,12 @@ export async function buildSnapshotBody({
 }): Promise<SnapshotData> {
   const providerState = publisher.state;
   const resolveApiKey = async () => (await apiKeyStore.resolve()).value;
-  // 池诊断 + 模型协议覆盖：一次取用（pool 块与 llm 块共源，不会各说各话）。
+  // 池诊断 + 模型降级链覆盖：一次取用（pool 块与 llm 块共源，不会各说各话）。
   let poolDiag: import("../shared/wire.ts").PoolDiagData | null = null;
-  let modelProtocols: Record<string, string> = {};
+  let modelProtocols: Record<string, string[]> = {};
   if (typeof poolSnapshot === "function") {
     try {
-      const raw = await poolSnapshot() as import("../shared/wire.ts").PoolDiagData & { modelProtocols?: Record<string, string> };
+      const raw = await poolSnapshot() as import("../shared/wire.ts").PoolDiagData & { modelProtocols?: Record<string, string[]> };
       poolDiag = raw;
       modelProtocols = raw.modelProtocols ?? {};
     } catch {
@@ -450,6 +455,17 @@ export async function buildSnapshotBody({
     return id === "" || !blockedForOffer.has(id);
   });
   const summary = summarizeCatalog(offerForCounts);
+  // 每模型生效降级链（per-model-protocol-chain）：面板三槽的数据源是「生效链」
+  // 而非裸覆盖——未覆盖模型显示档案默认链（kimi/glm=re>chat），策略不进 client
+  // bundle。合成走 wire/chain.ts（与决策走查同一实现，两处不能各说各话）。
+  // 目录里没有的覆盖键原样保留（模型临时下线不丢用户的链）。
+  const effectiveProtocols: Record<string, string[]> = { ...modelProtocols };
+  for (const entry of Array.isArray(offered) ? offered : []) {
+    const id = str((entry as { id?: unknown })?.id, "");
+    if (id === "" || effectiveProtocols[id] !== undefined) continue;
+    const cfg = wireProtocol === undefined ? {} : { wireProtocol };
+    effectiveProtocols[id] = [...effectiveChain(cfg, factsFor(id, { id }))];
+  }
   // Secret-free by construction: the store reports booleans/source only, never
   // the key value.
   const llmStatus = {
@@ -465,8 +481,8 @@ export async function buildSnapshotBody({
     // adapter profile pins this constant, the panel quotes it — same source,
     // so the two cannot drift.
     thinkingDefault: DEFAULT_REASONING_EFFORT,
-    // 每模型协议覆盖（面板"协议"列的数据源；缺省 = auto）。
-    modelProtocols,
+    // 每模型生效降级链（面板"协议"三槽的数据源；已合成 面板覆盖??配置??档案默认）。
+    modelProtocols: effectiveProtocols,
     // The panel roster: every chat model this catalogue can offer, each tagged
     // with whether its quota pool is currently exhausted, plus the curated
     // allow-list. An empty allow-list means "no filter". Every row also carries

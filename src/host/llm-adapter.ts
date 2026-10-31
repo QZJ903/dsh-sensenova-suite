@@ -27,8 +27,8 @@ import type { KeyOrchestrator } from "./key-orchestrator.ts";
 export interface PoolFacade {
   /** 编排层本体（选 key / 轮换 / 上报 / 全局槽）。 */
   orchestrator: KeyOrchestrator;
-  /** 每模型协议覆盖（面板"协议"列；闭包读取，保存即生效）。 */
-  protocolOverrides: () => Record<string, string>;
+  /** 每模型降级链覆盖（面板"协议"三槽；pool.json `modelProtocols` 分区；闭包读取，保存即生效）。 */
+  protocolOverrides: () => Record<string, string[]>;
   /** 每模型可用思考档位（面板"思考档位"勾选；pool.json `thinking` 分区）。 */
   thinkingOverrides: () => Record<string, string[]>;
   /** 图片桥换图器（vision/bridge.ts createImageSwapper 的产物；缺省 = 不换）。 */

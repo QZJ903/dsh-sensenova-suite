@@ -374,14 +374,14 @@ function typeInto(input, value) {
       && [...posts[0].body.enabledModelIds].sort().join(",") === "m-a,m-b",
     JSON.stringify(posts));
   check("an unechoed save keeps showing the edits — the 'saved' claim waits for the Host",
-    picker.host.textContent.includes("Unsaved changes") && !picker.host.textContent.includes("Saved —"),
+    picker.host.textContent.includes("Unsaved changes") && !picker.host.textContent.includes("Saved."),
     picker.host.textContent.slice(-160));
 
   // The poll echoes the write: the Host value now equals the saved draft.
   picker.rerender(React.createElement(panel.components.ModelPicker,
     pickerProps([...posts[0].body.enabledModelIds])));
   check("the Host echo turns the draft into 'saved' and retires the footer",
-    picker.host.querySelector('p[role="status"]')?.textContent === "Saved — the model list has been updated."
+    picker.host.querySelector('p[role="status"]')?.textContent === "Saved."
       && !picker.host.textContent.includes("Unsaved changes") && pickerDone === 1,
     `${picker.host.querySelector('p[role="status"]')?.textContent} onDone=${pickerDone}`);
 
@@ -394,7 +394,7 @@ function typeInto(input, value) {
     box("Gamma")?.checked === true
       && picker.host.textContent.includes("3 ticked / 3 total")
       && picker.host.textContent.includes("Unsaved changes")
-      && !picker.host.textContent.includes("Saved —"),
+      && !picker.host.textContent.includes("Saved."),
     picker.host.textContent.slice(-200));
   await act(async () => { button("Save").click(); });
   check("the all-on draft saves to the empty-list extreme",
@@ -405,7 +405,7 @@ function typeInto(input, value) {
     pickerProps(posts[1].body.enabledModelIds)));
   check("the echoed [] keeps every box ticked — the extreme round-trips through the Host",
     box("Alpha")?.checked === true && box("Beta")?.checked === true && box("Gamma")?.checked === true
-      && picker.host.querySelector('p[role="status"]')?.textContent === "Saved — the model list has been updated."
+      && picker.host.querySelector('p[role="status"]')?.textContent === "Saved."
       && pickerDone === 2,
     `${box("Alpha")?.checked}/${box("Beta")?.checked}/${box("Gamma")?.checked} onDone=${pickerDone}`);
 
@@ -414,7 +414,7 @@ function typeInto(input, value) {
     box("Alpha")?.checked === false
       && picker.host.textContent.includes("2 ticked / 3 total")
       && picker.host.textContent.includes("Unsaved changes")
-      && !picker.host.textContent.includes("Saved —"),
+      && !picker.host.textContent.includes("Saved."),
     picker.host.textContent.slice(-160));
 
   win.fetch = (path) => {

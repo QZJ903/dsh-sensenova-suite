@@ -272,8 +272,10 @@ export const S = {
   // The tier's whole job is the 7px dot (opencode-go's shape too): the reading
   // keeps the host's label ink so a routine 1% never shouts. `flexShrink: 0`
   // because the trigger's `overflow: hidden` would otherwise flatten it into
-  // an ellipse the moment the row gets narrow.
-  pillDot: { width: 7, height: 7, borderRadius: 999, flexShrink: 0 },
+  // an ellipse the moment the row gets narrow. `position/top` = 真机光学补偿
+  // （2026-10-31 他报「点偏上」；DevTools 实测点已与行框几何居中——偏的是 CJK
+  // 墨迹在行框内偏下，几何居中救不了，只能按眼补）。终值 1.5px（他验收定）。
+  pillDot: { width: 7, height: 7, borderRadius: 999, flexShrink: 0, position: "relative", top: 1.5 },
   // Tabular figures: the snapshot polls on a cadence, and proportional digits
   // make the whole toolbar twitch every few seconds as `9%` becomes `10%`.
   pillReading: { fontVariantNumeric: "tabular-nums" },

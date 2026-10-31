@@ -70,8 +70,8 @@ export interface PoolStoreRecord {
   deletedIds: string[];
   /** 面板保存的全局并发数；null = 跟随配置。 */
   globalConcurrency: number | null;
-  /** 模型 → 协议（auto | anthropic | responses | chat-completions）。 */
-  modelProtocols: Record<string, string>;
+  /** 模型 → 降级链覆盖（有序子集 ≤3；仅存面板写过的模型，未写走档案默认链）。 */
+  modelProtocols: Record<string, string[]>;
   /** 面板添加的 key 清单（秘钥本体在凭据服务；此处只存 id 与名称）。 */
   keys: PoolKeyEntry[];
   /** 多模态面板设置（仅存面板改过的键）。 */
@@ -96,6 +96,25 @@ export function emptyPoolRecord(): PoolStoreRecord {
 }
 
 /** 解析一份磁盘载荷；不是本插件的形状返回 null。 */
+const CHAIN_WIRES = ["anthropic", "responses", "chat-completions"];
+
+/**
+ * 单条降级链值归一（per-model-protocol-chain）：字符串（0.1.31 旧单线值）当作
+ * 长度 1 的链；"auto"（旧「无覆盖」值）与空值 → undefined；数组 → 白名单过滤 +
+ * 去重保序、截到 3（三个槽位的上限；超长截头 = 保留用户排在前面的优先线）。
+ * 全非法 → undefined（该模型无覆盖，走档案默认链——兜底往保守侧）。
+ */
+function normalizeChainValue(value: unknown): string[] | undefined {
+  const raw = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+  const out: string[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "string" || !CHAIN_WIRES.includes(entry)) continue;
+    if (out.includes(entry)) continue;
+    out.push(entry);
+  }
+  return out.length > 0 ? out.slice(0, 3) : undefined;
+}
+
 export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
   const source = raw as Record<string, unknown>;
@@ -105,13 +124,12 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
   const concurrency = typeof source.globalConcurrency === "number" && Number.isFinite(source.globalConcurrency)
     ? Math.max(0, Math.floor(source.globalConcurrency))
     : null;
-  const protocols: Record<string, string> = {};
+  const protocols: Record<string, string[]> = {};
   if (typeof source.modelProtocols === "object" && source.modelProtocols !== null && !Array.isArray(source.modelProtocols)) {
     for (const [key, value] of Object.entries(source.modelProtocols as Record<string, unknown>)) {
-      if (typeof key === "string" && key !== "" && typeof value === "string"
-        && ["auto", "anthropic", "responses", "chat-completions"].includes(value)) {
-        protocols[key] = value;
-      }
+      if (typeof key !== "string" || key === "") continue;
+      const chain = normalizeChainValue(value);
+      if (chain !== undefined) protocols[key] = chain;
     }
   }
   // 多模态分区：白名单键 + 类型过滤（错型丢弃，不抛）。
@@ -292,12 +310,13 @@ export function createFilePoolStore(options: StoreOptions = {}) {
       const record = await seen();
             await apply({ ...record, keys });
     },
-    /** 设置/清除一个模型的协议覆盖（"auto" 即清除）。 */
-    async setModelProtocol(modelId: string, protocol: string | null): Promise<void> {
+    /** 设置/清除一个模型的降级链覆盖（null/非法 = 清除覆盖，回落档案默认链）。 */
+    async setModelProtocol(modelId: string, chain: readonly string[] | null): Promise<void> {
       const record = await seen();
       const protocols = { ...record.modelProtocols };
-      if (protocol === null || protocol === "auto") delete protocols[modelId];
-      else protocols[modelId] = protocol;
+      const normalized = chain === null ? undefined : normalizeChainValue(chain);
+      if (normalized === undefined) delete protocols[modelId];
+      else protocols[modelId] = normalized;
       await apply({ ...record, modelProtocols: protocols });
     },
     async setSection(

@@ -147,11 +147,12 @@ export interface SensenovaAdapterDeps {
    */
   catalogFilter?: () => { enabledIds: string[]; unavailableIds: string[] };
   /**
-   * 每模型协议覆盖（dsh-sensenova-suite 扩展，可选）：面板"协议"列的运行期
-   * 读取——覆盖为具体协议时该模型从它起步（auto/未覆盖走决策表；运行期 400
-   * 兜底降级仍然生效）。缺省 undefined = 全部 auto。
+   * 每模型降级链覆盖（dsh-sensenova-suite 扩展，可选）：面板"协议"三槽链，
+   * pool.json modelProtocols[model]（有序子集，≤3）。经 resolveWirePlan 生效链
+   * 合成（面板 ?? 配置单线 ?? 档案默认）参与走查与 chat 兜底。
+   * 缺省 undefined = 全部走档案默认链。
    */
-  protocolOverrides?: () => Record<string, string>;
+  protocolOverrides?: () => Record<string, string[]>;
   /**
    * 每模型可用思考档位（dsh-sensenova-suite 扩展点，可选）：从 pool.json
    * `thinking` 分区读取（{ modelId → ["off","low",...] }）。在读取边界
@@ -960,6 +961,14 @@ export class SensenovaAdapter extends LlmAdapter {
    */
   private readonly tpmHitCounts = new Map<string | undefined, number>();
 
+  /**
+   * 429 轨迹账本（per-session，纯诊断）：同一逻辑请求跨宿主重试吃过的 key
+   * （原文，打印时 maskKey）。每次 429 追加当前 key（去重），成功即清。
+   * 「已试 N/M 把」从此按跨重试的实况计——单跳的 key= 字段只看得到当次。
+   * 仅内存，随适配器生命周期；容量天然有界（≤ 会话数 × 池大小）。
+   */
+  private readonly session429Trail = new Map<string | undefined, string[]>();
+
   constructor(deps: SensenovaAdapterDeps) {
     super();
     this.deps = deps;
@@ -1149,6 +1158,8 @@ export class SensenovaAdapter extends LlmAdapter {
       this.deps.thinkingOverrides?.(),
     );
     // §6.1 分派点：factsFor → resolveWirePlan → 按 wire 构建请求体与路径。
+    // 全量链模型（per-model-protocol-chain）：面板链覆盖经第 5 参进入生效链
+    // 合成（面板 ?? 配置单线 ?? 档案默认），走查与 chat 兜底都在决策层完成。
     // wire 一旦选定，整次请求（含所有轮换重试）不再切换——否则同一轮对话会出现
     // Responses/Chat 混合历史，function_call 与 role:tool 的 id 体系会串。
     // 唯一例外是下方 400 兜底（且发生在任何内容流出之前）。
@@ -1156,14 +1167,8 @@ export class SensenovaAdapter extends LlmAdapter {
     const plan = resolveWirePlan(options, connection, facts, {
       responsesUnsupported: this.responsesUnsupported,
       anthropicUnsupported: this.anthropicUnsupported,
-    });
+    }, this.deps.protocolOverrides?.()[options.model]);
     let wire: WireKind = plan.wire;
-    // 面板协议覆盖（suite 扩展）：覆盖为具体协议时作为起始 wire（决策表被
-    // 用户选择压过）；覆盖为 auto/未设置时维持决策表结果。
-    const override = this.deps.protocolOverrides?.()[options.model];
-    if (override === 'anthropic' || override === 'responses' || override === 'chat-completions') {
-      wire = override;
-    }
     // 图片桥（2026-10-27）：换图与否由「可看图」勾选集判定（vision.visionModels，
     // 换图器内部结合 bridgeMode）——勾选的模型图片原样进请求，未勾选的换成
     // 转述观察文本。换图发生在请求边界，session 与用户侧界面保持原图原文。
@@ -1291,11 +1296,20 @@ export class SensenovaAdapter extends LlmAdapter {
         }
         if (attempt.ok) {
           response = attempt;
-          // 请求成功：429001 分级探测计数归零（下次再限流从最短档 3s 重新探测）。
-          if (this.tpmHitCounts.get(options.sessionId) !== undefined) {
-            traceLog(`[dsh-sensenova-suite] 429 恢复 sid=${options.sessionId ?? "-"} model=${options.model} key=${maskKey(apiKey)} 连续限流结束，探测档归零`);
+          // 请求成功：限流相关计数归零（下次再限流从最短档 3s 重新探测）。
+          // 恢复行放宽到 rate 类（2026-10-31 他批）：trail 非空 = 本会话刚吃过
+          // 限流，「限速解除」时刻显式可读（第一条 429 到本行的时间差 = 窗口
+          // 时长），不再靠账本重置反推。
+          const tpmHits = this.tpmHitCounts.get(options.sessionId);
+          const trailLen = this.session429Trail.get(options.sessionId)?.length ?? 0;
+          if (tpmHits !== undefined || trailLen > 0) {
+            traceLog(`[dsh-sensenova-suite] 429 恢复 sid=${options.sessionId ?? "-"} model=${options.model} key=${maskKey(apiKey)} ` +
+              (tpmHits !== undefined
+                ? "连续限流结束，探测档归零"
+                : `连续 ${trailLen} 次限流后成功`));
           }
           this.tpmHitCounts.delete(options.sessionId);
+          this.session429Trail.delete(options.sessionId);
           this.deps.reportOutcome?.(apiKey, 'success');
           break; // 额度随 response 保留，由外层 finally 在流结束后释放
         }
@@ -1310,13 +1324,15 @@ export class SensenovaAdapter extends LlmAdapter {
         }
         // §5.3 运行时不符兜底：现代协议（Anthropic / Responses）400 且
         // error.type=invalid_request_error → 记进程内 unsupported 集合 + 打日志，
-        // 同请求立即沿降级链换下一条 wire 重试一次（发生在任何内容流出之前，是 wire
-        // 粘性的唯一例外）；后续该模型在该协议上直连下一级。不持久化、不写配置——
-        // 重启即清空，文档与实况不符只退化为「该模型少一条协议」。
-        if (attempt.status === 400 && wire !== 'chat-completions' && !responsesFallbackUsed && isInvalidRequestError(errText)) {
-          const nextWire = wire === 'anthropic' ? 'responses' : 'chat-completions';
+        // 同请求立即沿生效链换下一跳重试一次（发生在任何内容流出之前，是 wire
+        // 粘性的唯一例外）；链耗尽落全局兜底 chat，chat 400 无处可退。
+        // 不持久化、不写配置——重启即清空，文档与实况不符只退化为「该模型少一条协议」。
+        const hopIndex = plan.chain.indexOf(wire);
+        const chainNext = hopIndex >= 0 && hopIndex + 1 < plan.chain.length ? plan.chain[hopIndex + 1] : undefined;
+        const nextWire = chainNext ?? (wire === 'chat-completions' ? undefined : 'chat-completions');
+        if (attempt.status === 400 && nextWire !== undefined && !responsesFallbackUsed && isInvalidRequestError(errText)) {
           if (wire === 'anthropic') this.anthropicUnsupported.add(options.model);
-          else this.responsesUnsupported.add(options.model);
+          else if (wire === 'responses') this.responsesUnsupported.add(options.model);
           // eslint-disable-next-line no-console -- 适配器不持有 cordis logger，降级说明走 stderr 日志（避免用户困惑）。
           traceLog(
             `[dsh-sensenova-suite] ${wire} wire rejected model "${options.model}" with 400 invalid_request_error; ` +
@@ -1361,6 +1377,10 @@ export class SensenovaAdapter extends LlmAdapter {
         }
         // 429 诊断（2026-10-27）：限流本身此前全程静默——「为什么慢了」「key 是不是
         // 被限」无从判断。每次 429 一行：模型/key/分类/本档退避；30s 级退避下量可控。
+        // 轨迹账本在此追加（换 key 的 continue 之前，保证链上每把 key 都入账）。
+        const trail429 = this.session429Trail.get(options.sessionId) ?? [];
+        if (!trail429.includes(apiKey)) trail429.push(apiKey);
+        this.session429Trail.set(options.sessionId, trail429);
         traceLog(`[dsh-sensenova-suite] 429 sid=${options.sessionId ?? "-"} model=${options.model} key=${maskKey(apiKey)} ` +
           `kind=${pool429 ? "pool" : classified.quota ? classified.kind : "rate"} ` +
           `退避=${dynamicFloorMs !== undefined ? `${Math.round(dynamicFloorMs / 1000)}s` : retryAfterMs !== undefined ? `${Math.round(retryAfterMs / 1000)}s(retry-after)` : "宿主默认"}`);
@@ -1393,7 +1413,15 @@ export class SensenovaAdapter extends LlmAdapter {
           }
         }
         if (attempt.status === 429) {
-          traceLog(`[dsh-sensenova-suite] 429 换无可换 sid=${options.sessionId ?? "-"} model=${options.model} 已试 ${rotations}/${connection.accountCount} 把，交宿主重试层（预算内自动重试）`);
+          // 文案三分（2026-10-31 他问「都试了吗，试了哪些 key 怎么不写出来」——
+          // 旧「换无可换」对 rate 类是张冠李戴：rate 是设计上不换，不是没得换）：
+          // rate=设计上不轮换（换 key 同样限速）；quota/pool 想换但池里没得换；
+          // quota/pool 且轮换开关关闭=根本没尝试换。已试列表 = 跨宿主重试累计。
+          const label = quota429 || pool429
+            ? (quotaRotation ? "429 换无可换" : "429 未轮换（quotaRotation 未开）")
+            : "429 rate 不轮换（换 key 同样限速）";
+          traceLog(`[dsh-sensenova-suite] ${label} sid=${options.sessionId ?? "-"} model=${options.model} ` +
+            `已试 ${trail429.map((key) => maskKey(key)).join("/")} 共 ${trail429.length}/${connection.accountCount} 把，交宿主重试层（预算内自动重试）`);
         }
         release();
         release = undefined;

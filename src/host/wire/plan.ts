@@ -1,48 +1,46 @@
-/** wire 协议决策（make-responses-default-wire-protocol §五 + add-anthropic-wire-protocol 降级链）。
+/** wire 协议决策（per-model-protocol-chain：全量降级链，2026-10-30 用户拍板）。
  *
- * auto 模式的降级链（用户拍板）：
+ * 每个模型恒有一条降级链（有序子集，≤3），生效链按层合成：
  *
  * ```
- * anthropic → responses → chat-completions
+ * 面板覆盖（pool.json modelProtocols[model]）
+ *   ?? wireProtocol 配置（强制值映射为单线链；auto = 档案默认）
+ *   ?? 档案默认链（facts.defaultChain：常规 an>re>chat；kimi/glm re>chat）
  * ```
  *
- * 即 Anthropic 优先；Anthropic 表达不了降 Responses；Responses 也表达不了降 Chat。
- * 降级理由与终点的对应关系见 degradeReason 的返回注释。
+ * 决策 = 沿生效链走查：第一条「模型声明支持（supportedWires 求交）且未命中
+ * 该线降级条件」的线服务。链上所有线都覆盖不了该请求时，落**全局兜底链**
+ * `["chat-completions"]`——chat 是三线中表达最全的参考方言（上游 §二原表），
+ * 无降级条件，常态下不再出现「链耗尽报错」；真报错的只剩 chat 自身失败。
  *
- * §5.2 原有四条降级 + 「省略优于传无效值」在 Responses 段保持不变：
- * - stop 非空 / 模型不支持 Responses / effort 偏离 Responses 默认档（非 none）/
- *   运行时 400 标记（§5.3 responsesUnsupported）→ 降级。
- * - effort === none → Responses 显式发 reasoning:{effort:"none"}（真关闭）。
- * - effort === responsesDefaultEffort 或未选 → Responses 不发 reasoning（默认即所需）。
+ * 旧「强制模式报错」语义（forced 命中降级条件抛错）随本模型退役：单线链
+ * 命中降级条件同样落 chat 兜底——用户已拍板「不至于一直报错」。
  *
- * Anthropic 段的降级判据（文档 #api-compatibility / #api-compatibility-thinking）：
- * - 模型不在 Anthropic 支持集（文档仅列 sensenova-6.8-flash-lite 走图片块，其余模型
- *   路由存在但能力未声明）→ 降 Responses。
- * - 带图像但模型在 Anthropic 协议下不支持图像（文档：仅 6.8 支持 image 块）→ 降 Responses。
- * - effort 偏离 Anthropic 默认档且非 none：Anthropic 有 output_config.effort 且值域
- *   完整（low/medium/high/xhigh/max），**不降级**——档位可原样兑现，这正是它优先的原因。
- * - 运行时 400 标记（anthropicUnsupported）→ 降 Responses。
- *
- * 强制模式沿用上游约定：`responses` / `anthropic` 命中各自无法表达的场景直接抛错并
- * 说明切换方法，不静默回退；`chat-completions` 仍是零回归逃生舱。
+ * 各线降级条件（未变，链走查逐线调用）：
+ * - Anthropic：模型不支持（supportedWires）/ 带图且档案不支持 / 运行时 400
+ *   标记（anthropicUnsupported）。`stop` 不是 Anthropic 的降级条件
+ *   （#api-compatibility-params 明确支持 stop_sequences）。
+ * - Responses：stop 非空 / 模型不支持 / effort 偏离 Responses 默认档（非 none，
+ *   off/minimal 归一为 none）/ 运行时 400 标记（responsesUnsupported）。
+ * - Chat：无降级条件（参考方言）。
  * @module dsh-sensenova-suite/wire/plan
  */
 import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import { contentHasImage } from '@deepseek-ai/dsh-llm';
 import { canonicalThinkingEffort } from './effort.ts';
+import { effectiveChain, GLOBAL_FALLBACK_CHAIN } from './chain.ts';
 import type { ModelFacts, WireKind } from './types.ts';
 
-/** 插件配置的四种 wire 模式（缺省 auto：Anthropic 优先，逐级降级）。 */
+/** 插件配置的四种 wire 模式（auto = 档案默认链；三个强制值 = 单线链）。 */
 export type WireProtocol = 'auto' | 'anthropic' | 'responses' | 'chat-completions';
 
 /** 决策结果附带的原因标识（供日志与测试断言）。 */
 export type WireReason =
   | 'anthropic-default'
   | 'responses-default'
-  | 'forced-chat'
-  | 'forced-anthropic'
-  | 'forced-responses'
+  | 'chat-default'
+  | 'chain-fallback'
   | 'downgrade-unsupported-model'
   | 'downgrade-image'
   | 'downgrade-stop'
@@ -52,6 +50,10 @@ export type WireReason =
 export interface WirePlan {
   wire: WireKind;
   reason: WireReason;
+  /** 本次决策实际走查的生效链（面板 400 下一跳沿它取）。 */
+  chain: readonly WireKind[];
+  /** 服务线在生效链中的位置；chat 兜底时 = chain.length（链外）。 */
+  chainIndex: number;
 }
 
 /** resolveWirePlan 的配置侧输入（SensenovaConnection 的 wire 相关字段子集）。 */
@@ -84,7 +86,7 @@ function hasImages(options: GenerateOptions): boolean {
 
 /**
  * Anthropic 段的降级判定（未命中为 undefined）。任一命中即放弃 Anthropic。
- * 返回值即降级后的终点（responses 或 chat-completions）与理由。
+ * 链走查只消费命中/未命中——返回里的终点 wire 是旧自动链的遗形，不再被读。
  */
 /**
  * Anthropic 段的降级判定（未命中为 undefined）。任一命中即放弃 Anthropic。
@@ -143,52 +145,59 @@ function responsesDegrade(
   return undefined;
 }
 
+/** 链上服务线的原因词（同一形状服务面板链与档案默认链）。 */
+function servedReason(wire: WireKind): WireReason {
+  if (wire === 'anthropic') return 'anthropic-default';
+  if (wire === 'responses') return 'responses-default';
+  return 'chat-default';
+}
+
+/**
+ * 沿生效链走查：第一条「模型声明支持且未命中该线降级条件」的线服务；
+ * 全链覆盖不了该请求 → 全局兜底 chat（用户拍板「不至于一直报错」）；
+ * 连 chat 都不在模型能力面（理论上不存在，档案全含 chat）才真正抛错。
+ */
+function walkChain(
+  options: GenerateOptions,
+  facts: ModelFacts,
+  runtime: WirePlanRuntime,
+  chain: readonly WireKind[],
+): WirePlan {
+  for (let index = 0; index < chain.length; index += 1) {
+    const wire = chain[index]!;
+    if (!facts.supportedWires.includes(wire)) continue;
+    const hit = wire === 'anthropic'
+      ? anthropicDegrade(options, facts, runtime)
+      : wire === 'responses'
+        ? responsesDegrade(options, facts, runtime)
+        : undefined; // chat：参考方言，无降级条件
+    if (hit !== undefined) continue;
+    return { wire, reason: servedReason(wire), chain, chainIndex: index };
+  }
+  if (!facts.supportedWires.includes('chat-completions')) {
+    throw new LlmError(
+      `llm-sensenova: wire chain [${chain.join(' > ')}] cannot serve model "${options.model}" (exhausted, chat not in supportedWires)；模型降级链耗尽且能力面不含 chat，无法服务`,
+      'INVALID_REQUEST',
+    );
+  }
+  // 链耗尽 → 全局兜底链（单 chat，无降级条件，恒可服务）。reason 单列为
+  // chain-fallback：它告诉读者「该模型自己的链覆盖不了这个请求」。
+  const fallback = walkChain(options, facts, runtime, GLOBAL_FALLBACK_CHAIN);
+  return { ...fallback, reason: 'chain-fallback', chainIndex: chain.length };
+}
+
 /**
  * 决定本次请求使用的 wire。
  *
- * `chat-completions` 强制模式无判定直达；`anthropic` / `responses` 强制模式命中各自
- * 降级条件时抛 LlmError，消息说明如何切换到 auto 或 chat-completions
- * （spec「强制模式报错」场景，沿用上游约定）。
+ * @param modelChain - 面板对该模型的链覆盖（pool.json modelProtocols[model]，
+ *   有序子集；undefined/空/非法 = 无覆盖，按配置与档案默认合成）。
  */
 export function resolveWirePlan(
   options: GenerateOptions,
   config: WirePlanConfig,
   facts: ModelFacts,
   runtime: WirePlanRuntime = {},
+  modelChain?: readonly unknown[],
 ): WirePlan {
-  const protocol: WireProtocol = config.wireProtocol ?? 'auto';
-  if (protocol === 'chat-completions') return { wire: 'chat-completions', reason: 'forced-chat' };
-
-  const anthropicHit = anthropicDegrade(options, facts, runtime);
-  const responsesHit = responsesDegrade(options, facts, runtime);
-
-  if (protocol === 'anthropic') {
-    if (anthropicHit !== undefined) {
-      throw new LlmError(
-        `llm-sensenova: wireProtocol "anthropic" cannot serve this request (${anthropicHit.reason})；当前请求在强制 Anthropic 模式下无法保真（${anthropicHit.reason}），请在设置中将 wireProtocol 切换为 "auto"（自动降级 Responses / Chat Completions）或 "chat-completions"`,
-        'INVALID_REQUEST',
-      );
-    }
-    return { wire: 'anthropic', reason: 'forced-anthropic' };
-  }
-
-  if (protocol === 'responses') {
-    if (responsesHit !== undefined) {
-      throw new LlmError(
-        `llm-sensenova: wireProtocol "responses" cannot serve this request (${responsesHit.reason})；当前请求在强制 Responses 模式下无法保真（${responsesHit.reason}），请在设置中将 wireProtocol 切换为 "auto"（自动降级 Chat Completions）或 "chat-completions"`,
-        'INVALID_REQUEST',
-      );
-    }
-    return { wire: 'responses', reason: 'forced-responses' };
-  }
-
-  // auto：anthropic → responses → chat-completions。
-  if (anthropicHit === undefined) return { wire: 'anthropic', reason: 'anthropic-default' };
-  if (anthropicHit.reason === 'downgrade-runtime-marked' || anthropicHit.reason === 'downgrade-unsupported-model') {
-    // 模型级不支持（协议本身不可用）：继续沿链走 Responses 的判定。
-    if (responsesHit === undefined) return { wire: 'responses', reason: 'responses-default' };
-    return { wire: 'chat-completions', reason: responsesHit.reason };
-  }
-  // 请求级降级（图像等）：目标 wire 由 anthropicDegrade 直接给出（Responses 支持图像）。
-  return { wire: anthropicHit.wire, reason: anthropicHit.reason };
+  return walkChain(options, facts, runtime, effectiveChain(config, facts, modelChain));
 }

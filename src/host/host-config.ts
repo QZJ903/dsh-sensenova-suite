@@ -57,9 +57,10 @@ export const CONFIG_DEFAULTS = Object.freeze({
    * The platform returns raw credits with no official per-model rate, so
    * these numbers are the operator's own comparison aid — the panel labels
    * them as custom/non-official and rows without a match stay unmultiplied.
-   * Shipped defaults reflect the operator's rough current rates.
+   * Shipped defaults = 2026-10-31 运营者实测（kimi 30 / glm 15 / 商汤 0.8 /
+   * deepseek 1）——初版 ×10/×20 是移植源的拍脑袋值，与实测不符，已替换。
    */
-  trendMultipliers: { "glm-5.2": 10, "kimi-k3": 20, "sensenova": 1, "deepseek": 1 },
+  trendMultipliers: { "glm-5.2": 15, "kimi-k3": 30, "sensenova": 0.8, "deepseek": 1 },
   cacheSeconds: 60,
   pollSeconds: 30,
   consoleTimeoutMs: 15_000,

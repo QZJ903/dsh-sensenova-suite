@@ -27,7 +27,8 @@
         # aid — the panel labels each hit `×N` with a "not official" note, and
         # rows without a match stay unmultiplied. Set `{}` to disable all.
         # Invalid entries (empty key / value <= 0 / non-number) are dropped.
-        trendMultipliers: { "glm-5.2": 10, "kimi-k3": 20, "sensenova": 1, "deepseek": 1 }
+        # Values = 2026-10-31 运营者实测（初版 ×10/×20 是移植源拍脑袋，不准）。
+        trendMultipliers: { "glm-5.2": 15, "kimi-k3": 30, "sensenova": 0.8, "deepseek": 1 }
         # How long the Host caches each console response, in seconds.
         cacheSeconds: 60
         # How often the panel asks the Host again, in seconds. The Host states
