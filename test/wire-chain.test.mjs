@@ -84,7 +84,7 @@ const { toResponsesInput } = await import("../src/host/wire/body-responses.ts");
         { role: "assistant", content: [{ type: "tool-call", id: "short_ok", name: "g", arguments: "{}" }] },
       ],
     };
-    const { ciInput } = toResponsesInput(ciOpts);
+    const { input: ciInput } = toResponsesInput(ciOpts); // 返回形状是 {instructions, input}——b6469b1 起解构错名，块内全部钉未在任何环境执行过
     const ciLongCall = ciInput.find((i) => i.type === "function_call" && i.name === "f");
     const ciOutput = ciInput.find((i) => i.type === "function_call_output");
     const ciShortCall = ciInput.find((i) => i.type === "function_call" && i.name === "g");
@@ -99,61 +99,123 @@ const { toResponsesInput } = await import("../src/host/wire/body-responses.ts");
     const opts = (extra = {}) => ({ model: "m", messages: [], ...extra });
     const resolve = (options, config = {}, modelChain, runtime = {}, model = "m") =>
       plan.resolveWirePlan(options, config, factsFor(model), runtime, modelChain);
-    const shape = (wire, reason, chain, chainIndex) =>
-      JSON.stringify([wire, reason, chain, chainIndex]);
+    const shape = (wire, reason, chain) =>
+      JSON.stringify([wire, reason, chain]);
 
     // 档案默认链：全模型统一 re>an>chat（2026-10-31 他拍板）起步即 responses。
+    // 须传已知模型（factsFor("m") 是未知模型、能力面只有 chat，恒落兜底）——
+    // 此钉此前未传，出生即红，被 call_id 块的 TypeError 挡住从未暴露。
     check("a standard model walks its re>an>chat default and serves responses",
-      shape(resolve(opts()).wire, resolve(opts()).reason, resolve(opts()).chain, resolve(opts()).chainIndex)
-        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"], 0),
-      JSON.stringify(resolve(opts())));
+      shape(resolve(opts(), {}, undefined, {}, "deepseek-flash").wire, resolve(opts(), {}, undefined, {}, "deepseek-flash").reason, resolve(opts(), {}, undefined, {}, "deepseek-flash").chain)
+        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"]),
+      JSON.stringify(resolve(opts(), {}, undefined, {}, "deepseek-flash")));
 
     // kimi/glm 档案默认链与标准链同形（2026-10-31 他拍板：加回 anthropic 撤销分岔，
     // 再统一为 re>an>chat）。钉「不分岔」本身。
     const kimi = resolve(opts(), {}, undefined, {}, "kimi-k3");
     check("kimi's facts default chain is the standard (anthropic restored, no fork)",
-      shape(kimi.wire, kimi.reason, kimi.chain, kimi.chainIndex)
-        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"], 0),
+      shape(kimi.wire, kimi.reason, kimi.chain)
+        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"]),
       JSON.stringify(kimi));
     const glm = resolve(opts(), {}, undefined, {}, "glm-5.2");
     check("glm's facts default chain is the standard too (no fork)",
-      shape(glm.wire, glm.reason, glm.chain, glm.chainIndex)
-        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"], 0),
+      shape(glm.wire, glm.reason, glm.chain)
+        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"]),
       JSON.stringify(glm));
 
     // 面板覆盖三层之首：单线链钉死；显式加回 anthropic 也照走。
     const pinned = resolve(opts(), {}, ["chat-completions"], {}, "kimi-k3");
     check("a panel override pins the chain (single-wire chain serves it)",
-      shape(pinned.wire, pinned.reason, pinned.chain, pinned.chainIndex)
-        === shape("chat-completions", "chat-default", ["chat-completions"], 0),
+      shape(pinned.wire, pinned.reason, pinned.chain)
+        === shape("chat-completions", "chat-default", ["chat-completions"]),
       JSON.stringify(pinned));
     const backOnAn = resolve(opts(), {}, ["anthropic"], {}, "kimi-k3");
     check("a user can add anthropic back into kimi's chain explicitly",
       backOnAn.wire === "anthropic" && backOnAn.reason === "anthropic-default",
       JSON.stringify(backOnAn));
 
-    // 走查跳过命中降级条件的线（运行时 400 标记）。
+    // 走查跳过命中降级条件的线（运行时 400 标记）——an 被跳过由 wire+chain 组合断言。
     const marked = resolve(opts(), {}, ["anthropic", "chat-completions"],
       { anthropicUnsupported: new Set(["m"]) });
     check("a runtime-marked wire is skipped inside the walk",
-      marked.wire === "chat-completions" && marked.chainIndex === 1,
+      marked.wire === "chat-completions"
+        && JSON.stringify(marked.chain) === JSON.stringify(["anthropic", "chat-completions"]),
       JSON.stringify(marked));
 
-    // 链耗尽 → chat 兜底（reason 单列 chain-fallback，chainIndex = 链长）。
+    // 链耗尽 → chat 兜底（reason 单列 chain-fallback）。
+    // 兜底时 chain = 全局兜底链（spread 覆盖）——adapter 的 400 下一跳按
+    // plan.chain.indexOf(wire) 寻址，兜底链使 chat 命中 0、无下一跳，不会同线重试。
     const exhausted = resolve(opts({ stop: ["x"] }), {}, ["responses"], {}, "glm-5.2");
     check("an exhausted chain falls back to chat with the chain-fallback reason",
-      shape(exhausted.wire, exhausted.reason, exhausted.chain, exhausted.chainIndex)
-        === shape("chat-completions", "chain-fallback", ["responses"], 1),
+      shape(exhausted.wire, exhausted.reason, exhausted.chain)
+        === shape("chat-completions", "chain-fallback", ["chat-completions"]),
       JSON.stringify(exhausted));
     const effort = resolve(opts({ reasoningEffort: "low" }), {}, ["responses"], {}, "glm-5.2");
     check("an effort deviation exhausts a responses-only chain into the chat fallback too",
       effort.wire === "chat-completions" && effort.reason === "chain-fallback",
       JSON.stringify(effort));
 
+    // 用户拍板（2026-11-01「用户选择大于协议」）：禁 disabled 的模型（glm）勾 off
+    // 时不留在 an 静默失效——显式跳过落下一线（responses 有合法关闭表达）。
+    const offSkipsAn = resolve(opts({ reasoningEffort: "off" }), {}, ["anthropic", "responses"], {}, "glm-5.2");
+    // 跳过行为由 wire+chain 断言；reason 断言服务线实值——走查只消费 hit 的
+    // 命中/未命中，downgrade 词不入返回（服务 reason 恒 servedReason，见 plan.ts）。
+    check("off on a forbid-disabled model skips anthropic entirely (user intent over pinned order)",
+      shape(offSkipsAn.wire, offSkipsAn.reason, offSkipsAn.chain)
+        === shape("responses", "responses-default", ["anthropic", "responses"]),
+      JSON.stringify(offSkipsAn));
+    // 对照：单线钉 an 一样被跳过，兜底 chat——chat 线 glm 的 off 走 reasoning_effort
+    // none（文档背书），关闭意图仍兑现。
+    const offSingleAn = resolve(opts({ reasoningEffort: "off" }), {}, ["anthropic"], {}, "glm-5.2");
+    check("off with a single-anthropic chain on a forbid-disabled model falls through to chat",
+      offSingleAn.wire === "chat-completions" && offSingleAn.reason === "chain-fallback",
+      JSON.stringify(offSingleAn));
+    // 对照：不勾 off 时同一条链照走 an——跳过只绑定 off 拼写，不影响其他档位与未选。
+    const noEffort = resolve(opts(), {}, ["anthropic", "responses"], {}, "glm-5.2");
+    check("without an off effort the same chain still serves anthropic",
+      noEffort.wire === "anthropic" && noEffort.reason === "anthropic-default",
+      JSON.stringify(noEffort));
+
+    // 拍板落地轮（2026-11-01）：并行工具结果合并为一条 user 消息（Anthropic 交替
+    // 纪律；商汤兼容层宽松度未知，按规范消除该前提——U2 审计疑似 1）。
+    const { buildAnthropicBody } = await import("../src/host/wire/body-anthropic.ts");
+    const parBody = buildAnthropicBody({
+      model: "glm-5.2",
+      messages: [
+        { role: "assistant", content: [
+          { type: "tool-call", id: "t1", name: "f", arguments: "{}" },
+          { type: "tool-call", id: "t2", name: "g", arguments: "{}" },
+        ] },
+        { role: "tool", toolCallId: "t1", content: [{ type: "text", text: "A" }] },
+        { role: "tool", toolCallId: "t2", content: [{ type: "text", text: "B" }] },
+      ],
+    }, undefined);
+    const parUsers = parBody.messages.filter((m) => m.role === "user");
+    check("parallel tool results merge into one user message (an alternation discipline)",
+      parUsers.length === 1 && Array.isArray(parUsers[0].content) && parUsers[0].content.length === 2
+        && parUsers[0].content.every((b) => b.type === "tool_result")
+        && parUsers[0].content[0].tool_use_id === "t1" && parUsers[0].content[1].tool_use_id === "t2",
+      JSON.stringify(parBody.messages));
+    // 对照：普通文本 user 消息不被并进 tool_result 消息（只合并全 tool_result 形状）。
+    const mixedBody = buildAnthropicBody({
+      model: "glm-5.2",
+      messages: [
+        { role: "assistant", content: [{ type: "tool-call", id: "t1", name: "f", arguments: "{}" }] },
+        { role: "tool", toolCallId: "t1", content: [{ type: "text", text: "A" }] },
+        { role: "user", content: [{ type: "text", text: "继续" }] },
+      ],
+    }, undefined);
+    check("a plain user message after a tool result stays separate",
+      mixedBody.messages.length === 3 && mixedBody.messages[1].role === "user"
+        && Array.isArray(mixedBody.messages[1].content) && mixedBody.messages[1].content[0].type === "tool_result"
+        && mixedBody.messages[2].role === "user" && mixedBody.messages[2].content === "继续",
+      JSON.stringify(mixedBody.messages));
+
     // 非法覆盖回落档案默认；能力门跳过链上能力外的线后兜底。
+    // 期望三线 = 2026-10-31 拍板（kimi 的 anthropic 加回，全模型统一 re>an>chat）。
     const junk = resolve(opts(), {}, ["nope", 42], {}, "kimi-k3");
     check("a junk override falls through to the facts default chain",
-      junk.wire === "responses" && JSON.stringify(junk.chain) === JSON.stringify(["responses", "chat-completions"]),
+      junk.wire === "responses" && JSON.stringify(junk.chain) === JSON.stringify(["responses", "anthropic", "chat-completions"]),
       JSON.stringify(junk));
     const gated = resolve(opts(), {}, ["anthropic"], {}, "unknown-model-x");
     check("a wire outside supportedWires is skipped, then the chat fallback serves",
@@ -163,8 +225,8 @@ const { toResponsesInput } = await import("../src/host/wire/body-responses.ts");
     // 配置层：强制值映射为单线链（auto = 档案默认，已被上面覆盖）。
     const forced = resolve(opts(), { wireProtocol: "responses" }, undefined, {}, "kimi-k3");
     check("a forced wireProtocol maps to a single-wire chain",
-      shape(forced.wire, forced.reason, forced.chain, forced.chainIndex)
-        === shape("responses", "responses-default", ["responses"], 0),
+      shape(forced.wire, forced.reason, forced.chain)
+        === shape("responses", "responses-default", ["responses"]),
       JSON.stringify(forced));
   } catch (error) {
     if (String(error?.message ?? error).includes("@deepseek-ai/dsh-llm")) {

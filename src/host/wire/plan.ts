@@ -17,8 +17,10 @@
  * 命中降级条件同样落 chat 兜底——用户已拍板「不至于一直报错」。
  *
  * 各线降级条件（未变，链走查逐线调用）：
- * - Anthropic：模型不支持（supportedWires）/ 带图且档案不支持 / 运行时 400
- *   标记（anthropicUnsupported）。`stop` 不是 Anthropic 的降级条件
+ * - Anthropic：模型不支持（supportedWires）/ 带图且档案不支持 / 关闭拼写在 an
+ *   线无表达（forbidThinkingDisabled 模型勾 off——2026-11-01 拍板「用户选择
+ *   大于协议」，显式跳过而非静默失效）/ 运行时 400 标记（anthropicUnsupported）。
+ *   `stop` 不是 Anthropic 的降级条件
  *   （#api-compatibility-params 明确支持 stop_sequences）。
  * - Responses：stop 非空 / 模型不支持 / effort 偏离 Responses 默认档（非 none，
  *   off/minimal 归一为 none）/ 运行时 400 标记（responsesUnsupported）。
@@ -43,6 +45,7 @@ export type WireReason =
   | 'chain-fallback'
   | 'downgrade-unsupported-model'
   | 'downgrade-image'
+  | 'downgrade-effort-unsupported'
   | 'downgrade-stop'
   | 'downgrade-effort'
   | 'downgrade-runtime-marked';
@@ -52,8 +55,6 @@ export interface WirePlan {
   reason: WireReason;
   /** 本次决策实际走查的生效链（面板 400 下一跳沿它取）。 */
   chain: readonly WireKind[];
-  /** 服务线在生效链中的位置；chat 兜底时 = chain.length（链外）。 */
-  chainIndex: number;
 }
 
 /** resolveWirePlan 的配置侧输入（SensenovaConnection 的 wire 相关字段子集）。 */
@@ -111,6 +112,15 @@ function anthropicDegrade(
     // /URL，png/jpeg/gif/webp）——本分支现仅剩未实测模型，降级目标按文档
     // 回到 Responses。
     return { wire: 'responses', reason: 'downgrade-image' };
+  }
+  // 用户拍板（2026-11-01「用户选择大于协议」）：禁 disabled 的模型（glm-5.2——
+  // 文档明写 thinking.type=disabled 传入即失败，output_config.effort 词表无 none，
+  // an 线没有可用的关闭表达）勾 off 时不留在 an 静默失效，显式跳过落下一线
+  // （responses/chat 都有合法关闭表达）。与 downgrade-image 同形状：线表达不了的
+  // 请求特征换线；钉链的语义本就是「优先且允许降级」。off 唯一触发——其余档位
+  // 在 an 词表内原样发。未选档位（undefined）归一后非 none，不跳。
+  if (facts.forbidThinkingDisabled && canonicalThinkingEffort(options.reasoningEffort as string | undefined) === 'none') {
+    return { wire: supportsResponses(facts) ? 'responses' : 'chat-completions', reason: 'downgrade-effort-unsupported' };
   }
   if (runtime.anthropicUnsupported?.has(options.model) === true) {
     return { wire: 'responses', reason: 'downgrade-runtime-marked' };
@@ -171,8 +181,12 @@ function walkChain(
       : wire === 'responses'
         ? responsesDegrade(options, facts, runtime)
         : undefined; // chat：参考方言，无降级条件
+    // 走查只消费 hit 的命中/未命中：hit 里的 reason 词（downgrade-*）不入返回——
+    // 服务 reason 恒为 servedReason(wire)（chain-fallback 除外，兜底分支显式覆盖）。
+    // 生产消费面只有 plan.wire 与 plan.chain（adapter），WireReason 的降级词目前
+    // 只活在类型与测试钉里（U2 审计顺带 5，2026-11-01 扩记）。
     if (hit !== undefined) continue;
-    return { wire, reason: servedReason(wire), chain, chainIndex: index };
+    return { wire, reason: servedReason(wire), chain };
   }
   if (!facts.supportedWires.includes('chat-completions')) {
     throw new LlmError(
@@ -181,9 +195,11 @@ function walkChain(
     );
   }
   // 链耗尽 → 全局兜底链（单 chat，无降级条件，恒可服务）。reason 单列为
-  // chain-fallback：它告诉读者「该模型自己的链覆盖不了这个请求」。
+  // chain-fallback：它告诉读者「该模型自己的链覆盖不了这个请求」。chain 一并
+  // 覆盖为兜底链——adapter 的 400 下一跳按 plan.chain.indexOf(wire) 寻址，
+  // 兜底链使 chat 命中 0、无下一跳，不会同线重试（U2 审计已核对 4）。
   const fallback = walkChain(options, facts, runtime, GLOBAL_FALLBACK_CHAIN);
-  return { ...fallback, reason: 'chain-fallback', chainIndex: chain.length };
+  return { ...fallback, reason: 'chain-fallback' };
 }
 
 /**

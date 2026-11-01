@@ -53,6 +53,38 @@ function argumentsOf(value: string): Record<string, unknown> {
 
 type AnthropicContentItem = Record<string, unknown>;
 
+/** content 是否为「全 tool_result 块」的数组（并行工具结果消息的唯一形状）。 */
+function isToolResultContent(content: unknown): content is Array<Record<string, unknown>> {
+  return Array.isArray(content) && content.length > 0
+    && content.every((item) => typeof item === 'object' && item !== null
+      && (item as Record<string, unknown>).type === 'tool_result');
+}
+
+/**
+ * Anthropic 要求 user/assistant 严格交替，且同一轮的多个 tool_result 应载于
+ * 同一条 user 消息（Anthropic 公开规范；商汤文档无 /v1/messages 工具章节，
+ * 兼容层宽松度未知——U2 审计疑似 1）。宿主并行工具循环逐条发 role:'tool'，
+ * 直译产出连续多条 user：一条内容里两个 tool_use、两条 user 各载一个
+ * tool_result——严格执行交替的平台会拒收。此处把相邻的全 tool_result user
+ * 消息合并成一条（多块 tool_result 并列），消除「平台必须宽松」这一前提；
+ * 普通 user 文本/图消息不含 tool_result 块，不受影响（U2 拍板落地轮，
+ * 2026-11-01）。
+ */
+function mergeAdjacentToolResults(messages: Array<{ role: string; content: unknown }>): void {
+  const merged: Array<{ role: string; content: unknown }> = [];
+  for (const message of messages) {
+    const prev = merged[merged.length - 1];
+    if (message.role === 'user' && isToolResultContent(message.content)
+        && prev !== undefined && prev.role === 'user' && isToolResultContent(prev.content)) {
+      (prev.content as Array<Record<string, unknown>>).push(...(message.content as Array<Record<string, unknown>>));
+      continue;
+    }
+    merged.push(message);
+  }
+  messages.length = 0;
+  messages.push(...merged);
+}
+
 /**
  * 把宿主消息历史映射为 Anthropic messages 数组：
  * - system/developer 消息与 options.system 合并为**顶层** system 字符串；
@@ -120,6 +152,7 @@ function toAnthropicMessages(
       messages.push({ role: 'user', content });
     }
   }
+  mergeAdjacentToolResults(messages);
   return { system: system !== '' ? system : undefined, messages };
 }
 
@@ -129,6 +162,10 @@ function toAnthropicMessages(
  * effort 出站策略（2026-10-27 按平台词表收紧，判定在 wire/effort.ts）：
  * - 「关闭思考」的任何方言拼写（面板 off / chat 方言 none / 静态表 minimal）→
  *   `thinking: {type:'disabled'}`，不发 effort（文档：关闭思考的两种表达之一）；
+ *   档案 forbidThinkingDisabled 的模型除外（glm-5.2——文档 GLM-5.2 段明写
+ *   「thinking.type 不支持 disabled，传入该值将导致请求失败」）：an 线没有可用的
+ *   关闭表达（output_config.effort 词表无 none，真机 400 原文），不发任何思考
+ *   字段 = 保持平台默认开思考；
  * - 其余档位 → `output_config: {effort}`，仅接受平台枚举的五个值，词表外
  *   一律不发（不发未知值，绝不上桌让平台打 400）；
  * - 未选档位 → 两者都不发（网关默认 enabled + effort=high，即「用模型默认」）。
@@ -148,6 +185,12 @@ export function buildAnthropicBody(
   }));
 
   const { thinkingDisabled, effortWire } = anthropicEffortOut(options.reasoningEffort as string | undefined);
+  // 禁 disabled 的模型（glm-5.2）：不发 thinking、也不发 effort（none 拼写下
+  // effortWire 本就 undefined）——此前无条件发 disabled，glm 勾 off 走 an 线必 400
+  // 并被误标 anthropicUnsupported（U2 审计 D1，2026-11-01）。2026-11-01 拍板后
+  // plan 走查已在该组合下显式跳过 an（downgrade-effort-unsupported），本判定退为
+  // 第二道防线（含未来新档案模型），两层语义一致：不发任何思考字段。
+  const sendThinkingDisabled = thinkingDisabled && !facts.forbidThinkingDisabled;
 
   // temperature：显式设置才发；kimi-k3 固定 1，出站不发（与 Chat 路径同一纪律）。
   const sendTemperature = options.temperature !== undefined && !facts.blockedSampling.includes('temperature');
@@ -164,7 +207,7 @@ export function buildAnthropicBody(
     ...(tools.length > 0 ? { tools } : {}),
     ...(sendTemperature ? { temperature: options.temperature } : {}),
     ...(options.stop !== undefined && options.stop.length > 0 ? { stop_sequences: options.stop } : {}),
-    ...(thinkingDisabled ? { thinking: { type: 'disabled' } } : {}),
+    ...(sendThinkingDisabled ? { thinking: { type: 'disabled' } } : {}),
     ...(effortWire !== undefined ? { output_config: { effort: effortWire } } : {}),
   };
 }

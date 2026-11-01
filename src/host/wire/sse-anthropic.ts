@@ -19,6 +19,7 @@
 import { LlmError, errorChain } from '@deepseek-ai/dsh-llm';
 import { ANTHROPIC_TRUNCATED_CODE } from '../llm-retry.ts';
 import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm';
+import { mapAnthropicUsage, mergeUsage } from './usage.ts';
 import { ToolCallId } from '../brand.ts';
 import { traceLog } from '../trace-log.ts';
 
@@ -48,21 +49,6 @@ function parseAnthropicLine(line: string): Record<string, unknown> | undefined {
   }
   if (!isRecord(parsed)) return undefined;
   return toString(parsed.type) === undefined ? undefined : parsed;
-}
-
-/** Anthropic usage → 宿主 TokenUsage（字段名与 Responses 不同：无 details 嵌套）。 */
-export function mapAnthropicUsage(usage: Record<string, unknown>): TokenUsage {
-  const input = toNumber(usage.input_tokens) ?? 0;
-  const output = toNumber(usage.output_tokens) ?? 0;
-  const cacheRead = toNumber(usage.cache_read_input_tokens) ?? 0;
-  const cacheWrite = toNumber(usage.cache_creation_input_tokens) ?? 0;
-  return {
-    inputTokens: Math.max(0, input - cacheRead),
-    outputTokens: output,
-    totalTokens: input + output,
-    ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
-    ...(cacheWrite > 0 ? { cacheWriteTokens: cacheWrite } : {}),
-  };
 }
 
 /** stop_reason → 宿主 FinishReason（有工具调用时优先 tool-calls）。 */
@@ -133,25 +119,6 @@ function closeAllOpen(state: AnthropicSseState): StreamChunk[] {
   return chunks;
 }
 
-/** 合并 usage（message_start 给全量，message_delta 给增量；后者覆盖前者同名字段）。 */
-function mergeUsage(state: AnthropicSseState, incoming: Record<string, unknown>): void {
-  const next = mapAnthropicUsage(incoming);
-  if (state.usage === undefined) {
-    state.usage = next;
-    return;
-  }
-  // 逐字段取新值（缺字段回落旧值）；totalTokens 由合并后的输入/输出重算，恒有定义。
-  const inputTokens = toNumber(incoming.input_tokens) !== undefined ? next.inputTokens : state.usage.inputTokens;
-  const outputTokens = toNumber(incoming.output_tokens) !== undefined ? next.outputTokens : state.usage.outputTokens;
-  state.usage = {
-    inputTokens,
-    outputTokens,
-    totalTokens: inputTokens + outputTokens,
-    ...(next.cacheReadTokens !== undefined ? { cacheReadTokens: next.cacheReadTokens } : {}),
-    ...(next.cacheWriteTokens !== undefined ? { cacheWriteTokens: next.cacheWriteTokens } : {}),
-  };
-}
-
 /** 处理一个 Anthropic 事件，返回宿主 StreamChunk 序列。 */
 function processAnthropicEvent(event: Record<string, unknown>, state: AnthropicSseState): StreamChunk[] {
   const type = toString(event.type) ?? '';
@@ -201,7 +168,8 @@ function processAnthropicEvent(event: Record<string, unknown>, state: AnthropicS
     // content_block_start 可能直接携带完整 input（罕见但规范允许）。
     if (blockType === 'tool-call') {
       const input = wire?.input;
-      const serialized = input !== undefined && JSON.stringify(input) !== '{}' ? JSON.stringify(input) : '';
+      // 只序列化对象形状：null/数组/标量不进 arguments（null 曾被 stringify 成 'null'）。
+      const serialized = input !== undefined && isRecord(input) && JSON.stringify(input) !== '{}' ? JSON.stringify(input) : '';
       if (serialized !== '') {
         block.content = serialized;
         chunks.push({
@@ -259,7 +227,7 @@ function processAnthropicEvent(event: Record<string, unknown>, state: AnthropicS
     const delta = isRecord(event.delta) ? event.delta : {};
     state.stopReason = toString(delta.stop_reason) ?? state.stopReason;
     const usage = isRecord(event.usage) ? event.usage : undefined;
-    if (usage !== undefined) mergeUsage(state, usage);
+    if (usage !== undefined) state.usage = mergeUsage(state.usage, usage);
     return chunks;
   }
 

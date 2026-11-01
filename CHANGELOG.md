@@ -1,5 +1,17 @@
 # 更新日志（Changelog）
 
+## 0.1.42（2026-11-01）
+
+- **U2 审计修复轮（协议链 wire，四批处置 + N1 真机定论，台账全终态）**：
+  - **glm 勾「关闭思考」走 an 线必 400 双层修（D1，拍板 B「用户选择大于协议」）**：`anthropicEffortOut` 对任何模型的 off/none 一律产出 `thinking:{type:'disabled'}`，而 GLM-5.2 文档明写「thinking.type 不支持 disabled，传入该值将导致请求失败」——档案 `forbidThinkingDisabled` 声明了却无消费者，400 后 glm 被误标 anthropicUnsupported、整条 an 线进程级失效。修=①`body-anthropic` 消费档案标志（禁 disabled 模型不发任何思考字段，第二道防线）；②`plan` 走查新增降级条件 `downgrade-effort-unsupported`（off+禁 disabled 显式跳过 an 落下一线——与 downgrade-image 同形状：线表达不了的请求特征换线，off 语义全链兑现）。kimi/deepseek-flash/6.8 不受影响（an 线 disabled 合法）。
+  - **an 线 usage 口径真机定论并修复（N1，探针判定 C）**：`/v1/messages` 的 `input_tokens` 是**未缓存口径**（真机三连发：118+1536=1654=全量输入，input 与 cache_read 并列，Anthropic 原生规范）——此前把 responses 的减法（OpenAI 口径 input 已含缓存）推广到 an 线是误推广，缓存热时 118−1536 为负、被 `Math.max(0,…)` 钳成 **0**（未缓存输入恒显示 0）。修=`mapAnthropicUsage` 直取 input_tokens；totalTokens=input+cacheRead+cacheWrite+output（含缓存全口径，与 chat/responses 平台 total 对齐）。三线口径自此分立注明：responses/chat 减法对（OpenAI 口径）、an 直取对（Anthropic 口径）。
+  - **mergeUsage 丢字段 + total 口径漂移（D2）**：头注声称「缺字段回落旧值」只兑现一半——message_delta（规范只带累计 output_tokens）合并后 message_start 已得的缓存读写数字被丢掉、total 重算用未缓存口径与三线漂移。修=四字段统一「incoming 带了才取新值否则沿用」+ total 全口径重算。`mergeUsage` 纯函数化 `(state, incoming) → TokenUsage`。
+  - **并行 tool_result 合并（疑似 1）**：宿主并行工具循环逐条 role:'tool' 直译成连续多条 user 消息，Anthropic 规范要求严格交替且同轮多 tool_result 载于同一条 user——商汤兼容层宽松度未知，按规范合并消除该前提（出站不再产生连续 user，两边平台都能收）。只合并「content 全为 tool_result 块」的相邻 user，普通消息不受扰。
+  - **`WirePlan` 删 `chainIndex` 死字段**：生产零消费（adapter 400 下一跳按 `plan.chain.indexOf` 寻址）、唯一读者是测试钉，按 audit 纪律删除收窄为 `{wire, reason, chain}`；兜底 spread 覆盖 chain 的「防同线重试」机制注释落到发生处。WireReason 的 downgrade 词族保留（reason 语义空间合法值，留总审与 adapter 日志接线一起裁）。
+  - **三线 usage 映射集中 + 补钉（T2/T3）**：`mapAnthropicUsage`/`mergeUsage` 从 sse-anthropic.ts 挪入零依赖的 `wire/usage.ts`，contract 新增 7 钉 peer-free 直测（此前三线 usage 零钉、an 线映射锁在 peer 可达面外）。钉构造中拒为无真机形状的合成场景（delta 单带 input 不带 cache_read）发明拆分假设。
+  - **wire-chain 块 2 整体复活（T1）**：b6469b1 新增的 call_id 钉解构错字段名（`ciInput`，实际返回 `{instructions, input}`）——TypeError 卡死全块，**其后 12 项链走查钉从未在任何环境（含 CI）执行过**；块内另有期望值漂移三处（兜底 chain 期望旧形出生即红、kimi 链漏更两线、"standard model" 钉未传模型恒落兜底）。四处全修后经临时 junction（provider-master 真实 peer）实跑 **27 钉本机历史首次全绿**。
+  - **防御与验证**：`content_block_start` 内联 input 只认对象形状（null 曾被 stringify 成 'null'）；typecheck 0 错 / contract 92 / duplication 14 / wire-chain 27 全绿；S2（目录 efforts 词表错位）经真机 catalog.json 实证销号、S3 降级存档（文档 :2886-2899 背书 assistant 历史条目概念）、N2 化解。
+
 ## 0.1.41（2026-11-01）
 
 - **U6 修复轮（目录与供应商发布链，四批处置全清单）**：

@@ -305,6 +305,55 @@ for (const model of contract.models) {
   check("归一: 未选仍为未选", canonicalThinkingEffort(undefined) === undefined);
 }
 
+// --- 三线 usage → TokenUsage 映射（U2 审计 T2/T3，2026-11-01：此前三线零钉）---
+// 减法口径的前提（input_tokens 已含 cached_tokens）是 glm /v1/responses 同 body
+// 三发实测（usage.ts 头注）；an 线为外推，真机未独立复核（U2 不可判 N1）。
+{
+  const { mapResponsesUsage, mapAnthropicUsage, mergeUsage } = await import("../src/host/wire/usage.ts");
+
+  // responses：减法 + 字段条件展开 + total 回退。
+  const r1 = mapResponsesUsage({ input_tokens: 4572, output_tokens: 64, total_tokens: 4636,
+    input_tokens_details: { cached_tokens: 4352 }, output_tokens_details: { reasoning_tokens: 50 } });
+  check("responses usage: input 减缓存读、total 直取平台值（含缓存口径）",
+    r1.inputTokens === 220 && r1.outputTokens === 64 && r1.totalTokens === 4636
+      && r1.cacheReadTokens === 4352 && r1.reasoningTokens === 50, JSON.stringify(r1));
+  const r2 = mapResponsesUsage({ input_tokens: 100, output_tokens: 10, total_tokens: 0 });
+  check("responses usage: total 缺失回退原始 input+output（与平台口径同含缓存）",
+    r2.totalTokens === 110 && r2.cacheReadTokens === undefined, JSON.stringify(r2));
+
+  // anthropic：无 details 嵌套；input_tokens 是未缓存口径（2026-11-01 真机探针
+  // 判定 C：input 与 cache_read 并列、118+1536=1654=全量输入）——直取不减；
+  // total=全口径 input+cacheRead+cacheWrite+output，与 chat/responses 平台 total 对齐。
+  const a1 = mapAnthropicUsage({ input_tokens: 110, output_tokens: 20,
+    cache_read_input_tokens: 60, cache_creation_input_tokens: 5 });
+  check("anthropic usage: input 直取（未缓存口径）、total=全口径（含缓存读写）",
+    a1.inputTokens === 110 && a1.totalTokens === 195 && a1.cacheReadTokens === 60
+      && a1.cacheWriteTokens === 5, JSON.stringify(a1));
+  const a2 = mapAnthropicUsage({ input_tokens: 10, output_tokens: 5 });
+  check("anthropic usage: 无缓存字段不展开、total=10+5",
+    a2.inputTokens === 10 && a2.totalTokens === 15 && a2.cacheReadTokens === undefined
+      && a2.cacheWriteTokens === undefined, JSON.stringify(a2));
+
+  // mergeUsage：message_start 全量 + message_delta 只带 output_tokens（规范常态）——
+  // 修复前 cacheRead 丢失、total 漂成未缓存口径（U2 审计 D2）。
+  const start = mapAnthropicUsage({ input_tokens: 110, output_tokens: 0, cache_read_input_tokens: 60 });
+  const merged = mergeUsage(start, { output_tokens: 200 });
+  check("mergeUsage: delta 只带 output——input/cacheRead 沿用、total 与首帧同口径（全口径）",
+    merged.inputTokens === 110 && merged.outputTokens === 200 && merged.cacheReadTokens === 60
+      && merged.totalTokens === 370, JSON.stringify(merged));
+  // delta 带新 input 时成对带 cache_read（刷新语义完全确定）。单带 input 不带
+  // cache 的合成形状语义未定义（真机 delta 不带 input——规范只带 output 累计），
+  // 不为它发明拆分假设、也不钉死现行为。
+  check("mergeUsage: delta 成对带 input+cache_read——直取新值、total 全口径",
+    JSON.stringify(mergeUsage(start, { input_tokens: 210, cache_read_input_tokens: 60, output_tokens: 200 }))
+      === JSON.stringify({ inputTokens: 210, outputTokens: 200, totalTokens: 470, cacheReadTokens: 60 }),
+    JSON.stringify(mergeUsage(start, { input_tokens: 210, cache_read_input_tokens: 60, output_tokens: 200 })));
+  check("mergeUsage: 首帧缺席时全量直取（与 mapAnthropicUsage 同形）",
+    JSON.stringify(mergeUsage(undefined, { input_tokens: 110, output_tokens: 20, cache_read_input_tokens: 60, cache_creation_input_tokens: 5 }))
+      === JSON.stringify(a1),
+    JSON.stringify(mergeUsage(undefined, { input_tokens: 110, output_tokens: 20, cache_read_input_tokens: 60, cache_creation_input_tokens: 5 })));
+}
+
 console.log(JSON.stringify(results, null, 2));
 const failed = results.filter((r) => !r.pass);
 if (failed.length > 0) {
