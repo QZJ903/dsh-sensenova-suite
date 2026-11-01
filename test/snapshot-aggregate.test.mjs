@@ -631,5 +631,87 @@ function harness({ stateOverrides = {}, published = [], publishResult = { ok: tr
     JSON.stringify(fastIds));
 }
 
+// === L. a catalog shape drift must not wipe the stored last-good catalogue ====
+// A 200 whose body carries no `data` array used to be read as an EMPTY
+// catalogue: a signature mismatch, so `replace([], …)` overwrote catalog.json
+// with nothing (the restart seed inherits the wipe) and the panel went blank
+// until the drift healed. `fetchModelCatalog` now throws on that shape — the
+// same posture the registered adapter's own parser takes — so the poll reads
+// "no catalogue this poll": nothing written, nothing published. (A legitimate
+// empty answer is `data: []`, an ARRAY, which still parses.)
+{
+  const seeded = {
+    entries: [{ id: "glm-5.2" }, { id: "glm-4.6" }],
+    enabledIds: [],
+    unavailableIds: [],
+    signature: catalogSignature([{ id: "glm-5.2" }, { id: "glm-4.6" }], []),
+    quotaSignature: ""
+  };
+  const replaceCalls = [];
+  const { params, published } = harness({ apiKey: "sk-test", replaceCalls, stateOverrides: seeded });
+  const net = stubFetch({
+    "pool-usage": HEALTHY_POOL,
+    "credit-usage-trend": TREND_OK,
+    "/v1/models": { object: "200 without a data array" }
+  });
+  try {
+    await buildSnapshotBody(params);
+  } finally {
+    net.restore();
+  }
+  check("L1 a data-less /v1/models body writes nothing and publishes nothing",
+    replaceCalls.length === 0 && published.length === 0,
+    JSON.stringify({ replaceCalls: replaceCalls.length, published: published.length }));
+}
+
+// === M. a failed catalogue publish must not present the unregistered offer ====
+// (U6 ledger 顺带2): `offered = catalog` unconditionally quoted the fetched
+// catalogue even when its publish FAILED — the roster and counts described
+// models no adapter was serving. A REGISTRATION failure rolls the publisher's
+// fields back to the previous pair; the poll now quotes THOSE on a failed
+// publish (a build failure keeps the new fields by design — saved intent —
+// and is surfaced through providerError either way).
+{
+  const seeded = {
+    entries: [{ id: "old-m" }],
+    enabledIds: [],
+    unavailableIds: [],
+    signature: catalogSignature([{ id: "old-m" }], []),
+    quotaSignature: ""
+  };
+  const { params, state } = harness({ apiKey: "sk-test", stateOverrides: seeded, publishResult: { ok: false, error: "register boom" } });
+  // Make the stub mirror a REGISTRATION failure: it does NOT adopt the new
+  // entries (the real publisher's swapRegistration rolls them back).
+  const realPublish = params.publisher.publish;
+  params.publisher.publish = async (entries, enabledIds, unavailable) => {
+    const r = await realPublish(entries, enabledIds, unavailable);
+    state.entries = seeded.entries;
+    state.enabledIds = seeded.enabledIds;
+    state.unavailableIds = seeded.unavailableIds;
+    // Mirror the real failure path's error surfacing (resolveRegistrationService
+    // / swapRegistration write state.error; the snapshot's llm block reads it).
+    state.error = "register boom";
+    return r;
+  };
+  const net = stubFetch({
+    "pool-usage": HEALTHY_POOL,
+    "credit-usage-trend": TREND_OK,
+    "/v1/models": { data: [{ id: "new-m" }] }
+  });
+  let body;
+  try {
+    body = await buildSnapshotBody(params);
+  } finally {
+    net.restore();
+  }
+  check("M1 a failed catalogue publish keeps the roster on the serving pair",
+    JSON.stringify(body.llm.models.map((m) => m.id)) === JSON.stringify(["old-m"]) &&
+      body.llm.modelCount === 1,
+    JSON.stringify({ ids: body.llm.models.map((m) => m.id), count: body.llm.modelCount }));
+  check("M2 the failure still rides the llm block (registered=false)",
+    body.llm.providerRegistered === false && body.llm.providerError !== undefined,
+    JSON.stringify({ registered: body.llm.providerRegistered, err: body.llm.providerError }));
+}
+
 // --- report ----------------------------------------------------------------
 finishVerbose({ suite: "snapshot-aggregate.test.mjs" });

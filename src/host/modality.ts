@@ -7,7 +7,7 @@
  *   - `llm-models.ts` `isChatModel` (PERMISSIVE): a missing `output_modalities`
  *     reads as chat, so a field the platform never sent does not vanish from
  *     the picker;
- *   - `the removed draw module` `isImageGenModel` (STRICT): a missing `output_modalities` reads
+ *   - the draw-side predicate `isImageGenModel` (STRICT): a missing `output_modalities` reads
  *     as "not a draw model", so a wrong guess never sends the agent's request
  *     to a model that cannot answer.
  *

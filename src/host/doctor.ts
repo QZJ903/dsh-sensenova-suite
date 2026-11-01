@@ -223,11 +223,6 @@ async function listProfiles(stateRoot: string): Promise<string[]> {
  *     no models and has no way to tell "off by default" from "broken". Naming
  *     it turns the most common false alarm into a one-line answer.
  *
- *   `tool-or-model-missing` — draw is on yet no model was ever chosen AND no
- *     catalog was stored, i.e. the tool has nothing to call. (Draw tools mount
- *     only on the NEXT Host start, so "on" here says nothing about whether the
- *     agent has it — that half is in TROUBLESHOOTING B3.)
- *
  *   `quota-empty` — the catalog is absent or empty while a switch is on: the
  *     key was stored but the model list never arrived, which is what "额度那栏
  *     一直是空的" usually turns out to be when credentials are fine.

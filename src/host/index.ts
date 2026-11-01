@@ -352,9 +352,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     panelSwitch: () => providerStore.enabled().catch(() => null),
     loadAdapterModule,
     getLlm: (service: string) => getService(service),
-    resolveApiKey,
-    // The Host's emitter, handed over RAW and unwrapped. Both publishers accept
-    // an absent one and route it to `publish-core`'s `emitAdaptersUpdated`,
+    // The Host's emitter, handed over RAW and unwrapped. The publisher accepts
+    // an absent one and routes it to `publish-core`'s `emitAdaptersUpdated`,
     // which is the single place that tolerates a missing or refusing emitter.
     // This module used to wrap it in its own `try { ctx.emit?.(event) } catch {}`
     // — one of three layers doing one job, and the two upstream of it could
@@ -565,8 +564,9 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     logger: ctx.logger,
     // The background provider refresher's handle (review #1b): a SLOT like
     // slots — null = nothing armed; `startSideEffects`
-    // arms it when `providerRefreshMinutes > 0` AND the effective provider
-    // switch is on, and `teardown` closes the interval.
+    // arms it when `providerRefreshMinutes > 0` (the effective provider switch
+    // is re-read per tick — off means every tick no-ops), and `teardown` closes
+    // the interval.
     providerRefresh: { current: null },
     // 额度驱动的池格写点（2026-10-31）：pools 是 **console 登录账号** 的 token
     // plan 池，只对该账号自己的 key 有发言权。本插件目前拿不到「console 当前

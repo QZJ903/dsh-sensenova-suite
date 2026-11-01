@@ -6,9 +6,10 @@
  *   backoff) is assembled inline at `adapter.ts` `providerRetryPolicy` — the
  *   former `buildRetryPolicyConfig` had no production reader and had drifted
  *   from that call site, so it was removed (2026-10-31).
- * - `llm-models.js`: `exhaustedModelIds` (pool -> blocked model set),
- *   `buildDescriptors` excluding blocked models, and `rosterWithAvailability`
- *   (the panel's self-identifying roster).
+ * - `llm-models.js`: `exhaustedModelIds` (pool -> blocked model set) and
+ *   `rosterWithAvailability` (the panel's self-identifying roster; the
+ *   picker-offer exclusion the removed `buildDescriptors` pinned lives in the
+ *   adapter's `catalogFilter` seam and the snapshot's `offered` counts).
  *
  * Nothing here imports a Host peer, so the policy decisions stay covered on a
  * clean checkout. The peer-resolved integration (resolveRetryPolicy against
@@ -22,7 +23,6 @@ import {
 import {
   exhaustedModelIds,
   drainedPoolsWithoutModels,
-  buildDescriptors,
   rosterWithAvailability,
   supportedThinkingLevels
 } from "../src/host/llm-models.ts";
@@ -200,37 +200,6 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
 }
 
-// --- 3. buildDescriptors excludes quota-exhausted models -------------------
-{
-  try {
-    const entries = [
-      { id: "m1" },
-      { id: "m2" },
-      { id: "m3" },
-      { id: "gen", output_modalities: ["image"] }
-    ];
-    const all = buildDescriptors(entries, { baseUrl: BASE_URL }).map((d) => d.id);
-    check("baseline buildDescriptors offers every chat model, skips image-generation",
-      JSON.stringify(all) === JSON.stringify(["m1", "m2", "m3"]), JSON.stringify(all));
-
-    const blocked = buildDescriptors(entries, { baseUrl: BASE_URL, unavailableModelIds: ["m2"] }).map((d) => d.id);
-    check("buildDescriptors drops an unavailable model from the picker offer",
-      JSON.stringify(blocked) === JSON.stringify(["m1", "m3"]), JSON.stringify(blocked));
-
-    const allowBlocked = buildDescriptors(entries, {
-      baseUrl: BASE_URL, enabledIds: ["m1", "m2"], unavailableModelIds: ["m2"]
-    }).map((d) => d.id);
-    check("unavailableModelIds composes with the enabledIds allow-list (m2 dropped even though allowed)",
-      JSON.stringify(allowBlocked) === JSON.stringify(["m1"]), JSON.stringify(allowBlocked));
-
-    const implicit = buildDescriptors(entries, { baseUrl: BASE_URL }).map((d) => d.id);
-    check("omitting unavailableModelIds does not drop anything extra",
-      JSON.stringify(implicit) === JSON.stringify(["m1", "m2", "m3"]));
-  } catch (error) {
-    fail("buildDescriptors exclusion", error);
-  }
-}
-
 // --- 4. rosterWithAvailability: the panel's self-identifying roster -------
 {
   try {
@@ -297,17 +266,20 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("a missing pools array yields available rows without throwing",
       safe.length === 2 && safe.every((r) => r.available === true));
 
-    // Parity: the roster enumerates EVERY chat model AND image model (including
-    // quota-exhausted, so the panel can show them greyed and the image picker can
-    // list them); the picker (buildDescriptors) offers that same chat set MINUS
-    // the exhausted ids — the two must never disagree about which models exist.
+    // Parity: the roster enumerates EVERY chat model (including quota-exhausted,
+    // so the panel can show them greyed) with the exhausted one flagged — the
+    // PICKER-side exclusion of those ids lives in the adapter's `catalogFilter`
+    // seam (available:false here is the same judgment, one source:
+    // exhaustedModelIds).
     const rosterIds = roster.map((r) => r.id);
-    const built = buildDescriptors(entries, { baseUrl: BASE_URL, unavailableModelIds: ["m2"] }).map((d) => d.id);
     check("roster enumerates every chat model (incl. quota-exhausted; image models stay out)",
       JSON.stringify(rosterIds) === JSON.stringify(["m1", "m2"]), JSON.stringify(rosterIds));
-    check("the picker offers the chat models minus the quota-exhausted ids",
-      JSON.stringify(built) === JSON.stringify(["m1"]),
-      `${JSON.stringify(built)} vs ${JSON.stringify(["m1"])}`);
+    const greyed = rosterWithAvailability(entries, {
+      pools: [{ id: "p", modelIds: ["m2"], window5h: { limit: 10, remaining: 0, resetAt: 1 }, window7d: { limit: 10, remaining: 10, resetAt: 2 } }]
+    }).find((r) => r.id === "m2");
+    check("the quota-exhausted row reads available:false (the picker drops it off this same set)",
+      greyed?.available === false && greyed?.quotaExhausted === true,
+      JSON.stringify(greyed));
   } catch (error) {
     fail("rosterWithAvailability", error);
   }

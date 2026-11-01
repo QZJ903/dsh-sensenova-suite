@@ -61,10 +61,11 @@ export function startSideEffects(_ctx: { get?: (n: string) => unknown; [key: str
   // panel's poll used to be the ONLY refresher of the catalog/quota state a
   // REGISTERED provider keeps serving — while the panel lives and dies with
   // the browser tab. This effect arms the same aggregate engine on a slow
-  // cadence (config `providerRefreshMinutes`, default 15, 0 = off) whenever
-  // the EFFECTIVE provider switch is on; every tick re-reads the switch, so an
-  // opt-in Host that never registers a provider runs no aggregate at all. The
-  // handle lives in the `providerRefresh` slot and `teardown` closes it.
+  // cadence (config `providerRefreshMinutes`, default 15, 0 = off); arming
+  // keys on the cadence ALONE — the EFFECTIVE provider switch is re-read
+  // inside every tick, so an off Host's ticks do literally nothing (no console
+  // probe, no aggregate). The handle lives in the `providerRefresh` slot and
+  // `teardown` closes it.
   effects.add("provider-refresh", async () => {
     if (settings.providerRefreshMinutes <= 0) return;
     const handle = armProviderRefresher(wiring, settings.providerRefreshMinutes);

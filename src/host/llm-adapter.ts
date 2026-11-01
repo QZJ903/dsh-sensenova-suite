@@ -43,13 +43,16 @@ export interface PoolFacade {
 /**
  * Build the factory the publish chain calls (`createSensenovaAdapter`).
  *
- * The publish chain hands `{ entries, enabledIds, baseUrl, resolveApiKey, get,
+ * The publish chain hands `{ entries, enabledIds, baseUrl,
  * unavailableModelIds, maxTokensOverrides }`; with the wire adapter the
  * catalog is the adapter's own (`fetchCatalog` → GET {apiBase}/models), so
  * `entries` is unused and the allow-list / quota-mark semantics ride the
- * `catalogFilter` seam instead. `resolveApiKey` (the panel's single-key
- * resolver) is superseded by the pool — the panel key is the pool's FIRST
- * slot, configured by `index.ts`, not passed through here.
+ * `catalogFilter` seam instead. The old `resolveApiKey`/`get` build args are
+ * GONE (2026-10-31 cleanup): the key is resolved per request by the pool and
+ * services come from the Host, so the args had no reader. `maxTokensOverrides`
+ * IS live: it rides the adapter deps and resolveModel resolves the request
+ * ceiling from it (`maxTokensForId`, override > catalogue figure — the same
+ * order the panel roster quotes).
  *
  * @param {PoolFacade} pool - the orchestrator facade from `index.ts`.
  * @returns {(args: object) => Promise<{adapter: unknown, providerIds: string[]}>}
@@ -61,13 +64,20 @@ export function createAdapterFactory(pool: PoolFacade) {
     baseUrl,
     enabledIds,
     unavailableModelIds,
+    maxTokensOverrides,
   }: {
     entries?: unknown;
     enabledIds?: unknown;
     baseUrl: string;
-    resolveApiKey?: () => Promise<string>;
-    get?: (service: string) => unknown;
     unavailableModelIds?: string[];
+    /**
+     * `{ "<model id>": ceiling }` — the deployment's per-model output ceiling
+     * (settings row `maxTokensOverrides`, sanitized at the config seam).
+     * resolveModel consults it BEFORE the catalogue's own figure via
+     * `llm-models.maxTokensForId` — the SAME order the panel roster quotes, so
+     * the displayed 「最大输出」 and the wire's `defaultMaxTokens` cannot
+     * disagree. Absent/empty = the catalogue is authoritative.
+     */
     maxTokensOverrides?: Record<string, number>;
   }): Promise<{ adapter: unknown; providerIds: string[] }> {
     const apiBase = typeof baseUrl === "string" && baseUrl !== "" ? baseUrl : "https://token.sensenova.cn/v1";
@@ -158,6 +168,10 @@ export function createAdapterFactory(pool: PoolFacade) {
       protocolOverrides: () => pool.protocolOverrides(),
       // 每模型可用思考档位（面板"思考档位"勾选；存 pool.json thinking 分区）。
       thinkingOverrides: () => pool.thinkingOverrides(),
+      // 每模型最大输出天花板（settings 行 maxTokensOverrides，文档天花板覆盖
+      // 滞后目录）：resolveModel 经 maxTokensForId 以「override > 目录值」现算
+      // defaultMaxTokens——与面板「最大输出」同一判据，读到的数字即请求上限。
+      maxTokensOverrides: () => maxTokensOverrides ?? null,
     });
     // accountCount 的初值只在构造期用一次（上面的 IIFE 每请求重读）。
     void accountCount;

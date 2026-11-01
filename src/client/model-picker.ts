@@ -104,7 +104,7 @@ const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
         rateTitle: tt("llm.rosterRateTitle"),
         // A badge marks a NOTABLE state: image input is the exception worth
         // quoting, and `quota exhausted` says why a ticked row still will
-        // not show up in the DSH picker (the buildDescriptors parity rule).
+        // not show up in the DSH picker (the adapter catalogFilter parity rule).
         badges: [
           model?.quotaExhausted === true
             ? h("span", { key: "exhausted", style: { ...S.modelBadge, color: "var(--dsw-alias-state-error-primary)" } }, tt("llm.rosterExhausted"))

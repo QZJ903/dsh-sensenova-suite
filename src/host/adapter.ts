@@ -40,16 +40,16 @@ import { shouldRotateUnclassified } from './key-health.ts';
 import { retryableCodes, ANTHROPIC_TRUNCATED_CODE } from './llm-retry.ts';
 import { MODELS_TIMEOUT_MS, CATALOG_FAILURE_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
-import { KNOWN_UNROUTABLE_MODELS } from './llm-models.ts';
+import { KNOWN_UNROUTABLE_MODELS, CONTEXT_WINDOW_FIELDS, MAX_OUTPUT_FIELDS, FALLBACK_CONTEXT_WINDOW, maxTokensForId } from './llm-models.ts';
 import { IMAGE_INPUT_MODALITIES, inputModalitiesFor } from './modality.ts';
 import { traceLog } from './trace-log.ts';
 import { maskKey } from './util.ts';
 
 /**
- * SenseNova 目录通常不披露上下文字段，这里用 131072 作为合理默认
- * （DeepSeek 系列与 SenseNova 常见模型窗口）；目录有字段时优先采用。
+ * 目录缺上下文字段时的兜底窗（131072）移到 llm-models.FALLBACK_CONTEXT_WINDOW：
+ * 面板 badge 与 resolveModel 引用同一常量（D1——两处各写一个数字曾分叉
+ * 128k/131072），本文件经 import 使用。
  */
-const DEFAULT_CONTEXT_WINDOW = 131_072;
 /**
  * 提交给 provider 重试层的延迟上限（毫秒）：本地退避与非配额 429 的
  * Retry-After 均受此约束，同时作为重试策略退避单次上限。
@@ -157,6 +157,14 @@ export interface SensenovaAdapterDeps {
    * 即生效（不烘焙进目录缓存，无需重启）。缺省 undefined = 目录词表。
    */
   thinkingOverrides?: () => Record<string, string[]>;
+  /**
+   * 每模型最大输出天花板覆盖（dsh-sensenova-suite 扩展点，可选）：settings 行
+   * `maxTokensOverrides`（{ modelId → ceiling }，文档天花板覆盖滞后的目录）。
+   * 在 resolveModel 经 llm-models.maxTokensForId 以「override > 目录申报值」
+   * 现算 defaultMaxTokens——与面板「最大输出」同一判据同一份，读到的数字即
+   * 请求携带的上限。缺省 undefined = 目录申报值（未申报则不申报）。
+   */
+  maxTokensOverrides?: () => Record<string, number> | null | undefined;
   fetchImpl?: typeof fetch;
   /**
    * 按请求解析 key（dsh-sensenova-suite 扩展点，可选）：与 resolveApiKey 不同，
@@ -250,12 +258,15 @@ function firstPositiveNumber(raw: Record<string, unknown>, keys: readonly string
 }
 
 function firstContextField(raw: Record<string, unknown>): number | undefined {
-  return firstPositiveNumber(raw, ['context_length', 'context_window', 'max_context_length', 'contextLength']);
+  // 拼写表与面板投影共用一份（llm-models.CONTEXT_WINDOW_FIELDS，同序）——
+  // 同一事实一份实现一个优先序（D1）。
+  return firstPositiveNumber(raw, CONTEXT_WINDOW_FIELDS);
 }
 
 function firstMaxOutputField(raw: Record<string, unknown>): number | undefined {
-  // max_output_length 是 SenseNova /models 目录的实际字段名，置首优先；OpenAI 风格字段保留兜底。
-  return firstPositiveNumber(raw, ['max_output_length', 'max_tokens', 'max_output_tokens', 'max_completion_tokens', 'maxTokens', 'maxOutputTokens', 'maxCompletionTokens']);
+  // max_output_length 是 SenseNova /models 目录的实际字段名，置首优先；
+  // OpenAI 风格字段保留兜底。拼写表与面板投影共用（llm-models.MAX_OUTPUT_FIELDS）。
+  return firstPositiveNumber(raw, MAX_OUTPUT_FIELDS);
 }
 
 /** 读取目录中的 effort 词表字段；返回字符串数组或 undefined（无明确词表）。 */
@@ -1142,8 +1153,15 @@ export class SensenovaAdapter extends LlmAdapter {
       model,
       this.deps.thinkingOverrides?.(),
     );
-    // SenseNova 目录若无上下文字段，用 131072 作为合理默认（见顶部常量注释）。
-    const contextWindow = entry?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    // SenseNova 目录若无上下文字段，用 131072 作为合理默认（面板 badge 引同一常量）。
+    const contextWindow = entry?.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
+    // 「最大输出」天花板 = override（按模型 id）> 目录申报值——判据与面板同一份
+    // （llm-models.maxTokensForId）：面板「最大输出」读到的数字即这里申报的
+    // defaultMaxTokens（D1 承诺恢复：the number you read is the number the
+    // request sends）。override 可抬高目录低报/未申报的模型（文档天花板 >
+    // 目录探针值，2026-10-26 拍板以文档为准）；无 override 且目录未申报则
+    // 不申报，宿主 defaultMaxTokens ?? 32768 兜底。
+    const maxTokens = maxTokensForId(model, entry?.maxOutputTokens, this.deps.maxTokensOverrides?.());
     // 申报跟「可看图」勾选集走（同 listModels）；旧 `?? ['text']` 兜底是宿主
     // resolveModelInfo 路径剥图的同一扳机，未勾选一律不申报。
     const checked = this.deps.visionModelIds?.().includes(model) === true;
@@ -1153,7 +1171,7 @@ export class SensenovaAdapter extends LlmAdapter {
       name: entry?.name ?? displayNameFor(model),
       ...(checked ? { inputModalities: IMAGE_INPUT_MODALITIES } : {}),
       context: { contextWindow },
-      ...(entry?.maxOutputTokens !== undefined ? { defaultMaxTokens: entry.maxOutputTokens } : {}),
+      ...(maxTokens !== undefined ? { defaultMaxTokens: maxTokens } : {}),
       ...(entry?.reasoning !== undefined ? { reasoning: entry.reasoning } : {}),
     };
   }

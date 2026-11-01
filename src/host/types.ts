@@ -58,8 +58,6 @@ export interface ProviderPublisherDeps {
   loadAdapterModule?: () => Promise<{ createSensenovaAdapter: (...args: any[]) => any }>;
   /** Resolve the registered LLM instance. */
   getLlm?: (service: string) => any;
-  /** Resolve the API key from the credentials service. */
-  resolveApiKey?: () => Promise<string>;
   /** Cordis event emitter. */
   emit?: (event: string) => void;
   /** Cordis logger (loose: peer has no declarations here). */
@@ -78,28 +76,6 @@ export interface StoreOptions {
   dir?: string;
   /** `ctx.logger`, for the ADR-006 write-side version-guard degrade signal. */
   logger?: { warn?: (message: string) => void };
-}
-
-/** A provider/adapter configuration object. */
-export interface AdapterConfig {
-  providerId?: string;
-  enabledIds?: string[];
-  unavailableModelIds?: string[];
-  baseUrl?: string;
-  /**
-   * `{ "<model id>": ceiling }` — the operator's per-model output ceiling,
-   * already sanitized by `host-config.resolveSettings`. `llm-models.maxTokensFor`
-   * consults it BEFORE the catalogue's own figure and the panel roster quotes
-   * that same function, so the displayed "最大输出" and the `max_tokens` on the
-   * wire cannot disagree. Absent/empty = the catalogue is authoritative.
-   */
-  maxTokensOverrides?: Record<string, number>;
-  /**
-   * `{ "<model id>": ["off","low",...] }` — the user-selected per-model 思考
-   * 档位 (from pool.json `thinking`). `thinkingLevelMapFor` builds the
-   * descriptor's map from it, so the DSH 对话界面的可选思考档位 = 用户勾选集.
-   */
-  thinkingOverrides?: Record<string, string[]>;
 }
 
 /** Options for the JWKS cache / JWE sealer. */
@@ -162,8 +138,14 @@ export interface Wiring {
   publisher: ReturnType<typeof import("./provider-publish.ts").createProviderPublisher>;
   /** The publisher's live registration state (shared reference). */
   providerState: import("./provider-publish.ts").ProviderPublisherState;
-  /** `(entries, enabledIds, unavailableIds) => publisher.publish` with rollback. */
-  publishProvider: (entries: unknown[], enabledIds: string[], unavailableModelIds?: string[]) => Promise<unknown>;
+  /**
+   * `(entries, enabledIds, unavailableIds) => publisher.publish` with rollback.
+   * The result is TYPED, not `unknown`, on purpose: a caller that reads the
+   * publish outcome (the models route gates its signature sync on `ok`) cannot
+   * do so off an unreadable shape — the same lesson the snapshot context's
+   * `publisher` field records (U1 audit, Wiring 缝).
+   */
+  publishProvider: (entries: unknown[], enabledIds: string[], unavailableModelIds?: string[]) => Promise<import("./provider-publish.ts").PublishResult>;
   /** Release the registered provider pair (adapter + directory). */
   releaseProvider: () => void;
   /** Resolve the live `sk-` key per request. */

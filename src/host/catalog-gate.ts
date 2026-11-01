@@ -34,7 +34,10 @@ export const CATALOG_FAILURE_RETRY_MS = 60_000;
 
 /** 判定输入的实例侧状态（adapter 实例字段的原样投影）。 */
 export interface CatalogGateState {
-  /** 现有缓存条目数（0 = 本实例从未成功过）。 */
+  /**
+   * 现有缓存条目数（0 = 没有可服务的缓存条目：本实例从未成功，或成功抓到过
+   * 空目录——两种状态在退避期内走同两条降级路）。
+   */
   cachedEntries: number;
   /** 上次成功时刻（epoch ms；0 = 从未成功）。 */
   fetchedAt: number;

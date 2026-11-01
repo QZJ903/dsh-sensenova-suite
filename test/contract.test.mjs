@@ -19,11 +19,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  toPiDescriptor,
-  buildDescriptors,
   isChatModel,
   exhaustedModelIds,
   contextWindowOf,
+  rosterWithAvailability,
   thinkingLevelMapFor,
   LLM_PROVIDER_ID,
   KNOWN_UNROUTABLE_MODELS
@@ -67,33 +66,16 @@ function entryFor(model) {
   };
 }
 
-// --- 2. toPiDescriptor against the frozen contract ------------------------
+// --- 2. the thinking map against the frozen contract ----------------------
+// (The pi-ai descriptor build this section once pinned was removed 2026-10-31
+// with the wire adapter serving listModels directly; the per-model DIALECT
+// decisions survive in thinkingLevelMapFor and are pinned here per contract
+// model.)
 for (const model of contract.models) {
   if (model.chat !== true) continue; // 404/403 models are asserted in §3
   try {
     const entry = entryFor(model);
-    const descriptor = toPiDescriptor(entry, { baseUrl });
-    check(`${model.id} descriptor.id is the catalog id`, descriptor.id === model.id, descriptor.id);
-    check(`${model.id} descriptor pins max_tokens field`,
-      descriptor.compat?.maxTokensField === "max_tokens" && descriptor.compat?.supportsDeveloperRole === false,
-      JSON.stringify(descriptor.compat));
-    // The 2026-10-02 ceiling decision: the harness fills an UNDECLARED
-    // maxTokens with 32768, so a catalogue-stated ceiling (flash-lite: 65536,
-    // probed) must be DECLARED as maxTokens, and a catalogue entry without a
-    // ceiling keeps the field absent (never a guessed number).
-    if (model.maxOutputLength !== undefined) {
-      check(`${model.id} descriptor declares the catalogue ceiling as maxTokens`,
-        descriptor.maxTokens === model.maxOutputLength,
-        `got ${String(descriptor.maxTokens)}`);
-    } else {
-      check(`${model.id} descriptor leaves maxTokens undeclared (no catalogue ceiling)`,
-        !Object.prototype.hasOwnProperty.call(descriptor, "maxTokens"),
-        JSON.stringify(descriptor));
-    }
-    check(`${model.id} descriptor declares reasoning + thinkingLevelMap`,
-      descriptor.reasoning === true && typeof descriptor.thinkingLevelMap === "object",
-      JSON.stringify({ reasoning: descriptor.reasoning }));
-    const map = thinkingLevelMapFor(entry);
+const map = thinkingLevelMapFor(entry);
     check(`${model.id} thinkingLevelMap.off === "none" (platform off spelling)`,
       map.off === "none", JSON.stringify(map));
     // reasoning_effort dialect: 2026-10-26 用户拍板——只含 off + low + medium +
@@ -108,18 +90,7 @@ for (const model of contract.models) {
       map.medium === "medium", JSON.stringify(map.medium));
     check(`${model.id} thinkingLevelMap.minimal is undefined (2026-10-26: removed)`,
       map.minimal === undefined, JSON.stringify(map.minimal));
-    // vision: the descriptor's input array mirrors the contract's
-    // visionInput flag (structured `input_modalities` wins).
-    const expectedInput = model.visionInput ? ["text", "image"] : ["text"];
-    check(`${model.id} descriptor.input matches contract visionInput`,
-      JSON.stringify(descriptor.input) === JSON.stringify(expectedInput),
-      JSON.stringify({ got: descriptor.input, want: expectedInput }));
-    if (model.contextLength !== undefined) {
-      check(`${model.id} descriptor.contextWindow reads catalog context_length`,
-        descriptor.contextWindow === model.contextLength,
-        `${descriptor.contextWindow} vs ${model.contextLength}`);
-    }
-  } catch (error) { fail(`${model.id} descriptor`, error); }
+  } catch (error) { fail(`${model.id} thinking map`, error); }
 }
 
 // --- 3. isChatModel excludes the image-generation + 404/403 models -------
@@ -152,27 +123,27 @@ for (const model of contract.models) {
     JSON.stringify({ got: verdict.vision, want: model.visionInput === true }));
 }
 
-// --- 5. buildDescriptors: the picker offer matches the contract -----------
-// The offer is every chat model NOT in a depleted pool, filtered by the
-// allow-list AND by KNOWN_UNROUTABLE_MODELS. `isChatModel` is PERMISSIVE (a
-// missing/unknown `output_modalities` is treated as chat), but since
-// 2026-10-27 the known-uncallable ids are dropped at every offer exit:
-// `deepseek-v4.1-flash` (the key's plan never activated it — every call 403s,
-// and the failure cache only learns 404s, so it never self-hides) joins the
-// offline `sensenova-6.7-flash-lite`. The panel hides the row entirely (same
-// set, subtracted at the snapshot exit); the baseline below still pins the
-// PLATFORM catalog, which keeps returning both ids. The image-gen U-series
-// (404) is the only family excluded by modality.
+// --- 5. the panel offer matches the contract ------------------------------
+// The offer is every chat model NOT in a depleted pool, minus the
+// KNOWN_UNROUTABLE_MODELS set. `isChatModel` is PERMISSIVE (a missing/unknown
+// `output_modalities` is treated as chat), but since 2026-10-27 the
+// known-uncallable ids are dropped at every offer exit — today the adapter's
+// own `parseCatalog` and the snapshot's `offered` subtraction (U6 ledger D1
+// removed the descriptor builder these checks used to drive); the projection
+// under test here is `rosterWithAvailability`, the panel's tickable rows. The
+// image-gen U-series (404) is the only family excluded by modality.
 {
   const allEntries = contract.models.map(entryFor);
-  // No pool depletion, no allow-list: the picker offers every chat model the
-  // contract marks `chat: true`, minus the known-uncallable set.
+  // No pool depletion, no allow-list: the panel projects every chat model the
+  // contract marks `chat: true`, minus the known-uncallable set (that set is
+  // subtracted ABOVE the projection — snapshot exit / adapter parse).
   const chatIds = contract.models
     .filter((m) => m.chat === true && !KNOWN_UNROUTABLE_MODELS.has(m.id))
     .map((m) => m.id);
-  const offered = buildDescriptors(allEntries, { baseUrl, enabledIds: [], unavailableModelIds: [] });
+  const offered = rosterWithAvailability(
+    allEntries.filter((e) => !KNOWN_UNROUTABLE_MODELS.has(e.id)), { pools: [] });
   const offeredIds = offered.map((d) => d.id);
-  check("buildDescriptors offers exactly the contract's chat models (no pool depletion)",
+  check("the roster offers exactly the contract's chat models (no pool depletion)",
     JSON.stringify(offeredIds) === JSON.stringify(chatIds),
     JSON.stringify({ offered: offeredIds, want: chatIds }));
 
@@ -181,7 +152,7 @@ for (const model of contract.models) {
   // load-bearing signal. The known-uncallable ids are excluded by id, not by
   // modality.
   const imageGenIds = contract.models.filter((m) => m.imageGen === true).map((m) => m.id);
-  check("buildDescriptors excludes every image-gen model from the offer",
+  check("the roster excludes every image-gen model from the offer",
     imageGenIds.every((id) => !offeredIds.includes(id)),
     JSON.stringify({ offered: offeredIds, imageGen: imageGenIds }));
 
@@ -200,11 +171,11 @@ for (const model of contract.models) {
   check("exhaustedModelIds flags the depleted pool's models",
     JSON.stringify(blocked) === JSON.stringify(["deepseek-v4-flash"]),
     JSON.stringify(blocked));
-  const offeredBlocked = buildDescriptors(allEntries, { baseUrl, enabledIds: [], unavailableModelIds: blocked });
-  check("buildDescriptors drops the quota-depleted model from the offer",
-    offeredBlocked.every((d) => d.id !== "deepseek-v4-flash") &&
-      offeredBlocked.some((d) => d.id === "deepseek-v4-pro"),
-    JSON.stringify(offeredBlocked.map((d) => d.id)));
+  const offeredBlocked = rosterWithAvailability(allEntries, pools);
+  check("the roster greys the quota-depleted model while the others stay available",
+    offeredBlocked.find((d) => d.id === "deepseek-v4-flash")?.available === false &&
+      offeredBlocked.find((d) => d.id === "deepseek-v4-pro")?.available === true,
+    JSON.stringify(offeredBlocked.map((d) => ({ id: d.id, available: d.available }))));
 
   // Pool membership is not exclusive on the wire: a model with its own
   // dedicated pool is ALSO named in the general pool. A drained general pool
@@ -230,9 +201,9 @@ for (const model of contract.models) {
   check("a drained general pool does not block a model its dedicated pool still funds",
     JSON.stringify(sharedBlocked) === JSON.stringify(["deepseek-v4-pro"]),
     JSON.stringify(sharedBlocked));
-  check("the picker still offers that model while its dedicated pool has credit",
-    buildDescriptors(allEntries, { baseUrl, enabledIds: [], unavailableModelIds: sharedBlocked })
-      .some((d) => d.id === "deepseek-v4-flash"),
+  check("the roster keeps that model available while its dedicated pool has credit",
+    rosterWithAvailability(allEntries, sharedPools)
+      .find((d) => d.id === "deepseek-v4-flash")?.available === true,
     JSON.stringify(sharedBlocked));
 
   const bothDrained = parsePools({
@@ -297,8 +268,8 @@ for (const model of contract.models) {
   // model's 403/404 status. Count the vision chat models the picker offers:
   // every contract model with `chat: true` and `visionInput: true`.
   const visionChat = contract.models.filter((m) => m.chat === true && m.visionInput === true);
-  const visionOffer = buildDescriptors(allEntries, { baseUrl, enabledIds: [], unavailableModelIds: [] })
-    .filter((d) => JSON.stringify(d.input) === JSON.stringify(["text", "image"]));
+  const visionOffer = rosterWithAvailability(allEntries, { pools: [] })
+    .filter((d) => d.vision === true);
   check("the vision offer count matches the contract's visionInput chat models",
     visionOffer.length === visionChat.length,
     `${visionOffer.length} vs ${visionChat.length}`);

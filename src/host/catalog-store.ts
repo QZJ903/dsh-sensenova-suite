@@ -35,8 +35,9 @@ export const CATALOG_VERSION = 2;
 
 /**
  * Every persisted shape THIS build can read (current + history) — the ADR-006
- * write-side guard's whitelist (see {@link persist}). Mirrors
- * `provider-store.ts` / `the removed module`.
+ * write-side guard's whitelist (see {@link persist}). Mirrors `provider-store.ts`'s
+ * `KNOWN_PROVIDER_VERSIONS`: the same whitelist convention every versioned
+ * store keeps.
  */
 export const KNOWN_CATALOG_VERSIONS: readonly number[] = [2, 1];
 

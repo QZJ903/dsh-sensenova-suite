@@ -4,7 +4,8 @@
  * Part of the routes split (see `../routes.ts` for the family map). POST-only:
  * an absent `enabledModelIds` is refused rather than read as "all models", the
  * curated allow-list is capped, and a save re-publishes immediately with the
- * CURRENT catalogue (a failed publish rolls back inside `publishProvider`).
+ * CURRENT catalogue (a failed publish leaves the previous pair serving, and the
+ * signature sync below is gated on it so the next poll retries the offer).
  *
  * @module dsh-sensenova-suite/routes/models
  */
@@ -94,16 +95,22 @@ export function registerModelsRoute(ctx: any, wiring: Pick<Wiring, "settings" | 
         }
         const persisted = await catalogStore.setEnabledIds(ids);
         // Publish immediately with the CURRENT catalogue: the offer must not
-        // wait for the next poll. A failed publish rolls back to the previous
-        // pair inside publishProvider and surfaces its reason.
-        await publishProvider(providerState.entries, ids, providerState.unavailableIds ?? []);
+        // wait for the next poll. A failed publish leaves the previous pair
+        // serving and surfaces its reason in providerState.error.
+        const published = await publishProvider(providerState.entries, ids, providerState.unavailableIds ?? []);
         // Adopt the signature of what was just offered so the next poll does not
         // see a "change" and re-publish the same set — but only when the write
         // actually reached the disk. The signature also gates the NEXT write:
         // a signature describing an offer the disk does not hold would skip the
         // write that fixes it, and the disk would keep the old allow-list until a
         // restart re-seeded it. A failed write is logged by the store.
-        if (persisted) syncSignaturesAfterPublish(providerState);
+        //
+        // The same gate covers the publish: a FAILED publish must not adopt the
+        // new offer's signature. Syncing one onto a registration that is still
+        // the previous pair is how the next poll compares signatures, sees "no
+        // change", and never retries — the exact bug class the poll path and the
+        // mount seed both gate against (snapshot-aggregate / seedPublisherFromCatalog).
+        if (published?.ok !== false && persisted) syncSignaturesAfterPublish(providerState);
       } catch (error) {
         await answer({ ok: false, error: redactedError(error) });
         return;

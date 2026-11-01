@@ -140,12 +140,14 @@
         # 32768`, so declaring nothing is NOT "no ceiling"). Defaults pin the
         # DOCUMENTED ceilings where the fetched catalogue understates a model
         # (sensenova-docs-full.md, 2026-10-26): deepseek-flash max_tokens
-        # [1, 393216]，kimi-k3 max_completion_tokens 默认 128K。目录探测比文档
-        # 滞后（探测返回 65536），以文档为准。The panel's「最大输出」badge quotes
-        # the SAME resolution, so the number you read is the number the request
-        # sends.
-        # Applies to the directly-registered provider only; the Raccoon hosted
-        # route builds its own descriptors.
+        # [1, 393216]，kimi-k3 max_completion_tokens 默认 128K（保守侧——文档的
+        # Responses 每模型表给 kimi-k3 的真范围是 [1, 1048576]，这里取默认值
+        # 当天花板）。目录探测比文档滞后（探测返回 65536），以文档为准。
+        # BOTH sides resolve from this one map: the registered adapter's
+        # resolveModel (defaultMaxTokens on the wire, via
+        # llm-models.maxTokensForId) and the panel's「最大输出」badge — the
+        # number you read is the number the request carries.
+        # Applies to the directly-registered provider only.
         # 覆盖示例：maxTokensOverrides: { "deepseek-v4-flash": 131072 }
         maxTokensOverrides:
           deepseek-flash: 393216

@@ -402,7 +402,14 @@ export async function buildSnapshotBody({
         syncSignaturesAfterPublish(providerState);
       }
     }
-    offered = catalog;
+    // The roster must describe what is REALLY serving — the same discipline
+    // swapRegistration's onRollback records. On a FAILED publish the previous
+    // pair is still serving and the registration-failure path rolls the
+    // publisher's fields back to it, so quote THOSE instead of the fetched
+    // catalogue. (A build failure keeps the new fields by design — the saved
+    // intent — and is surfaced through providerError either way, so this only
+    // changes the registration-failure display.)
+    offered = catalogPublishOk ? catalog : providerState.entries;
   }
   // Known-uncallable ids (`KNOWN_UNROUTABLE_MODELS`) are subtracted once, here,
   // so none of the panel's projections — roster, allModels, model/vision
@@ -456,7 +463,7 @@ export async function buildSnapshotBody({
   // count would claim to have registered models that were ticked off.
   //
   // ...and "the offer" is what the adapter ACTUALLY serves: a quota-blocked
-  // model is dropped from it (`buildDescriptors`), so counting it would tell
+  // model is dropped from it (the adapter's `catalogFilter` seam), so counting it would tell
   // the reader "3 models" while the picker answers `no configured model`. The
   // blocked set is subtracted here for the same reason it is subtracted there —
   // one fact, one place it is derived, quoted by both.

@@ -69,11 +69,14 @@ export function registerApiKeyRoute(ctx: any, wiring: Pick<Wiring, "settings" | 
           await catalogStore.clear()
             .catch((error: unknown) => logger?.warn?.(`${name}: catalog cache clear failed after api-key forget`, error));
           clearCoalescedFetch(cache, inflight);
-          await publishProvider([], [], []);
+          const published = await publishProvider([], [], []);
           // The signatures must not keep claiming a stale offer after the teardown:
           // re-sync them to what was just published, or the next poll re-publishes
-          // (churns) an already-empty offer.
-          syncSignaturesAfterPublish(providerState);
+          // (churns) an already-empty offer. A FAILED publish must NOT sync: the
+          // poll's signature mismatch is the retry signal that lands the empty
+          // offer once the build heals (same gate as the models route — a sync
+          // here would adopt an offer that never registered).
+          if (published?.ok !== false) syncSignaturesAfterPublish(providerState);
           // 清除面板 key 后把池里驻留的旧 default 槽一并摘出：池每进程只首种
           // 一次，不重解析则请求继续用已清除的旧 key（2026-10-27）。
           await poolAdmin?.refreshKeys()

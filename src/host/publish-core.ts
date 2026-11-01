@@ -2,23 +2,24 @@
  * The shared bones of a provider publisher — the parts that MUST NOT differ
  * between upstreams, factored out so they cannot drift.
  *
- * Both publishers (`provider-publish.ts` for the Token Plan provider,
- * `provider-publish.ts` for the Raccoon one) run the same control plane: a
+ * `provider-publish.ts` (the Token Plan provider) runs this control plane: a
  * publish queue, a `disposed` gate, and a single-point pair registration that
  * doubles as the rollback path. Those three are load-bearing and pinned by
  * tests (PITFALLS §18 for the queue, §19 for the register shape) — and the
  * rollback is the worst place to discover a divergence, because it only runs
- * once something has already failed. When they were written twice, keeping
- * them in sync relied on comments in one file pointing at the other; here
- * there is one copy.
+ * once something has already failed. They were once written twice across
+ * upstreams (Token Plan + Raccoon), and keeping the copies in sync relied on
+ * comments in one file pointing at the other; the Raccoon publisher left with
+ * the second-upstream removal (routes.ts 收编裁定), so ONE copy remains here —
+ * which is also why the file keeps its shape: a future second upstream reuses
+ * these bones instead of re-forking them.
  *
- * What is deliberately NOT shared: the publish GATE and the state shape. The
- * Token Plan side decides from "switch on?" plus a persisted catalog and an
- * allow-list, and restores `entries`/`enabledIds`/quota ids on a rollback; the
- * Raccoon side decides from "switch on?" plus "is there a credential?" and
- * restores its roster. That difference is real domain difference, and folding
- * it into one parameterized state machine would make a publish unreadable —
- * every reader would have to read the configuration to know what one does.
+ * What is deliberately NOT shared: the publish GATE and the state shape — the
+ * per-upstream domain. The Token Plan side decides from "switch on?" plus a
+ * persisted catalog and an allow-list, and restores `entries`/`enabledIds`/
+ * quota ids on a rollback. Folding that into one parameterized state machine
+ * would make a publish unreadable — every reader would have to read the
+ * configuration to know what one does.
  *
  * Peer-free: touches no runtime peer.
  *
@@ -300,7 +301,8 @@ export function resolveRegistrationService({ state, getLlm, release }: { state: 
  * `state.built` is cleared along with it, and that matters: a stale `built`
  * survives into the NEXT publish as its rollback target, so a later failed
  * publish would re-register an adapter whose release has already been called.
- * (The Raccoon publisher's "no credential" branch used to leave it standing.)
+ * (The removed Raccoon publisher's "no credential" branch used to leave it
+ * standing — the history this clearing pins.)
  * @param {object} job
  * @param {object} job.state - the publisher state.
  * @param {() => void} job.release - the publisher's releaser.

@@ -9,32 +9,29 @@
  * - `api-key-store.js`: the `SENSENOVA_API_KEY` reference store (service
  *   precedence over env, save/forget, failure fall-through, ephemeral state).
  *
- * Nothing here imports a Host peer, so these decisions stay covered on a clean
- * checkout; the peer-dependent adapter is exercised in wiring/e2e instead.
+ * Nothing here imports a Host peer AT MODULE LOAD, so these decisions stay
+ * covered on a clean checkout. One exception, deliberately dynamic: the T3
+ * island imports the real adapter inside a try/catch and loud-skips when the
+ * `@deepseek-ai/dsh-llm` peer cannot resolve (a resolution failure only — any
+ * other import error fails); wherever the peer resolves, the pin really runs.
  */
 import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isolateHostEnv, isolateStateDir } from "./peer-roots.mjs";
 import {
-  LLM_PROVIDER_ID,
-  LLM_DISPLAY_NAME,
-  NO_COST,
   FALLBACK_CONTEXT_WINDOW,
   contextWindowOf,
   isChatModel,
   thinkingLevelMapFor,
-  toPiDescriptor,
-  buildDescriptors,
   filterByEnabled,
-  isModelEnabled,
-  rosterOf,
   rosterWithAvailability,
   maxTokensFor,
+  maxTokensForId,
   HIDE_ALL_MODELS,
-  summarizeCatalog,
-  assertProviderOwnership
+  summarizeCatalog
 } from "../src/host/llm-models.ts";
+import { identifyVisionModel } from "../src/host/parsers.ts";
 import { isImageGenModel, inputModalitiesFor } from "../src/host/modality.ts";
 import { factsFor } from "../src/host/wire/facts.ts";
 import {
@@ -49,7 +46,7 @@ import { createApiKeyStore, API_KEY_REF } from "../src/host/api-key-store.ts";
 import { PROVIDER_VERSION, createFileProviderStore } from "../src/host/provider-store.ts";
 import { redactSecrets } from "../src/host/util.ts";
 import { profileSegment, profileStateDir } from "../src/host/state-store.ts";
-import { syncSignaturesAfterPublish, catalogSignature, quotaSignatureOf, seedPublisherFromCatalog } from "../src/host/provider-publish.ts";
+import { syncSignaturesAfterPublish, catalogSignature, quotaSignatureOf, seedPublisherFromCatalog, createProviderPublisher } from "../src/host/provider-publish.ts";
 import { surface as clientSurface } from "./client-surface.js";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -60,28 +57,12 @@ const HOST_SRC = join(dirname(dirname(fileURLToPath(import.meta.url))), "src", "
 
 const BASE_URL = "https://token.sensenova.cn/v1";
 
-// --- 1. toPiDescriptor: the wire contract pi-ai consumes ------------------
+// --- 1. the thinking map: picker levels pinned to platform wire spellings --
+// (The pi-ai descriptor build this section once pinned was removed 2026-10-31
+// with the wire adapter serving listModels directly; the DIALECT decision
+// survives in thinkingLevelMapFor and is pinned here directly.)
 {
   try {
-    const descriptor = toPiDescriptor({ id: "SenseNova-Lite", name: "SenseNova Lite" }, { baseUrl: BASE_URL });
-
-    check("provider id is the collision-free own slug", LLM_PROVIDER_ID === "sensenova-suite", LLM_PROVIDER_ID);
-    check("display name is set", LLM_DISPLAY_NAME === "SenseNova Suite");
-    check("identity fields are mapped", descriptor.id === "SenseNova-Lite" && descriptor.name === "SenseNova Lite");
-    check("api is openai-completions", descriptor.api === "openai-completions", descriptor.api);
-    check("descriptor is tagged with the provider", descriptor.provider === LLM_PROVIDER_ID);
-    check("base URL points at the direct endpoint", descriptor.baseUrl === BASE_URL);
-    check("a model with no modality field is text-only", JSON.stringify(descriptor.input) === JSON.stringify(["text"]));
-    // Every SenseNova chat model reasons by default (supported_features
-    // ["reasoning"], thinking on at high, 2026-09-29): the descriptor must
-    // advertise it so DSH offers the 思考强度 selector and pi-ai reads the
-    // thinking back (both `reasoning` and `reasoning_content` spellings).
-    check("advertised as a reasoning model", descriptor.reasoning === true);
-    check("the thinking map pins picker levels to wire spellings",
-      JSON.stringify(descriptor.thinkingLevelMap) === JSON.stringify({
-        off: "none", low: "low", medium: "medium",
-        high: "high", max: "max"
-      }), JSON.stringify(descriptor.thinkingLevelMap));
     check("off is the platform's none, not the OpenAI off (which 400s)",
       thinkingLevelMapFor({ id: "any" }).off === "none");
     check("minimal is not offered (2026-10-26: 默认档位只按原生档位)",
@@ -97,41 +78,23 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("max is offered (platform accepts it since the 12-level 2026-10-24 probe)",
       thinkingLevelMapFor({ id: "sensenova-6.8-flash-lite" }).max === "max" &&
       thinkingLevelMapFor({ id: "glm-5.2" }).max === "max");
-    check("cost is zeroed on all four fields", JSON.stringify(descriptor.cost) === JSON.stringify(NO_COST) &&
-      descriptor.cost.input === 0 && descriptor.cost.output === 0 &&
-      descriptor.cost.cacheRead === 0 && descriptor.cost.cacheWrite === 0);
-    // The two load-bearing flags from the qoder route:
-    check("supportsDeveloperRole is forced false (the 403 fix)",
-      descriptor.compat.supportsDeveloperRole === false);
-    check("max_tokens is the wire field name", descriptor.compat.maxTokensField === "max_tokens");
-    // The 2026-10-02 ceiling decision: a catalogue-stated max_output_length is
-    // declared as maxTokens (the harness otherwise caps at 32768 via
-    // defaultMaxTokens — flash-lite's 65536 ceiling probed), and a catalogue
-    // entry without one keeps the field UNDECLARED, never a guessed number.
-    check("the catalogue ceiling is declared as maxTokens when stated",
-      descriptor.maxTokens === undefined || descriptor.maxTokens === 65536,
-      `got ${String(descriptor.maxTokens)}`);
   } catch (error) {
-    fail("toPiDescriptor maps a text model", error);
+    fail("the thinking map dialect", error);
   }
 }
 
 // --- 2. vision is automatic and identical to the panel's classification ----
 {
   try {
-    const byField = toPiDescriptor({ id: "SenseNova-Vision", input_modalities: ["text", "image"] }, { baseUrl: BASE_URL });
-    check("input_modalities image makes the model vision",
-      JSON.stringify(byField.input) === JSON.stringify(["text", "image"]));
-
-    const byName = toPiDescriptor({ id: "SenseNova-VL" }, { baseUrl: BASE_URL });
-    check("the name fallback still marks a -vl model vision",
-      JSON.stringify(byName.input) === JSON.stringify(["text", "image"]));
-
-    const textOnly = toPiDescriptor({ id: "sensenova-6.8-flash-lite", input_modalities: ["text"] }, { baseUrl: BASE_URL });
+    check("input_modalities image marks the model vision",
+      identifyVisionModel({ id: "SenseNova-Vision", input_modalities: ["text", "image"] }).vision === true);
+    check("the name fallback still marks a -vl model vision (and says so)",
+      identifyVisionModel({ id: "SenseNova-VL" }).vision === true &&
+        identifyVisionModel({ id: "SenseNova-VL" }).source === "name");
     check("flash-lite is text-only (no name-pattern vision anymore)",
-      JSON.stringify(textOnly.input) === JSON.stringify(["text"]));
+      identifyVisionModel({ id: "sensenova-6.8-flash-lite", input_modalities: ["text"] }).vision === false);
   } catch (error) {
-    fail("vision classification flows into descriptors", error);
+    fail("vision classification", error);
   }
 }
 
@@ -150,40 +113,9 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("negative falls back", contextWindowOf({ context_window: -5 }) === FALLBACK_CONTEXT_WINDOW);
     check("junk falls back", contextWindowOf({ context_window: "lots" }) === FALLBACK_CONTEXT_WINDOW);
     check("missing falls back to a positive window (pi-ai does arithmetic on it)",
-      contextWindowOf({ id: "x" }) === 128000);
-    const descriptor = toPiDescriptor({ id: "x" }, { baseUrl: BASE_URL });
-    check("the descriptor carries the positive fallback", descriptor.contextWindow === 128000);
+      contextWindowOf({ id: "x" }) === 131072);
   } catch (error) {
     fail("context window handling", error);
-  }
-}
-
-// --- 4. buildDescriptors: ordering, junk, duplicates, missing id -----------
-{
-  try {
-    let threw = false;
-    try { toPiDescriptor({}, { baseUrl: BASE_URL }); } catch { threw = true; }
-    check("an id-less entry cannot become a descriptor", threw);
-
-    check("a non-array catalog builds nothing", buildDescriptors(undefined, { baseUrl: BASE_URL }).length === 0);
-
-    const built = buildDescriptors(
-      [
-        null,
-        "not-an-object",
-        { id: "" },
-        { id: "a", name: "A", input_modalities: ["text"] },
-        { id: "b", input_modalities: ["text", "image"] },
-        // Duplicate id: last occurrence wins, first-seen position kept.
-        { id: "a", name: "A-prime" }
-      ],
-      { baseUrl: BASE_URL }
-    );
-    check("junk entries are dropped and ids unique", built.length === 2 && built[0].id === "a" && built[1].id === "b");
-    check("duplicate id keeps the last occurrence", built[0].name === "A-prime");
-    check("base URL is shared by every descriptor", built.every((d) => d.baseUrl === BASE_URL));
-  } catch (error) {
-    fail("buildDescriptors normalization", error);
   }
 }
 
@@ -266,24 +198,16 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       JSON.stringify(factsFor("deepseek-flash", { id: "deepseek-flash", inputModalities: ["text", "image"] }).imageFormats)
         === JSON.stringify(["jpeg", "png", "gif", "webp"]));
 
-    const built = buildDescriptors([gen, visionChat, textChat], { baseUrl: BASE_URL });
-    check("buildDescriptors skips image-generation models",
-      built.length === 2 && JSON.stringify(built.map((d) => d.id)) === JSON.stringify(["v-chat", "t-chat"]));
-
-    const roster = rosterOf([gen, visionChat, textChat]);
-    check("rosterOf drops image-generation models (chat offer only)",
+    const roster = rosterWithAvailability([gen, visionChat, textChat], { pools: [] });
+    check("the panel roster drops image-generation models (chat offer only)",
       JSON.stringify(roster.map((r) => r.id)) === JSON.stringify(["v-chat", "t-chat"]),
-      JSON.stringify(roster));
+      JSON.stringify(roster.map((r) => r.id)));
 
     const summary = summarizeCatalog([gen, visionChat, textChat]);
     check("summarizeCatalog counts only chat models", summary.modelCount === 2, String(summary.modelCount));
     check("summarizeCatalog vision ids cover only offered models",
       JSON.stringify(summary.visionIds) === JSON.stringify(["v-chat"]));
 
-    // A stale allow-list id for an image-generation model matches nothing.
-    const allowlisted = buildDescriptors([gen, textChat], { baseUrl: BASE_URL, enabledIds: ["u-gen", "t-chat"] });
-    check("an allow-listed image-generation id offers nothing",
-      JSON.stringify(allowlisted.map((d) => d.id)) === JSON.stringify(["t-chat"]));
   } catch (error) {
     fail("chat-model filtering", error);
   }
@@ -331,10 +255,6 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       filterByEnabled(entries, ["zzz"]).length === 0);
     check("a non-array entries list reads as no entries",
       filterByEnabled(null).length === 0);
-    // The allow-list composes with the dedup pass in buildDescriptors.
-    const built = buildDescriptors(entries, { baseUrl: BASE_URL, enabledIds: ["a", "c"] });
-    check("buildDescriptors honours the enabledIds allow-list",
-      built.map((d) => d.id).join(",") === "a,c", built.map((d) => d.id).join(","));
   } catch (error) {
     fail("filterByEnabled allow-list semantics", error);
   }
@@ -361,15 +281,6 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       filterByEnabled(entries, [HIDE_ALL_MODELS, "a"]).map((e) => e.id).join(",") === "a");
     check("an empty list still means 'no filter' (not 'nothing')",
       filterByEnabled(entries, []).length === 3);
-    // The predicate agrees with filterByEnabled for all three states.
-    check("isModelEnabled: empty list offers everything",
-      isModelEnabled([], "a") === true && isModelEnabled(undefined, "a") === true);
-    check("isModelEnabled: a non-empty list is strict",
-      isModelEnabled(["a"], "a") === true && isModelEnabled(["a"], "b") === false);
-    check("isModelEnabled: the sentinel offers nothing",
-      isModelEnabled([HIDE_ALL_MODELS], "a") === false);
-    check("isModelEnabled: a junk list reads as no filter",
-      isModelEnabled("a", "b") === true);
     // The store keeps the sentinel: curation survives a persist round trip.
     check("normalizeEnabledIds keeps the sentinel",
       JSON.stringify(normalizeEnabledIds([HIDE_ALL_MODELS, "a"])) === JSON.stringify([HIDE_ALL_MODELS, "a"]));
@@ -382,42 +293,37 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
 }
 
-// --- 5.6b rosterOf: what the panel shows as tickable rows -------------------
-// rosterOf is the only thing standing between the raw catalogue and the
-// checkboxes: it must project just id/name/vision, drop junk, dedupe by id, and
-// reach the SAME vision verdict the registered descriptors use — otherwise the
-// panel would advertise a model the provider never registered.
+// --- 5.6b the roster projection: what the panel shows as tickable rows ------
+// rosterWithAvailability is what stands between the raw catalogue and the
+// checkboxes: it must project just id/name/vision/imageGen, drop junk and
+// image-generation rows, dedupe by id (last wins), and reach the SAME vision
+// verdict the adapter declares — otherwise the panel would advertise a model
+// the provider never registered.
 {
   try {
-    const roster = rosterOf([
+    const roster = rosterWithAvailability([
       { id: "a", name: "Model A" },
       { id: "b", name: "Model B", input_modalities: ["text", "image"], opaque_field: "must not leak" },
       { name: "no id" },
       { id: "a", name: "Model A prime" },
+      { id: "gen", output_modalities: ["image"] },
       null,
       { id: "c" }
-    ]);
-    check("rosterOf drops id-less entries and junk",
+    ], { pools: [] });
+    check("the roster drops id-less entries, junk and image-generation rows",
       roster.map((r) => r.id).join(",") === "a,b,c", roster.map((r) => r.id).join(","));
-    check("rosterOf keeps only id, name, vision and imageGen",
-      JSON.stringify(Object.keys(roster[0]).sort()) === JSON.stringify(["id", "imageGen", "name", "vision"]));
+    check("the roster keeps only the projected fields",
+      JSON.stringify(Object.keys(roster[0]).sort()) === JSON.stringify(["available", "contextWindow", "id", "imageGen", "maxOutputLength", "name", "quotaExhausted", "thinkingLevels", "vision"]),
+      JSON.stringify(Object.keys(roster[0]).sort()));
     check("a missing name falls back to the id", roster[2].name === "c");
-    check("rosterOf dedupes the same way buildDescriptors does (last wins)",
+    check("the roster dedupes last-wins at the first-seen position",
       roster[0].name === "Model A prime", roster[0].name);
-    check("rosterOf reaches the same vision verdict as the descriptors",
+    check("the roster reaches the same vision verdict the adapter declares",
       JSON.stringify(roster.map((r) => r.vision)) === JSON.stringify([false, true, false]) &&
-      JSON.stringify(rosterOf([{ id: "plain" }]).map((r) => r.vision)) === JSON.stringify([false]));
-    check("rosterOf on a non-array returns nothing", rosterOf(undefined).length === 0);
-    // Cross-checked against the Host's own descriptor builder: the ids the
-    // panel can tick must be the ids the provider would register.
-    const described = buildDescriptors([
-      { id: "a" }, { id: "b", input_modalities: ["text", "image"] }
-    ], { baseUrl: BASE_URL });
-    check("rosterOf and buildDescriptors agree on which ids exist",
-      JSON.stringify(rosterOf([{ id: "a" }, { id: "b" }]).map((r) => r.id)) ===
-        JSON.stringify(described.map((d) => d.id)));
+      JSON.stringify(rosterWithAvailability([{ id: "plain" }], { pools: [] }).map((r) => r.vision)) === JSON.stringify([false]));
+    check("the roster on a non-array returns nothing", rosterWithAvailability(undefined, { pools: [] }).length === 0);
   } catch (error) {
-    fail("rosterOf projection", error);
+    fail("roster projection", error);
   }
 }
 
@@ -1445,9 +1351,9 @@ const BASE_URL = "https://token.sensenova.cn/v1";
 // `publish-core.ts` exists for exactly one reason: the publish queue, the
 // `disposed` gate and the single-point register-that-doubles-as-rollback must
 // NOT differ between the two upstreams (ARCHITECTURE.md §5.5). The module
-// header says so in prose, and both publishers' headers point at it — but a
-// comment cannot fail, so the day someone re-inlines a queue in
-// `raccoon-publish.ts` to "fix" something locally, every suite stays green while
+// header says so in prose, and the publisher's header points at it — but a
+// comment cannot fail, so the day someone re-inlines a queue locally to
+// "fix" something, every suite stays green while
 // the rollback path quietly becomes upstream-specific. Rollback is the worst
 // place to discover that: it only runs after something has already failed.
 //
@@ -1485,39 +1391,13 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
 }
 
-// --- 15. provider identity: one upstream owns exactly one id ---------------
-// The Host compares a message's route id against the descriptor's `provider`
-// on every replay. A shared identity across two upstreams makes that check
-// fail on whichever route is named differently, and pi-ai then replays the
-// thinking blocks as plain text. These checks pin the guard that refuses such
-// a descriptor at assembly time.
-{
-  const refusalOf = (fn) => {
-    try { fn(); return null; } catch (error) { return String(error?.message ?? error); }
-  };
-  try {
-    const entries = [{ id: "SenseNova-Lite", name: "SenseNova Lite" }];
-    const owned = buildDescriptors(entries, { providerId: LLM_PROVIDER_ID });
-    check("descriptors pass the guard for the id they were built with",
-      assertProviderOwnership(owned, LLM_PROVIDER_ID) === owned);
-    check("a descriptor stamped with another upstream's id is rejected",
-      /sensenova-raccoon/.test(refusalOf(() => assertProviderOwnership(owned, "sensenova-raccoon")) ?? ""),
-      String(refusalOf(() => assertProviderOwnership(owned, "sensenova-raccoon"))));
-    check("a descriptor built on the DEFAULTED id is still checked, not waved through",
-      /sensenova-suite/.test(refusalOf(() => assertProviderOwnership(buildDescriptors(entries, {}), "sensenova-raccoon")) ?? ""));
-    check("an empty id is rejected before any descriptor is trusted",
-      /providerId is required/.test(refusalOf(() => assertProviderOwnership(owned, "")) ?? ""));
-  } catch (error) {
-    fail("one upstream owns exactly one provider identity", error);
-  }
-}
-
-// --- the per-model output-ceiling override (the operator knob) -------------
-// Precedence: override > catalogue `max_output_length` > UNDECLARED. Two things
-// are pinned here that a "just add an option" edit would miss: an override can
-// only RAISE a stated ceiling (it can never invent one where the platform
-// stated none, because guessing is what the module header forbids), and the
-// panel roster must quote the SAME resolution the descriptor gets — a roster
+// --- the per-model output-ceiling override (the deployment knob) -----------
+// Precedence: override > catalogue `max_output_length` > UNDECLARED. The order
+// is ONE judgment (maxTokensForId) read from BOTH sides — the panel roster and
+// the adapter's resolveModel (`defaultMaxTokens`) — so the badge and the wire
+// cannot disagree. An override for an id with no catalogue figure still lands
+// (that is the docs-first point: the catalogue can UNDERSTATE; kimi-k3's
+// 131072 rides on it). A roster
 // that kept quoting the catalogue while the wire carried the override is the
 // exact two-sources drift this plugin pins everywhere else.
 {
@@ -1525,21 +1405,12 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     const entry = { id: "deepseek-v4-flash", max_output_length: 65536 };
     const pools = { pools: [] };
 
-    check("with no override the catalogue ceiling is declared",
-      toPiDescriptor(entry).maxTokens === 65536, String(toPiDescriptor(entry).maxTokens));
+    check("with no override the catalogue ceiling is the roster figure",
+      maxTokensFor(entry, {}) === 65536, String(maxTokensFor(entry, {})));
 
-    const raised = toPiDescriptor(entry, { maxTokensOverrides: { "deepseek-v4-flash": 131072 } });
-    check("an override WINS over the catalogue figure", raised.maxTokens === 131072, String(raised.maxTokens));
-
-    const sibling = toPiDescriptor({ id: "glm-5.2", max_output_length: 131072 }, { maxTokensOverrides: { "deepseek-v4-flash": 131072 } });
-    check("an override for another id does not leak across models", sibling.maxTokens === 131072, String(sibling.maxTokens));
-
-    const unnamed = toPiDescriptor({ id: "kimi-k3" }, { maxTokensOverrides: { "deepseek-v4-flash": 131072 } });
-    check("an override cannot DECLARE a ceiling the catalogue never stated",
-      !Object.prototype.hasOwnProperty.call(unnamed, "maxTokens"), JSON.stringify(unnamed));
-
-    const junk = toPiDescriptor(entry, { maxTokensOverrides: { "deepseek-v4-flash": 0 } });
-    check("a non-positive override is ignored rather than sent as 0", junk.maxTokens === 65536, String(junk.maxTokens));
+    check("an override WINS over the catalogue figure",
+      maxTokensForId("deepseek-v4-flash", 65536, { "deepseek-v4-flash": 131072 }) === 131072,
+      String(maxTokensForId("deepseek-v4-flash", 65536, { "deepseek-v4-flash": 131072 })));
 
     const plain = rosterWithAvailability([entry], pools).find((row) => row.id === "deepseek-v4-flash");
     const overridden = rosterWithAvailability([entry], pools, { "deepseek-v4-flash": 131072 }).find((row) => row.id === "deepseek-v4-flash");
@@ -1548,18 +1419,150 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("the roster badge quotes the OVERRIDE (panel and wire cannot disagree)",
       overridden?.maxOutputLength === 131072, String(overridden?.maxOutputLength));
 
-    const built = buildDescriptors([entry], { enabledIds: [], maxTokensOverrides: { "deepseek-v4-flash": 131072 } });
-    check("buildDescriptors threads the override to the descriptor it emits",
-      built.length === 1 && built[0].maxTokens === 131072, JSON.stringify(built[0]?.maxTokens));
-
     check("maxTokensFor is the one resolver both readers call",
       maxTokensFor(entry, { "deepseek-v4-flash": 131072 }) === 131072 &&
         maxTokensFor(entry, {}) === 65536 &&
         maxTokensFor({ id: "kimi-k3" }, {}) === 0 &&
         maxTokensFor({ id: "kimi-k3" }, null) === 0,
       `override=${maxTokensFor(entry, { "deepseek-v4-flash": 131072 })} catalogue=${maxTokensFor(entry, {})} undeclared=${maxTokensFor({ id: "kimi-k3" }, {})}`);
+
+    // The wire half of the same order (U6 ledger D1): the adapter resolves the
+    // REQUEST ceiling through maxTokensForId with the same map, so the roster
+    // badge and the `defaultMaxTokens` on the wire are one judgment.
+    check("maxTokensForId: an override for THIS id can declare a ceiling the catalogue never stated",
+      maxTokensForId("kimi-k3", undefined, { "kimi-k3": 131072 }) === 131072,
+      String(maxTokensForId("kimi-k3", undefined, { "kimi-k3": 131072 })));
+    check("maxTokensForId: an override for another id does not leak; the catalogue figure stands",
+      maxTokensForId("kimi-k3", 65536, { "deepseek-flash": 393216 }) === 65536,
+      String(maxTokensForId("kimi-k3", 65536, { "deepseek-flash": 393216 })));
+    check("maxTokensForId: a non-positive/fractional override is ignored, not sent",
+      maxTokensForId("m", 65536, { m: 0 }) === 65536 && maxTokensForId("m", 65536, { m: 1.5 }) === 65536,
+      String(maxTokensForId("m", 65536, { m: 0 })));
+    check("maxTokensForId: nothing declared anywhere reads undefined (the adapter leaves defaultMaxTokens off)",
+      maxTokensForId("m", undefined, {}) === undefined && maxTokensForId("m", 0, { other: 1 }) === undefined,
+      String(maxTokensForId("m", undefined, {})));
+    check("maxTokensForId: a null overrides map falls through to the catalogue",
+      maxTokensForId("m", 65536, null) === 65536,
+      String(maxTokensForId("m", 65536, null)));
+
+    // The wiring, pinned at source: deleting either half restores the
+    // "badge quotes a ceiling no request can send" split without any
+    // behavior test noticing.
+    const adapterSource = readFileSync(new URL("../src/host/adapter.ts", import.meta.url), "utf8");
+    const factorySource = readFileSync(new URL("../src/host/llm-adapter.ts", import.meta.url), "utf8");
+    check("the adapter resolves the wire ceiling through maxTokensForId with the live map",
+      adapterSource.includes("maxTokensForId(model, entry?.maxOutputTokens, this.deps.maxTokensOverrides?.())") &&
+      !adapterSource.includes("const DEFAULT_CONTEXT_WINDOW"),
+      "resolveModel wiring");
+    check("the adapter parser shares the panel's field-spelling tables (one list, one order)",
+      adapterSource.includes("firstPositiveNumber(raw, CONTEXT_WINDOW_FIELDS)") &&
+      adapterSource.includes("firstPositiveNumber(raw, MAX_OUTPUT_FIELDS)"),
+      "shared spelling lists");
+    check("the factory threads maxTokensOverrides into the adapter deps",
+      factorySource.includes("maxTokensOverrides: () => maxTokensOverrides ?? null"),
+      "factory wiring");
   } catch (error) {
     fail("the per-model output-ceiling override", error);
+  }
+}
+
+// --- build failure vs registration failure: what the offer fields do -------
+// The asymmetry is the DESIGN (U6 ledger S2/δ + T2): a REGISTRATION failure
+// rolls the domain fields back to the previous pair (the offer must describe
+// what is really serving), while a BUILD failure keeps the NEW values — the
+// same "user intent survives" semantics as the switch-off branch, so a save
+// made while the build was broken is not discarded. Retry cadence is
+// signature-driven and independent of these fields (failed publishes never
+// sync signatures), so this pin locks the asymmetry itself.
+{
+  const boomFactory = async () => ({ createSensenovaAdapter: () => { throw new Error("factory boom"); } });
+  const regBoomFactory = async () => ({
+    createSensenovaAdapter: () => ({ providerIds: ["sensenova-suite"], adapter: { fake: true } })
+  });
+  try {
+    const buildFail = createProviderPublisher({
+      settings: { registerProvider: true },
+      loadAdapterModule: boomFactory,
+      getLlm: () => ({ registerAdapter: () => () => {}, registerConfigurableProviders: () => () => {} })
+    });
+    const r1 = await buildFail.publish([{ id: "m-a" }], ["m-a"], []);
+    check("a BUILD failure keeps the new offer fields (user intent survives)",
+      r1.ok === false && buildFail.state.entries.length === 1 &&
+      buildFail.state.enabledIds[0] === "m-a" && /factory boom/.test(String(buildFail.state.error)),
+      JSON.stringify({ ok: r1.ok, entries: buildFail.state.entries.length, ids: buildFail.state.enabledIds, err: buildFail.state.error }));
+
+    const regFail = createProviderPublisher({
+      settings: { registerProvider: true },
+      loadAdapterModule: regBoomFactory,
+      getLlm: () => ({ registerAdapter: () => { throw new Error("register boom"); } })
+    });
+    const r2 = await regFail.publish([{ id: "m-b" }], ["m-b"], []);
+    check("a REGISTRATION failure rolls the offer fields back to the previous pair",
+      r2.ok === false && regFail.state.entries.length === 0 && regFail.state.enabledIds.length === 0 &&
+      regFail.state.registered === false && /register boom/.test(String(regFail.state.error)),
+      JSON.stringify({ ok: r2.ok, entries: regFail.state.entries.length, ids: regFail.state.enabledIds, err: regFail.state.error }));
+  } catch (error) {
+    fail("build-failure vs registration-failure offer fields", error);
+  }
+}
+
+// --- T3: the wire half of the ceiling order, exercised at runtime ----------
+// maxTokensForId and the wiring are pinned above at unit/source level; this
+// island constructs the REAL adapter (peer-dependent: `LlmAdapter` base +
+// `LlmError` come from `@deepseek-ai/dsh-llm`) and calls resolveModel, so the
+// deps closure -> maxTokensForId -> defaultMaxTokens composition is EXERCISED,
+// not just read. A module-resolution failure loud-skips (the same structural
+// skip as routes.test: no candidate root carries the peer on this machine);
+// ANY other import error fails — a broken adapter must not hide behind the
+// skip. (U6 ledger T3: the last unpinned half of the override chain.)
+{
+  let adapterMod = null;
+  let skipReason = "";
+  try {
+    adapterMod = await import("../src/host/adapter.ts");
+  } catch (error) {
+    const message = String(error?.message ?? error);
+    if (error?.code === "ERR_MODULE_NOT_FOUND" || message.includes("@deepseek-ai/dsh-llm")) {
+      skipReason = message.slice(0, 120);
+    } else {
+      fail("T3 the adapter module failed to import (not a peer gap)", error);
+    }
+  }
+  if (adapterMod !== null) {
+    try {
+      const { SensenovaAdapter } = adapterMod;
+      const mk = (overrides) => new SensenovaAdapter({
+        options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1 }),
+        resolveApiKey: async () => "sk-test",
+        resolveApiKeyForRequest: async () => "sk-test",
+        requestSlot: async () => () => {},
+        rotateApiKey: async () => { throw new Error("unused in this pin"); },
+        maxTokensOverrides: () => overrides
+      });
+      const seeded = mk({ "deepseek-flash": 393216 });
+      // resolveModel reads this.catalog; seed it directly (fetchCatalog is the
+      // networked path) — the ceiling ORDER is what is under test here.
+      seeded.catalog = [
+        { id: "deepseek-flash", name: "deepseek-flash", maxOutputTokens: 65536 },
+        { id: "glm-5.2", name: "glm-5.2" }
+      ];
+      const withOverride = await seeded.resolveModel("sensenova-suite", "deepseek-flash");
+      check("T3 the override rides resolveModel as defaultMaxTokens (catalogue understates, docs win)",
+        withOverride.defaultMaxTokens === 393216, String(withOverride.defaultMaxTokens));
+      const other = await seeded.resolveModel("sensenova-suite", "glm-5.2");
+      check("T3 an entry with no override and no figure stays undeclared (no leak)",
+        !Object.prototype.hasOwnProperty.call(other, "defaultMaxTokens"), JSON.stringify(other));
+      const bare = mk(null);
+      bare.catalog = [{ id: "deepseek-flash", name: "deepseek-flash", maxOutputTokens: 65536 }];
+      const noOverride = await bare.resolveModel("sensenova-suite", "deepseek-flash");
+      check("T3 without overrides the catalogue figure rides through",
+        noOverride.defaultMaxTokens === 65536, String(noOverride.defaultMaxTokens));
+    } catch (error) {
+      fail("T3 resolveModel runtime pin", error);
+    }
+  } else {
+    check("T3 resolveModel runtime pin loud-skipped (peer not resolvable here)",
+      true, skipReason);
   }
 }
 

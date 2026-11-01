@@ -1,42 +1,39 @@
 /**
- * Catalog entry -> pi-ai model descriptor mapping — the pure half of the
- * directly-registered SenseNova LLM provider ("one-stop service", step three).
+ * Catalog entry → capability judgments for the directly-registered SenseNova
+ * LLM provider ("one-stop service", step three) — the peer-free half.
  *
  * This module deliberately imports NO runtime peer (`@earendil-works/pi-ai`,
- * `@deepseek-ai/dsh-llm-pi-ai`): it builds plain objects only, so the mapping
- * decisions stay testable on a clean checkout. `llm-adapter.ts` is the
- * peer-dependent half that hands these descriptors to `createProvider`.
+ * `@deepseek-ai/dsh-llm-pi-ai`): plain objects and pure functions only, so the
+ * judgments stay testable on a clean checkout. The registered adapter's model
+ * facts are assembled by `llm-adapter.ts`/`adapter.ts`; the panel projections
+ * (`rosterWithAvailability` → snapshot) and the adapter's request ceiling
+ * (`maxTokensForId` → resolveModel) read the SAME functions here, which is how
+ * the picker and the wire stay one offer.
  *
- * Three decisions carried here are load-bearing, not cosmetic:
+ * Decisions carried here are load-bearing, not cosmetic:
  *
- * 1. `compat.supportsDeveloperRole: false`. pi-ai picks the system-prompt role
- *    as `reasoning && supportsDeveloperRole ? "developer" : "system"`, and when
- *    the flag is unset it AUTO-DETECTS, returning true for anything that does
- *    not look like a known non-standard provider. SenseNova's direct endpoint
- *    does not speak the developer role, so an unset flag makes every request
- *    403 forever. Setting it false is the fix the qoder route proved necessary.
- * 2. `maxTokens` declares the platform's OWN catalogue ceiling when the
- *    catalogue states one. The harness fills an UNDECLARED maxTokens with
- *    `defaultMaxTokens ?? 32768` (`dsh-llm-pi-ai` resolveRouteModels), so
- *    "declaring nothing" does NOT mean "no ceiling" — it silently caps output
- *    at 32768, HALF the ceiling flash-lite's catalogue states (65536; probed
- *    2026-10-02: flash-lite accepts `max_tokens: 65536` and refuses 131072
- *    with "MaxTokens invalid, should be in [1, 65536]", while v4-flash and
- *    glm-5.2 accept 131072 — the ceiling is per-model). Declaring the
- *    catalogue figure raises the cap to what the platform allows; a model
- *    whose catalogue states no ceiling keeps the field UNDECLARED (the
- *    harness 32768 fallback), never a guessed number. Only the field NAME
- *    (`max_tokens`) is pinned unconditionally.
- * 3. `reasoning: true` + a `thinkingLevelMap`. Every SenseNova chat model
- *    advertises `supported_features: ["reasoning"]` and thinks by default
- *    (verified 2026-09-29: default reasoning_effort high, thinking text
- *    returned as `reasoning` on flash-lite and `reasoning_content` on
- *    deepseek/glm/kimi — pi-ai reads both spellings). `reasoning: true` is
- *    what makes DSH offer the 思考强度 selector and what makes pi-ai surface
- *    the thinking. The map pins picker levels to platform-valid wire values:
- *    `off: "none"` (the platform's off spelling — "off" itself 400s),
- *    `minimal: null` (unverified on this gateway), and `max` only on glm-5.2
- *    (probed 200; rejected 400 on flash-lite / deepseek-v4-flash).
+ * 1. `maxTokensForId`: the wire ceiling = settings `maxTokensOverrides` >
+ *    the catalogue's OWN figure > UNDECLARED. The harness fills an UNDECLARED
+ *    ceiling with `defaultMaxTokens ?? 32768` (`dsh-llm-pi-ai`
+ *    resolveRouteModels), so "declaring nothing" does NOT mean "no ceiling" —
+ *    it silently caps output at 32768, HALF the ceiling flash-lite's catalogue
+ *    states (65536; probed 2026-10-02: flash-lite accepts `max_tokens: 65536`
+ *    and refuses 131072 with "MaxTokens invalid, should be in [1, 65536]",
+ *    while v4-flash and glm-5.2 accept 131072 — the ceiling is per-model).
+ *    Declaring the figure (catalogue or override) raises the cap to what the
+ *    platform allows; the override exists because the catalogue can UNDERSTATE
+ *    (2026-10-26 docs-first: deepseek-flash [1, 393216] documented, catalogue
+ *    probes 65536).
+ * 2. `thinkingLevelMapFor`: the picker levels are the USER-configured set
+ *    (2026-10-26 拍板：off/low/medium/high/max，xhigh/minimal 彻底不要),
+ *    pinned to platform-valid wire values — `off: "none"` (the platform's off
+ *    spelling; "off" itself 400s).
+ * 3. The pi-ai descriptor build that once lived here (`toPiDescriptor`,
+ *    `compat.supportsDeveloperRole: false` — the qoder-route 403 fix) was
+ *    REMOVED 2026-10-31: the wire adapter serves `listModels` directly and no
+ *    production path built descriptors. If a descriptor build ever returns, its
+ *    assembly point must re-derive the developer-role decision — see U3 for
+ *    the wire path's own developer-role posture.
  *
  * @module dsh-sensenova-suite/llm-models
  */
@@ -44,12 +41,11 @@
 import { str, num } from "./util.ts";
 import { identifyVisionModel } from "./parsers.ts";
 import { isChatModel, isImageGenModel } from "./modality.ts";
-import type { AdapterConfig } from "./types.ts";
 
 /** Known-uncallable model ids: the catalog still lists them, but every call
- * fails, so every offer-shaped exit (the picker's `parseCatalog`, this
- * module's `buildDescriptors`, the panel's snapshot projections) drops them,
- * while the catalog store and the contract baseline keep the platform mirror.
+ * fails, so every offer-shaped exit (the adapter's own `parseCatalog` and the
+ * panel's snapshot projections) drops them, while the catalog store and the
+ * contract baseline keep the platform mirror.
  * Static on purpose: the adapter's failure cache only learns from 404
  * model-not-found — a 403 never self-hides, so without this set the model
  * would be offered forever.
@@ -183,43 +179,43 @@ export const LLM_DISPLAY_NAME = "SenseNova Suite";
 export const DEFAULT_REASONING_EFFORT = "high";
 
 /**
- * Per-token prices are unknowable for a quota plan; report zero everywhere.
- *
- * ⚠️ The zeros are a SENTINEL, not "free". SenseNova Suite is a credit
- * pool billed by pool usage, so a per-token USD price simply does not exist on
- * this route — but the model still burns credits. A panel row showing
- * "$0.00" is describing "no per-token price known", never "this model costs
- * nothing". Keep this comment next to the set so a future reader does not
- * "fix" it to real prices or, worse, to `null` (which pi-ai may render as an
- * unknown-cost row and break the picker's cost arithmetic).
- */
-export const NO_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-
-/**
  * Advertised context window when the catalog declares no usable one.
  *
  * pi-ai's options builder does arithmetic on `model.contextWindow`, so an
  * undefined value behaves like zero rather than "unknown" and breaks max-token
  * calculation; the qoder route therefore always supplies a positive number.
- * 128k is the conservative SenseNova-family default; a catalog field that
- * states a real window always wins.
+ * 131072 was the request-side fallback first (adapter resolveModel), and the
+ * badge now imports THIS constant — one fallback, quoted by both the roster
+ * and the wire path, so the two cannot disagree (D1).
  */
-export const FALLBACK_CONTEXT_WINDOW = 128_000;
+export const FALLBACK_CONTEXT_WINDOW = 131_072;
+
+/**
+ * The field-spelling tables for the two catalog capability figures, shared by
+ * BOTH readers: the panel projections (this file's `contextWindowOf` /
+ * `maxOutputLengthOf`) and the registered adapter's own parser
+ * (`adapter.ts` firstContextField / firstMaxOutputField). One list, one
+ * first-match order — the same fact keeps one implementation and one
+ * precedence on both sides of the display/request divide (U6 ledger D1:
+ * the two lists used to diverge, so an entry carrying only `max_tokens`
+ * showed "undeclared" on the panel while the request declared it).
+ * `max_output_length` is the field SenseNova `/v1/models` actually emits and
+ * stays first; the rest are the OpenAI-style fallbacks in request-side order.
+ */
+export const CONTEXT_WINDOW_FIELDS: readonly string[] = ["context_length", "context_window", "max_context_length", "contextLength", "contextWindow", "max_context_tokens"];
+export const MAX_OUTPUT_FIELDS: readonly string[] = ["max_output_length", "max_tokens", "max_output_tokens", "max_completion_tokens", "maxTokens", "maxOutputTokens", "maxCompletionTokens"];
 
 /**
  * Read a positive context window off the catalog entry's known spellings.
  *
- * `context_length` is the field the platform actually emits (verified against
- * the live catalog, 2026-09); the other spellings are kept as fallbacks in
- * case the platform ever reverts to a different name. SenseNova's `/v1/models`
- * entries are kept whole by `console-client.ts`, so a field the platform adds
- * later needs no parser change here — only its name has to be added to this
- * list.
+ * The spelling list is {@link CONTEXT_WINDOW_FIELDS} — shared with the
+ * adapter's parser, same order. A field the platform adds later needs no
+ * parser change — only its name appended to that one list.
  * @param {object} entry - one normalized catalog entry.
  * @returns {number} the declared window, or the fallback.
  */
 export function contextWindowOf(entry: CatalogEntry): number {
-  for (const key of ["context_length", "context_window", "contextWindow", "max_context_tokens"]) {
+  for (const key of CONTEXT_WINDOW_FIELDS) {
     const value = Math.floor(num(entry?.[key], 0));
     if (value > 0) return value;
   }
@@ -229,12 +225,13 @@ export function contextWindowOf(entry: CatalogEntry): number {
 /**
  * Read the platform's declared per-request output ceiling, 0 when unknown.
  *
- * The 0 return is an OUTCOME, not a blank: the descriptor then keeps
- * `maxTokens` UNDECLARED and the harness's `defaultMaxTokens ?? 32768` applies
- * — HALF of what flash-lite's catalogue states, so "declaring nothing" is not
- * "no ceiling" (module header, decision 2). A non-zero return IS a request
- * parameter: `toPiDescriptor` declares it as `maxTokens`, which is what raises
- * the cap to what the platform allows.
+ * The 0 return is an OUTCOME, not a blank: the adapter then keeps
+ * `defaultMaxTokens` UNDECLARED and the harness's `defaultMaxTokens ?? 32768`
+ * applies — HALF of what flash-lite's catalogue states, so "declaring nothing"
+ * is not "no ceiling" (module header, decision 2). A non-zero return IS a
+ * request parameter: `maxTokensForId` hands it (or the override) to the
+ * adapter's `defaultMaxTokens`, which is what raises the cap to what the
+ * platform allows.
  *
  * The same figure is the picker's display value (`rosterWithAvailability`
  * carries it as `maxOutputLength` → `llm.metaOutput`), so the number the user
@@ -244,7 +241,7 @@ export function contextWindowOf(entry: CatalogEntry): number {
  * @returns {number} the declared ceiling, or 0 when the entry states none.
  */
 export function maxOutputLengthOf(entry: CatalogEntry): number {
-  for (const key of ["max_output_length", "maxOutputLength", "max_output_tokens"]) {
+  for (const key of MAX_OUTPUT_FIELDS) {
     const value = Math.floor(num(entry?.[key], 0));
     if (value > 0) return value;
   }
@@ -269,27 +266,46 @@ export function maxOutputLengthOf(entry: CatalogEntry): number {
  * into "no ceiling": the map only ever states a positive integer, and guessing
  * a number where the platform stated none is what decision 2 forbids.
  *
- * The panel roster quotes THIS function, not {@link maxOutputLengthOf}, so the
- * "最大输出" the user reads is the number the request carries. Two callers, one
- * order — the alternative (roster quoting the catalogue while the descriptor
- * quotes the override) is how the panel starts lying.
+ * The panel roster quotes THIS function, and the registered adapter resolves
+ * the REQUEST ceiling through {@link maxTokensForId} with the same map
+ * (`adapter.ts` resolveModel → `defaultMaxTokens`) — the "最大输出" the user
+ * reads is the number the request carries, by construction (D1: the wire side
+ * used to drop the map, so the badge quoted a ceiling no request could send).
  * @param {object} entry - one normalized catalog entry.
- * @param {object} [overrides] - `{ "<model id>": <ceiling> }`; unsanitized input
+ * @param {object} [overrides] - `{ "<model id>": ceiling }`; unsanitized input
  *   is tolerated (each value is re-validated here) but `host-config.ts` already
  *   sanitized it at the config seam.
  * @returns {number} the effective ceiling, or 0 when nothing declares one.
  */
 export function maxTokensFor(entry: CatalogEntry, overrides?: Record<string, number> | null): number {
-  const id = str(entry?.id, "");
+  return maxTokensForId(str(entry?.id, ""), maxOutputLengthOf(entry) || undefined, overrides) ?? 0;
+}
+
+/**
+ * The override>catalogue order on bare ids — the ONE resolver both the wire
+ * path and the panel projection call.
+ *
+ * Split out of {@link maxTokensFor} so the registered adapter can apply the
+ * same precedence without a raw catalog entry: it holds an already-parsed
+ * `maxOutputTokens` figure, not the platform's field spellings. Returns
+ * `undefined` for "nothing declares a ceiling" (the adapter then leaves
+ * `defaultMaxTokens` undeclared and the harness's `defaultMaxTokens ?? 32768`
+ * applies) — the same OUTCOME `maxTokensFor` spells as `0`.
+ * @param {string} id - the model id the override map is keyed by.
+ * @param {number|undefined} catalogFigure - the catalogue's own figure
+ *   (already parsed; `undefined` = the entry declares none).
+ * @param {object} [overrides] - `{ "<model id>": ceiling }`; re-validated
+ *   here, not trusted (`Number.isInteger` excludes NaN/Infinity/fractions and
+ *   `> 0` keeps "0 means undeclared" single-valued).
+ * @returns {number|undefined} the effective ceiling, or `undefined` when
+ *   nothing declares one.
+ */
+export function maxTokensForId(id: string, catalogFigure: number | undefined, overrides?: Record<string, number> | null): number | undefined {
   if (id !== "" && overrides !== null && overrides !== undefined && typeof overrides === "object") {
     const raw = (overrides as Record<string, unknown>)[id];
-    // Re-validated, not trusted: this is exported and reachable from a
-    // descriptor build, so it must hold even if a caller hands it a raw config
-    // object. `Number.isInteger` excludes NaN/Infinity/fractions, and `> 0`
-    // keeps the "0 means undeclared" contract single-valued.
     if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return raw;
   }
-  return maxOutputLengthOf(entry);
+  return catalogFigure !== undefined && catalogFigure > 0 ? catalogFigure : undefined;
 }
 
 /**
@@ -358,58 +374,6 @@ export function supportedThinkingLevels(entry: CatalogEntry, userLevels?: string
 }
 
 /**
- * Map one catalog entry onto the pi-ai model descriptor the adapter offers.
- *
- * Vision is the SAME identification the snapshot publishes
- * (`identifyVisionModel`: the platform's `input_modalities` first, the name
- * fallback only when no structured field exists) — so the model picker cannot
- * disagree with the panel's vision list about which models accept images.
- * @param {object} entry - one normalized catalog entry (must carry `id`).
- * @param {object} [options] - wiring.
- * @param {string} [options.providerId] - the provider id the descriptor belongs to.
- * @param {string} [options.baseUrl] - the OpenAI-compatible base URL.
- * @returns {object} the pi-ai descriptor.
- */
-export function toPiDescriptor(entry: CatalogEntry, options: AdapterConfig = {}) {
-  const { providerId = LLM_PROVIDER_ID, baseUrl, thinkingOverrides } = options;
-  const id = str(entry?.id, "");
-  if (id === "") throw new Error("toPiDescriptor: catalog entry has no id");
-  const vision = identifyVisionModel(entry).vision === true;
-  // Resolved ONCE, before the literal: the spread below must not call the
-  // resolver twice (two calls cannot disagree today, but a future override
-  // lookup that logs or warns would then fire twice per descriptor).
-  const effectiveMaxTokens = maxTokensFor(entry, options.maxTokensOverrides);
-  return {
-    id,
-    // Prefer the catalog's own display name; fall back to the id.
-    name: str(entry.name, id),
-    api: "openai-completions",
-    provider: providerId,
-    baseUrl,
-    // Vision is automatic: the catalog's modality field decides, the user does
-    // not configure it per model.
-    input: vision ? ["text", "image"] : ["text"],
-    // Every SenseNova chat model thinks by default and advertises
-    // `supported_features: ["reasoning"]`; see the module header (decision 3)
-    // for why the flag is true and what the map pins.
-    reasoning: true,
-    thinkingLevelMap: thinkingLevelMapFor(entry, thinkingOverrides?.[id]),
-    cost: { ...NO_COST },
-    contextWindow: contextWindowOf(entry),
-    // `supportsDeveloperRole: false` is load-bearing — see the module header.
-    // `maxTokens` carries the EFFECTIVE ceiling: the operator override when the
-    // settings row states one, else the catalogue's OWN figure (the harness
-    // would otherwise cap output at 32768 via defaultMaxTokens — see the module
-    // header, decision 2). When neither states one the field stays UNDECLARED
-    // rather than guessing a number. {@link maxTokensFor} is the only place
-    // that order lives, and the panel roster quotes the same function, so the
-    // figure the user reads is the figure the request carries.
-    ...(effectiveMaxTokens > 0 ? { maxTokens: effectiveMaxTokens } : {}),
-    compat: { maxTokensField: "max_tokens", supportsDeveloperRole: false }
-  };
-}
-
-/**
  * Narrow a catalog to the models the user enabled.
  *
  * An **empty list means "no filter"**: a fresh install has curated nothing and
@@ -444,123 +408,14 @@ export function filterByEnabled(entries: unknown, enabledIds?: unknown): object[
 export const HIDE_ALL_MODELS = "__hide_all__";
 
 /**
- * Whether one model id would be offered for a given allow-list.
- *
- * Mirrors {@link filterByEnabled}: an empty list offers everything, a
- * non-empty list is a strict allow-list, and the {@link HIDE_ALL_MODELS}
- * sentinel offers nothing.
- * @param {string[]|undefined} enabledIds - the allow-list; positionally required,
- *   though `undefined`/non-array is tolerated at runtime (treated as empty).
- * @param {string} id - the model id to ask about.
- * @returns {boolean}
- */
-export function isModelEnabled(enabledIds: string[] | undefined, id: string): boolean {
-  const list = Array.isArray(enabledIds) ? enabledIds : [];
-  if (list.length === 0) return true;
-  return list.includes(str(id, ""));
-}
-
-/**
- * The panel-facing roster: one row per addressable catalog entry.
- *
- * Deliberately a projection, not the raw entries: the snapshot carries no
- * more than the picker needs (id, a display name, and the same vision
- * verdict the descriptors use), so a catalogue field the platform adds later
- * cannot leak into the panel for no reason.
- *
- * Deduping keeps the LAST occurrence at its first-seen position, exactly like
- * {@link buildDescriptors} and `catalog-store.normalizeEntries`: a fresher
- * read of the same id wins. If this diverged, the roster and the registered
- * offer would disagree about which models exist, and a ticked model could
- * become an unregistered one.
- * @param {object[]} entries - the normalized catalog entries.
- * @returns {{id: string, name: string, vision: boolean, imageGen: boolean}[]}
- */
-export function rosterOf(entries: unknown): { id: string; name: string; vision: boolean; imageGen: boolean }[] {
-  const position = new Map();
-  const out: { id: string; name: string; vision: boolean; imageGen: boolean }[] = [];
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    // 治本：出图模型（imageGen）从对话清单划走——它们不属于对话模型，
-    // 只服务于出图/识图工具。需要完整目录（含图模）的调用方走
-    // `rosterWithAvailability` 之外的路（多模态下拉不再依赖本函数）。
-    if (isImageGenModel(entry) === true) continue;
-    const id = str(entry?.id, "");
-    if (id === "") continue;
-    const row = {
-      id,
-      name: str(entry?.name, id),
-      vision: identifyVisionModel(entry).vision === true,
-      imageGen: isImageGenModel(entry) === true,
-    };
-    if (position.has(id)) {
-      out[position.get(id)] = row;
-    } else {
-      position.set(id, out.length);
-      out.push(row);
-    }
-  }
-  return out;
-}
-
-/**
- * Build the whole descriptor list for one catalog.
- *
- * Entries without an id are dropped (they could not be addressed on the wire)
- * and duplicate ids keep the LAST occurrence, matching the catalog store's
- * normalization so the adapter and the persisted catalog can never diverge.
- * @param {object[]} entries - the normalized catalog entries.
- * @param {object} options - `{ providerId, baseUrl, enabledIds, maxTokensOverrides }`.
- * @returns {object[]} the pi-ai descriptors, in first-seen order.
- */
-export function buildDescriptors(entries: any[], options: AdapterConfig = {}) {
-  const { providerId = LLM_PROVIDER_ID, baseUrl, enabledIds = [], unavailableModelIds = [], maxTokensOverrides, thinkingOverrides } = options;
-  // Image-generation models (`output_modalities: ["image"]`) cannot be
-  // addressed as chat models and are excluded BEFORE the allow-list, so a
-  // stale id in `enabledIds` matches nothing rather than resurrecting one.
-  const blocked = new Set(Array.isArray(unavailableModelIds) ? unavailableModelIds : []);
-  const filtered = filterByEnabled(entries, enabledIds).filter(isChatModel)
-    // Known-uncallable ids never become descriptors — same set the picker's
-    // `parseCatalog` drops (a 403 plan restriction never self-hides via the
-    // failure cache, so the exclusion must travel with every projection).
-    .filter((entry) => !KNOWN_UNROUTABLE_MODELS.has(str((entry as { id?: unknown })?.id, "")));
-  const seen = new Map();
-  // `undefined` slots exist briefly: a first sighting reserves the position
-  // (push), the descriptor lands at that index below — the hole is always
-  // filled before `out` is returned.
-  const out: (object | undefined)[] = [];
-  for (const entry of Array.isArray(filtered) ? filtered : []) {
-    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
-    const catalogEntry = entry as CatalogEntry;
-    const id = str(catalogEntry.id, "");
-    if (id === "") continue;
-    // A model whose quota pool is exhausted would answer every request with
-    // `429 quota_exceeded`, so the picker must not offer it — the panel (via
-    // `rosterWithAvailability`) still shows it, greyed, with the reason. Skipping
-    // here means a doomed request is never even dispatched.
-    if (blocked.has(id)) continue;
-    if (!seen.has(id)) {
-      seen.set(id, out.length);
-      out.push(undefined);
-    }
-    out[seen.get(id)] = toPiDescriptor({ ...catalogEntry, id }, { providerId, ...(maxTokensOverrides !== undefined ? { maxTokensOverrides } : {}), ...(baseUrl !== undefined ? { baseUrl } : {}) , ...(thinkingOverrides !== undefined ? { thinkingOverrides } : {}) });
-  }
-  // Every `undefined` pushed above is overwritten at that same index before the
-  // loop advances (see the comment on `out`), so no hole survives to here. The
-  // assertion states that invariant rather than re-filtering at runtime: a
-  // `filter` would allocate a second array on every catalog poll, and this
-  // function's contract is `object[]`, not "maybe a hole".
-  return out as object[];
-}
-
-/**
  * The panel-facing roster with per-model quota availability.
  *
- * Like {@link rosterOf} it projects one row per chat-model id, but each row also
- * carries whether the model's quota pool is currently exhausted — the
- * "清单自带识别" the provider advertises to the panel. Unlike the PICKER
- * (which drops exhausted models via `buildDescriptors` so no doomed request is
- * dispatched), the panel keeps them in the list, greyed, so the user can see
- * *why* a model is missing from the picker rather than wondering where it went.
+ * Projects one row per chat-model id, each carrying whether the model's quota
+ * pool is currently exhausted — the "清单自带识别" the provider advertises to
+ * the panel. Unlike the PICKER (whose registered adapter drops exhausted
+ * models at `listModels` so no doomed request is dispatched), the panel keeps
+ * them in the list, greyed, so the user can see *why* a model is missing from
+ * the picker rather than wondering where it went.
  * @param {object[]} entries - the normalized catalog entries.
  * @param {object} pools - the `parsePools` result, or anything without a `pools`
  *   array (in which case every row reads as available).
@@ -634,41 +489,4 @@ export function summarizeCatalog(entries: unknown) {
     visionCount: visionIds.length,
     visionIds
   };
-}
-
-/**
- * Enforces one upstream = one provider identity, before the descriptors reach
- * the Host.
- *
- * DSH stamps `source.provider` on every assistant message from the ROUTE id it
- * resolved, while `replayState.response.provider` is copied from the
- * descriptor's own `provider` field. The Host's replay check compares the two
- * and, on a mismatch, drops that assistant turn to a foreign message — pi-ai
- * then replays every thinking block as plain text. A descriptor must therefore
- * carry exactly the id the adapter registers under. Two upstreams sharing one
- * identity constant break that check on whichever route is named differently,
- * which is why the two routes here own separate ids (`LLM_PROVIDER_ID`,
- * `RACCOON_PROVIDER_ID`) rather than one shared one.
- *
- * Throws instead of repairing: a mismatched descriptor means every replayed
- * turn on that route is already degraded, so assembly time is the last cheap
- * place to report it — once, instead of silently on each request.
- * @param {object[]} models - the descriptors this upstream will publish.
- * @param {string} providerId - the id this upstream registers under.
- * @returns {object[]} the same descriptors, when the invariant holds.
- */
-export function assertProviderOwnership(models: unknown, providerId: unknown): object[] {
-  const owner = str(providerId, "");
-  if (owner === "") throw new Error("assertProviderOwnership: providerId is required");
-  const list = Array.isArray(models) ? models : [];
-  for (const model of list) {
-    const stamp = str((model as { provider?: unknown })?.provider, "");
-    if (stamp !== owner) {
-      const id = str((model as { id?: unknown })?.id, "?");
-      throw new Error(
-        `assertProviderOwnership: descriptor "${id}" is stamped "${stamp}" but this upstream registers as "${owner}"`
-      );
-    }
-  }
-  return list as object[];
 }

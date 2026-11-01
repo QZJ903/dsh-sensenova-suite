@@ -1056,6 +1056,71 @@ async function withNetwork(stub, body) {
         adapterDeps.builds.length === 0, String(adapterDeps.builds.length));
     });
   } catch (error) { fail("O2: registration without llm service", error); }
+
+  // O3. a FAILED models-save publish must not adopt the new offer's signature
+  // (U6 ledger D2): the poll's signature mismatch is the retry signal that
+  // lands the saved allow-list once the build heals. Syncing after a failed
+  // publish is how the next poll compares signatures, sees "no change", and
+  // never rebuilds — the saved roster would freeze out of the picker until a
+  // restart. Here the build fails exactly once, AT the models save; the next
+  // poll must therefore rebuild. (Before the route's sync gate this was
+  // `settled + 1`: the route synced, the poll saw an equal signature, and no
+  // build followed.)
+  try {
+    const credentials = makeCredentials(storedGrant(jwtExpiring(120), "r", 7200));
+    credentials.refs.set("SENSENOVA_API_KEY", "sk-routing3");
+    const llm = makeFakeLlm();
+    const builds = [];
+    let failNextBuild = false;
+    const net = await loginNetwork();
+    await withNetwork(async (url, init) => {
+      const target = String(url);
+      if (target.includes("/v1/models") || target.includes("/models")) {
+        return new Response(JSON.stringify({
+          data: [{ id: "m-a" }, { id: "m-b" }]
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return net(url, init);
+    }, async () => {
+      const call = await mount(credentials, { registerProvider: true, providerRefreshMinutes: 0 }, {
+        llm,
+        loadAdapterModule: async () => ({
+          createSensenovaAdapter(options) {
+            builds.push(options);
+            if (failNextBuild) throw new Error("factory boom (O3 test)");
+            return { providerIds: ["sensenova-suite"], adapter: { fake: true } };
+          }
+        })
+      });
+      // Let the mount seed settle (the same assumption O1 makes), then poll
+      // once so the publisher's state carries the fetched catalogue.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await call(SNAPSHOT_PATH, makeRequest());
+      const settled = builds.length;
+      check("O3 precondition: the last build is the catalogue build",
+        builds.at(-1)?.entries?.length === 2, String(builds.at(-1)?.entries?.length));
+
+      // The save whose publish fails: the allow-list lands on disk, the build
+      // throws, and (the pin) the route must NOT sync the new offer's signature.
+      failNextBuild = true;
+      const saved = await call(MODELS_PATH, makePost({ enabledModelIds: ["m-a"] }));
+      failNextBuild = false;
+      check("O3 the save answers ok with the build failure named",
+        saved.payload.ok === true && /boom/.test(String(saved.payload.providerError)),
+        JSON.stringify(saved.payload));
+
+      // The next poll must rebuild with the saved allow-list: the signature was
+      // NOT adopted, so the poll still sees a change.
+      const retry = await call(SNAPSHOT_PATH, makeRequest());
+      check("O3 the poll after a failed save rebuilds the provider",
+        builds.length === settled + 2,
+        `builds ${settled} -> ${builds.length}`);
+      check("O3 the retried registration carries the saved allow-list",
+        retry.payload.llm?.providerRegistered === true &&
+        JSON.stringify(builds.at(-1)?.enabledIds) === JSON.stringify(["m-a"]),
+        JSON.stringify({ registered: retry.payload.llm?.providerRegistered, ids: builds.at(-1)?.enabledIds }));
+    });
+  } catch (error) { fail("O3: failed models-save publish must not freeze the offer", error); }
 }
 
 // === P. the provider switch route: the panel value beats the config default

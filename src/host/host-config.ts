@@ -108,8 +108,10 @@ export const CONFIG_DEFAULTS = Object.freeze({
    * (sensenova-docs-full.md, 2026-10-26): `deepseek-flash` max_tokens
    * [1, 393216]，`kimi-k3` max_completion_tokens 默认 128K。目录探测比文档
    * 滞后（探测返回 65536），以文档为准。
-   * Read by `llm-models.maxTokensFor`, which BOTH the descriptor build and the
-   * panel roster call — the value sent and the value displayed are one order.
+   * Read by `llm-models.maxTokensForId`, which BOTH the panel roster and the
+   * registered adapter call (resolveModel → `defaultMaxTokens`) — the value
+   * sent and the value displayed are one order (the promise the patch row
+   * records; the wire side used to drop the map — U6 ledger D1).
    * Scope: the DIRECTLY-REGISTERED provider (`registerProvider`) and the panel
    * roster that mirrors it.
    */

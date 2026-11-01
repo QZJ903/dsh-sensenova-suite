@@ -102,9 +102,6 @@ export interface PublishResult {
  *   peer-dependent adapter factory module; defaults to the real `llm-adapter.ts`.
  * @param {(service: string) => object|null} [deps.getLlm] - optional-service
  *   resolver for the `llm` registration service.
- * @param {() => Promise<string>} [deps.resolveApiKey] - resolves the live `sk-`
- *   key per request (the `api-key-store.ts` seam). The adapter factory reads
- *   it, so it must be a real resolver, never a snapshot.
  * @param {(event: string) => void} [deps.emit] - `ctx.emit` for the adapter
  *   update event.
  * @param {object} [deps.logger] - `ctx.logger` for the build-failure warning.
@@ -125,7 +122,6 @@ export function createProviderPublisher(deps: ProviderPublisherDeps = {}) {
     panelSwitch,
     loadAdapterModule,
     getLlm,
-    resolveApiKey,
     emit,
     logger
   } = deps;
@@ -133,7 +129,6 @@ export function createProviderPublisher(deps: ProviderPublisherDeps = {}) {
   const effectivePanelSwitch = panelSwitch ?? (async () => null);
     const effectiveLoadAdapterModule = loadAdapterModule ?? (() => import("./llm-adapter.ts"));
   const effectiveGetLlm = getLlm ?? (() => null);
-  const effectiveResolveApiKey = resolveApiKey ?? (async () => "");
   // `emit` is deliberately NOT defaulted here. The publish path hands the raw
   // (possibly absent) `ctx.emit` down to `publish-core`, whose
   // `emitAdaptersUpdated` copes with both a missing and a refusing emitter — a
@@ -172,8 +167,10 @@ export function createProviderPublisher(deps: ProviderPublisherDeps = {}) {
 
   /**
    * The publish queue and the `disposed` gate — the first two of the three
-   * load-bearing semantics. Both live in `publish-core.ts` now, so the
-   * Raccoon publisher's copy cannot drift from this one.
+   * load-bearing semantics. Both live in `publish-core.ts` as the single copy
+   * (the Raccoon publisher that once held a second copy is gone with the
+   * second-upstream removal), so a future second upstream reuses them instead
+   * of re-forking.
    */
   const queue = createPublishQueue();
 
@@ -263,13 +260,13 @@ export function createProviderPublisher(deps: ProviderPublisherDeps = {}) {
         entries: state.entries,
         enabledIds: state.enabledIds,
         baseUrl: effectiveSettings.apiBase ?? "",
-        resolveApiKey: effectiveResolveApiKey,
-        get: effectiveGetLlm,
         unavailableModelIds: state.unavailableIds,
         // Read on EVERY publish from the live settings, like `apiBase` above:
         // editing the map in the row must take effect on the next catalog poll
         // or switch flip, with no restart. A value captured at mount would make
-        // the knob look dead until the Host was reloaded.
+        // the knob look dead until the Host was reloaded. The adapter carries
+        // the map into resolveModel (`maxTokensForId`), so the ceiling reaches
+        // the wire — not just the roster (U6 ledger D1's promise restored).
         maxTokensOverrides: effectiveSettings.maxTokensOverrides
       });
       // The same reason, stated: an adapter is registered Host-wide, so a
@@ -280,6 +277,14 @@ export function createProviderPublisher(deps: ProviderPublisherDeps = {}) {
       // A missing llm peer surfaces as Node's ERR_MODULE_NOT_FOUND on the
       // thrown value (which may not be a plugin Error at all) — the shared
       // describer reads it, redacts the message, and appends the remedy.
+      //
+      // The domain fields written above are deliberately NOT rolled back on a
+      // BUILD failure — the same "user intent survives" semantics as the
+      // switch-off branch: a save made while the build was broken must not be
+      // discarded. Retry cadence is signature-driven and independent of these
+      // fields (failed publishes never sync signatures — the poll and route
+      // gates), so keeping the new values costs nothing and lets a switch flip
+      // or a healed environment re-publish the saved offer directly.
       const described = describeBuildFailure(e);
       state.error = described.note;
       warnBuildFailure(effectiveLogger, "SenseNova", described);

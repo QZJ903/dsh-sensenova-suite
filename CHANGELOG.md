@@ -1,5 +1,16 @@
 # 更新日志（Changelog）
 
+## 0.1.41（2026-11-01）
+
+- **U6 修复轮（目录与供应商发布链，四批处置全清单）**：
+  - **maxTokensOverrides 接回请求侧（P2，拍板 a'）**：文档天花板覆盖滞后目录的 2026-10-26 决定被 wire adapter 迁移静默弄丢请求半边——面板显示 393216/131072 而请求被目录压在 65536。现 `maxTokensForId` 单点判据（override > 目录值 > 不申报）接进 adapter `resolveModel`（每请求现读，defaultMaxTokens 经宿主传导三线），面板与请求同一判据同一 map；字段拼写表（上下文窗/最大输出）与兜底常数（128k→131072）单源化，双实现分叉消除。
+  - **路由缝失败发布门控（D2）**：models/api-key 路由发布失败（`ok:false`）不再同步签名——此前「失败发布被签名固化 → 选择器冻结到重启」从路由缝回流（轮询缝/种子缝早有门控）；`Wiring.publishProvider` 返回类型收窄 `PublishResult`；routes.test 新段 O3 变异式钉。
+  - **同端点漂移姿态统一（S1，拍板 β）**：`fetchModelCatalog` 对「200 无 data 数组」从静默回空改为抛错（与 adapter parseCatalog 同姿态）——旧形状会把 catalog.json 空覆写并重启播种空目录；合法空答案（`data: []`）不受影响。snapshot-aggregate L1 钉变异式验红。
+  - **快照 offered 门控（顺带2）**：发布失败时快照 roster/counts 引用真在服务的对（`providerState.entries`），不再描述未生效的新目录；M1/M2 钉。
+  - **死代码清理（顺带3 + 死导出 6 个）**：删 `toPiDescriptor`/`buildDescriptors`/`isModelEnabled`/`rosterOf`/`NO_COST`/`assertProviderOwnership` 与零消费者的 `AdapterConfig` 接口（pi-ai 描述符构建自 wire adapter 接管后无生产路径）；`resolveApiKey`/`get` 死参五处清除。测试面同批手术：活语义全部改由幸存函数直钉（thinkingLevelMapFor/identifyVisionModel/rosterWithAvailability），provider 255/contract 85/retry 25 全绿；duplication 陈旧白名单条目按门禁自身检测删除。**compat.supportsDeveloperRole 决策载体随删，wire 路径 developer-role 姿势归 U3 审计。**
+  - **注释真相轮（D3/D4/D5 + 顺带1）**：doctor 幽灵症状段删除；Raccoon 第二上游叙述簇四处改真（收编裁定沿革）；「the removed module」死残句×2、arming 注释×2 改实指；DSH-PLUGIN.md 路由清单改六条实形 + 套件计数去硬编码。
+  - **测试**：T2 行为钉（构建失败保留 offer 字段 vs 注册失败回滚，非对称自此有锚）；T3 peer 门控岛（真 adapter resolveModel 三钉，peer 缺席大字跳过、其余 import 错误照常红）；catalog-gate cachedEntries 注释补「成功空抓」态；provider.test 头注口径同步。
+
 ## 0.1.40（2026-10-31）
 
 - **U5 审计修复轮（控制台鉴权与凭据链，两批全毕）**：

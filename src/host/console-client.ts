@@ -199,18 +199,27 @@ export async function fetchModelCatalog(
     });
     if (!response.ok) throw new Error(`/v1/models returned HTTP ${response.status}`);
     const body = await response.json();
+    // A 200 whose body carries no `data` array is upstream shape drift, NOT an
+    // empty catalogue — the same posture the registered adapter's own parser
+    // of this endpoint takes (adapter.ts parseCatalog throws). Answering `[]`
+    // here would flow downstream as a signature change and WIPE the stored
+    // last-good catalogue (catalog.json, which the restart seed inherits);
+    // throwing makes the poll's `.catch(() => null)` read "no catalogue this
+    // poll" — nothing written, nothing re-published. A legitimate empty answer
+    // is `data: []` (an array), which still parses below.
+    if (!Array.isArray(body?.data)) {
+      throw new Error("/v1/models returned a body without a data array");
+    }
     // Keep the WHOLE entry, not just the id: vision identification may read
     // structured fields (input_modalities etc.) that a bare id list throws
     // away. `id` is normalized; unknown fields ride along untouched so a
     // platform adding `input_modalities` needs no parser change here.
-    const models = Array.isArray(body?.data)
-      ? body.data
-          .map((entry: unknown) => {
-            const source = obj(entry);
-            return { id: str(source.id, ""), ...source };
-          })
-          .filter((entry: { id?: string }) => entry.id !== "")
-      : [];
+    const models = body.data
+      .map((entry: unknown) => {
+        const source = obj(entry);
+        return { id: str(source.id, ""), ...source };
+      })
+      .filter((entry: { id?: string }) => entry.id !== "");
     return models;
   };
 
