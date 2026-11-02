@@ -301,38 +301,39 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
     regOff.some((line) => line.includes("sensenova-suite")), regOff.join("\n"));
 
   const registered = rendered(render.ProviderStatus, {
-    llm: { hasApiKey: true, keySource: "credentials", ephemeral: false, registerProvider: true,
+    llm: { registerProvider: true,
       llmAvailable: true, providerRegistered: true, providerId: "sensenova-suite",
       modelCount: 3, visionCount: 1,
       // A defensive field the Host never sends: it must never reach the screen.
       value: "sk-secret-value" },
+    poolConfigured: true,
     tt: ttZh
   });
   const regOn = rendered(render.ProviderRegStatus, {
-    llm: { hasApiKey: true, keySource: "credentials", ephemeral: false, registerProvider: true,
+    llm: { registerProvider: true,
       llmAvailable: true, providerRegistered: true, providerId: "sensenova-suite",
       modelCount: 3, visionCount: 1, value: "sk-secret-value" },
     tt: ttZh
   });
-  // 2026-10-27: the happy path is SILENT — a stored key and a registered
+  // 2026-10-27: the happy path is SILENT — a configured pool and a registered
   // provider both render nothing (the counts said nothing the 接入 API tab's
   // own model list didn't). The secret guard stays as a regression tripwire:
   // if a status line ever comes back, the key value must still never ride it.
-  check("a stored key is silent", registered.length === 0, registered.join("\n"));
+  // (2026-11-03: the nudge tracks the POOL only — the primary-key concept was
+  // dismantled, so poolConfigured is the whole story.)
+  check("a configured pool is silent", registered.length === 0, registered.join("\n"));
   check("a fully registered provider is silent", regOn.length === 0, regOn.join("\n"));
   check("the key value itself never renders",
     !registered.some((line) => line.includes("sk-secret-value"))
       && !regOn.some((line) => line.includes("sk-secret-value")), regOn.join("\n"));
-  check("ephemeral is quiet when a credentials service exists",
-    !registered.some((line) => line.includes(zh["llm.ephemeral"])));
 
   const fromEnv = rendered(render.ProviderStatus, {
-    llm: { hasApiKey: true, keySource: "env", ephemeral: true, registerProvider: true,
+    llm: { registerProvider: true,
       llmAvailable: true, providerRegistered: true, providerId: "p", modelCount: 0, visionCount: 0 },
     tt: ttZh
   });
-  check("an environment key renders ONLY the ephemeral warning",
-    fromEnv.length === 1 && fromEnv.some((line) => line.includes(zh["llm.ephemeral"])), fromEnv.join("\n"));
+  check("an empty pool renders the nudge (its only remaining line)",
+    fromEnv.length === 1 && fromEnv.some((line) => line.includes(zh["llm.noKey"])), fromEnv.join("\n"));
 
   const noService = rendered(render.ProviderRegStatus, {
     llm: { hasApiKey: true, keySource: "credentials", registerProvider: true,

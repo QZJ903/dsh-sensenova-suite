@@ -620,7 +620,7 @@ try {
   // (input ["text"], output ["image"]) model. The snapshot must list only
   // the vision-capable one — an output-only model is NOT a vision model, and
   // that distinction is what step two publishes to the settings row.
-  // The e2e home has no SENSENOVA_API_KEY, so the catalog is unavailable
+  // The e2e home has no pool key yet, so the catalog is unavailable
   // here (the model list degrades rather than fabricating): assert that
   // degraded shape holds AND that visionModels stays ABSENT (not an empty
   // list) when the key is missing — the panel must not claim "no vision
@@ -639,25 +639,23 @@ try {
 
   // === step three: a pasted key lights the catalog AND the provider =======
   // Everything above ran with no key, which is the degradation path. Now the
-  // panel saves one through its own route, and the very next poll must fetch
+  // panel adds one through the POOL route (the primary-key concept is gone,
+  // 2026-11-03 — pool members are peers), and the very next poll must fetch
   // the catalog with it, persist it, and register the provider — no restart,
   // no hand-written `llm-pi-ai` row.
   {
     const KEY = "sk-e2e-not-a-real-key";
     const before = fake.log.catalog;
-    const saved = await call("/api/dsh-sensenova-suite/api-key", {
+    const saved = await call("/api/dsh-sensenova-suite/pool", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ apiKey: KEY })
+      body: JSON.stringify({ action: "add", apiKey: KEY })
     });
-    check("the key is accepted and reported as present",
-      saved.body?.ok === true && saved.body?.hasApiKey === true,
+    check("the key is accepted into the pool",
+      saved.body?.ok === true,
       JSON.stringify(saved.body ?? {}).slice(0, 160));
-    // The credentials service is what makes the key survive a restart; a run
-    // that quietly fell back to process memory would pass `hasApiKey` and lose
-    // the key on the next boot.
-    check("the key landed in the credentials service, not process memory",
-      saved.body?.keySource === "credentials", String(saved.body?.keySource));
+    // The credentials service is what makes the key survive a restart; the
+    // pool route writes the ref there (addKeySecret) before listing the row.
     // The route answers with state, so the assertion is about the whole body:
     // a key echoed anywhere in a response is the failure this guards.
     check("no route echoes the key back", !saved.text.includes("sk-e2e"),

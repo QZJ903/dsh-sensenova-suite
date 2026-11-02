@@ -39,16 +39,14 @@ try {
 
   let def;
   const ctx = { webServer: { register: (d) => { def = d; return () => {}; } } };
-  // 桩带一个内存凭据库：addKeySecret/removeKeySecret/forgetPanelKey 真落真删，
+  // 桩带一个内存凭据库：addKeySecret/removeKeySecret 真落真删，
   // findKeyHolder 按同一份真值作答——查重断言才有「同值」可撞。
+  // （主 key 概念已拆除 2026-11-03：hasPanelKey/forgetPanelKey 随之消失。）
   const vault = new Map();
-  let panelValue = null;
   const admin = {
     refreshKeysCalls: 0,
-    forgotten: false,
     secrets: [],
     store,
-    setDefaultNote: (note) => store.setDefaultNote(note),
     phaseOf: () => "running",
     refresh: async () => {},
     refreshKeys: async () => { admin.refreshKeysCalls += 1; },
@@ -62,10 +60,7 @@ try {
       vault.set(`dsh_pool_${id.replace(/^key-/, "key_")}`, apiKey);
     },
     removeKeySecret: async (id) => { vault.delete(`dsh_pool_${id.replace(/^key-/, "key_")}`); },
-    hasPanelKey: async () => panelValue !== null,
-    forgetPanelKey: async () => { admin.forgotten = true; panelValue = null; },
     findKeyHolder: async (value) => {
-      if (panelValue === value) return "default";
       for (const [ref, v] of vault) {
         if (v === value) return ref.replace(/^dsh_pool_key_/, "key-");
       }
@@ -131,19 +126,6 @@ try {
     afterClear.keys.find((k) => k.id === "key-3")?.name === "" && afterClear.keys.length === 2,
     JSON.stringify(afterClear.keys));
 
-  // 4.5 default（面板默认 key）的备注：它不在 keys 清单里，走单独的 defaultNote
-  // 字段——2026-10-27 真机：rename id=default 在 keys.map 零命中、静默丢失。
-  const defaultRenamed = await post({ action: "rename", id: "default", name: "面板主 key" });
-  const afterDefault = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
-  check("rename id=default 落到 defaultNote 字段",
-    defaultRenamed.status === 200 && afterDefault.defaultNote === "面板主 key",
-    `${defaultRenamed.status} ${JSON.stringify(afterDefault.defaultNote)}`);
-  check("default 备注不影响 keys 清单",
-    afterDefault.keys.find((k) => k.id === "key-2")?.name === "" && afterDefault.keys.length === 2);
-  const defaultCleared = await post({ action: "rename", id: "default", name: "" });
-  const afterDefaultClear = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
-  check("default 备注可清空", defaultCleared.status === 200 && afterDefaultClear.defaultNote === "");
-
   // 4. 未知 action 拒 400。
   const bad = await post({ action: "explode", id: "key-2" });
   check("未知 action 拒 400", bad.status === 400 && bad.body?.ok === false, `${bad.status}`);
@@ -158,7 +140,7 @@ try {
     got.ok === true && Array.isArray(got.keys) && got.keys.some((k) => k.id === "key-3"),
     out.slice(0, 120));
 
-  // 6. add：编号续接（default 不在 → 现有最大号 +1）、凭据与清单各落一份、refreshKeys 触发。
+  // 6. add：编号续接（现有最大号 +1）、凭据与清单各落一份、refreshKeys 触发。
   const refreshBeforeAdd = admin.refreshKeysCalls;
   const added = await post({ action: "add", apiKey: "sk-newpoolkeyvalue" });
   const afterAdd = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
@@ -185,16 +167,6 @@ try {
   check("add 同值不产生新条目/新凭据",
     afterDup.keys.length === afterAdd.keys.length && admin.secrets.length === 1,
     `${JSON.stringify(afterDup.keys)} secrets=${admin.secrets.length}`);
-
-  // 8. add 与面板主 key 同值 → 拒（default 持有）。
-  panelValue = "sk-panelpkey";
-  const dupPanel = await post({ action: "add", apiKey: "sk-panelpkey" });
-  panelValue = null;
-  check("add 与面板主 key 同值拒（报脱敏名）",
-    dupPanel.status === 200 && dupPanel.body?.ok === false
-      && /面板主 key/.test(String(dupPanel.body?.error))
-      && String(dupPanel.body?.error).includes(maskKey("sk-panelpkey")),
-    `${dupPanel.status} ${JSON.stringify(dupPanel.body)}`);
 
   // 9. delete key-<n>：凭据 + 清单条目一起消失、记 deletedIds、refreshKeys 触发（相位不滞留）。
   const refreshBeforeDelete = admin.refreshKeysCalls;
@@ -228,16 +200,6 @@ try {
     admin.refreshKeysCalls > refreshBeforeRestore,
     `${refreshBeforeRestore} -> ${admin.refreshKeysCalls}`);
 
-  // 10. delete default：forget 面板凭据 + refreshKeys（面板 key 不在 keys 清单）。
-  panelValue = "sk-panelpkey";
-  const removedDefault = await post({ action: "delete", id: "default" });
-  panelValue = null;
-  check("delete default 调 forgetPanelKey 且 ok",
-    removedDefault.status === 200 && removedDefault.body?.ok === true && admin.forgotten,
-    `${removedDefault.status} ${JSON.stringify(removedDefault.body)}`);
-  check("delete default 也触发 refreshKeys",
-    admin.refreshKeysCalls > refreshBeforeDelete + 1,
-    `${refreshBeforeDelete} -> ${admin.refreshKeysCalls}`);
   // 11. globalConcurrency 钳制（U8 测试缺失 T2，此前全零钉）：负数钳 0、小数
   //     向下取整、0 是合法保存值（跟随语义，不得读作缺席）。路由与 store 两层
   //     同形钳（Math.max(0, Math.floor)）在此各钉一层。

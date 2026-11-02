@@ -128,8 +128,6 @@ export interface Wiring {
   inflight: Map<string, Promise<unknown>>;
   /** The token store (`createTokenStore`). */
   tokenStore: ReturnType<typeof import("./token-store.ts").createTokenStore>;
-  /** The inference API-key store (`createApiKeyStore`). */
-  apiKeyStore: ReturnType<typeof import("./api-key-store.ts").createApiKeyStore>;
   /** The model-catalog store (`createFileCatalogStore`). */
   catalogStore: ReturnType<typeof import("./catalog-store.ts").createFileCatalogStore>;
   /** The provider switch store (`createFileProviderStore`). */

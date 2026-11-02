@@ -50,6 +50,11 @@ export interface VisionSettings {
   bridgePrompt?: string;
   /** 用户勾选为「可识图」的模型 id 列表（在接入 API tab 思考档位旁勾选）。 */
   visionModels?: string[];
+  /** 手动取消过的「原生看图」模型 id 墓碑（2026-11-03 拍板：自动勾为底、手动
+   * 优先级最高）——原生看图模型（目录 input_modalities 含 image）默认自动勾，
+   * 用户显式取消的记录在此，自动勾不再翻案；手动勾选（含目录没报 image 的
+   * 模型）进 visionModels 原样保留。 */
+  autoOffIds?: string[];
 }
 
 /** 工具开关（面板为主设置；配置 text2imgEnabled 等为部署默认）。 */
@@ -86,8 +91,6 @@ export interface PoolStoreRecord {
   vision: VisionSettings;
   /** 每模型可用思考档位（用户配置；modelId → 档位列表）。空 = 用平台/静态默认。 */
   thinking: Record<string, string[]>;
-  /** 面板默认 key（apiKeyStore 那把）的备注——它不在 keys 清单里，单独存。 */
-  defaultNote?: string;
 }
 
 /** 空白记录（全部回落配置默认）。vision 带默认勾选集：文件还不存在的新用户
@@ -98,7 +101,7 @@ export function emptyPoolRecord(): PoolStoreRecord {
     version: POOL_STORE_VERSION,
     disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {},
     keys: [],
-    toolsEnabled: {}, text2img: {}, img2img: {}, vision: { visionModels: [...DEFAULT_VISION_MODELS] }, thinking: {}
+    toolsEnabled: {}, text2img: {}, img2img: {}, vision: { visionModels: [...DEFAULT_VISION_MODELS], autoOffIds: [] }, thinking: {}
   };
 }
 
@@ -162,13 +165,16 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     // 可看图勾选默认集（2026-10-27 用户拍板）：deepseek-flash / kimi-k3 /
     // sensenova-6.8-flash-lite 原生看图（不走转述）。字段缺省 = 按此默认；
     // 显式保存的空数组（全不勾）尊重用户选择。
-    const out: VisionSettings = { visionModels: [...DEFAULT_VISION_MODELS] };
+    const out: VisionSettings = { visionModels: [...DEFAULT_VISION_MODELS], autoOffIds: [] };
     if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
     const rec = value as Record<string, unknown>;
     const model = strOf(rec.model); if (model !== undefined) out.model = model;
     const bridgePrompt = strOf(rec.bridgePrompt); if (bridgePrompt !== undefined) out.bridgePrompt = bridgePrompt;
     if (Array.isArray(rec.visionModels)) {
       out.visionModels = rec.visionModels.filter((id): id is string => typeof id === "string" && id !== "");
+    }
+    if (Array.isArray(rec.autoOffIds)) {
+      out.autoOffIds = rec.autoOffIds.filter((id): id is string => typeof id === "string" && id !== "");
     }
     return out;
   };
@@ -206,7 +212,6 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     img2img: readImage(source.img2img),
     vision: readVision(source.vision),
     thinking: readThinking(source.thinking),
-    ...(typeof source.defaultNote === "string" ? { defaultNote: source.defaultNote.trim() } : {})
   };
 }
 
@@ -230,6 +235,31 @@ function readThinking(value: unknown): Record<string, string[]> {
   }
   for (const [modelId, defaults] of Object.entries(nativeThinkingDefaults())) {
     if (!(modelId in out)) out[modelId] = defaults;
+  }
+  return out;
+}
+
+/**
+ * 可看图「生效集」= 显式勾选 ∪（原生看图目录 id − 手动取消墓碑）。
+ *
+ * 2026-11-03 拍板：**自动勾为底、手动优先级最高**。原生看图模型（目录
+ * `input_modalities` 含 image）默认自动勾上——有原生能力不该被迫走转述；
+ * 用户显式取消的原生模型进 `autoOffIds` 墓碑，自动勾不翻案；手动勾选（含
+ * 目录没报 image 但实测可看图的模型，如默认三件套里的 deepseek-flash /
+ * kimi-k3）进 `visionModels` 原样保留。nativeIds 由调用方给（index 的发布
+ * 在服目录），本模块不读目录。
+ * @param {object} [vision] - the parsed vision partition.
+ * @param {Iterable<string>} nativeIds - catalog ids whose `input_modalities`
+ *   declare image (the auto-check base set).
+ * @returns {string[]} the effective checked set, saved order first, then new
+ *   native ids, de-duplicated.
+ */
+export function effectiveVisionModels(vision: VisionSettings | undefined, nativeIds: Iterable<string>): string[] {
+  const saved = vision?.visionModels ?? [];
+  const off = new Set(vision?.autoOffIds ?? []);
+  const out: string[] = [];
+  for (const id of [...saved, ...nativeIds]) {
+    if (typeof id === "string" && id !== "" && !off.has(id) && !out.includes(id)) out.push(id);
   }
   return out;
 }
@@ -335,13 +365,6 @@ export function createFilePoolStore(options: StoreOptions = {}) {
      * values 为该分区的部分键（合并进已存值）。值已在 parse 时白名单过滤，
      * 这里只做键合并。
      */
-    /** 面板默认 key 的备注写入（default 不在 keys 清单，单独存）。 */
-    async setDefaultNote(note: string): Promise<void> {
-      await enqueue(async () => {
-        const record = await seen();
-        await apply({ ...record, defaultNote: note });
-      });
-    },
     /** 面板 key 清单写入（add/rename/remove 的落盘半边）。 */
     async setKeys(keys: PoolKeyEntry[]): Promise<void> {
       await enqueue(async () => {

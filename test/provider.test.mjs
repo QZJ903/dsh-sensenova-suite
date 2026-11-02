@@ -34,7 +34,7 @@ import {
 } from "../src/host/llm-models.ts";
 import { identifyVisionModel } from "../src/host/parsers.ts";
 import { isImageGenModel, inputModalitiesFor } from "../src/host/modality.ts";
-import { factsFor } from "../src/host/wire/facts.ts";
+import { factsFor, defaultThinkingLevels, thinkingWithDefaults } from "../src/host/wire/facts.ts";
 import {
   CATALOG_VERSION,
   KNOWN_CATALOG_VERSIONS,
@@ -43,7 +43,6 @@ import {
   createFileCatalogStore,
   createMemoryCatalogStore
 } from "../src/host/catalog-store.ts";
-import { createApiKeyStore, API_KEY_REF } from "../src/host/api-key-store.ts";
 import { PROVIDER_VERSION, createFileProviderStore } from "../src/host/provider-store.ts";
 import { redactSecrets } from "../src/host/util.ts";
 import { profileSegment, profileStateDir } from "../src/host/state-store.ts";
@@ -81,6 +80,38 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       thinkingLevelMapFor({ id: "glm-5.2" }).max === "max");
   } catch (error) {
     fail("the thinking map dialect", error);
+  }
+}
+
+// --- 1b. per-model FIRST-RUN thinking defaults (2026-11-03 拍板) -------------
+// Listed models seed their NATIVE ladder (∩ the panel five); UNLISTED models
+// default to exactly ["high"] — the old `[]` left the panel checkboxes blank
+// while DSH offered all five, two faces of one fact. Explicit saves always
+// win: thinkingWithDefaults only fills ABSENT keys.
+{
+  try {
+    check("a listed model seeds its native ladder (6.8-flash-lite: all five)",
+      JSON.stringify(defaultThinkingLevels("sensenova-6.8-flash-lite")) === JSON.stringify(["off", "low", "medium", "high", "max"]),
+      JSON.stringify(defaultThinkingLevels("sensenova-6.8-flash-lite")));
+    check("an unlisted model defaults to exactly high (不看档案表)",
+      JSON.stringify(defaultThinkingLevels("brand-new-model")) === JSON.stringify(["high"]),
+      JSON.stringify(defaultThinkingLevels("brand-new-model")));
+    check("sensenova-6.8-flash is LISTED since 2026-11-03: native ladder minus off (文档：不支持关思考)",
+      JSON.stringify(defaultThinkingLevels("sensenova-6.8-flash")) === JSON.stringify(["low", "medium", "high", "max"]),
+      JSON.stringify(defaultThinkingLevels("sensenova-6.8-flash")));
+    const flash68 = factsFor("sensenova-6.8-flash", undefined);
+    check("the 6.8-flash facts row: no thinking-off, image in, doc ceiling 128K, an-line images per doc false",
+      flash68.forbidThinkingDisabled === true && flash68.supportsImages === true &&
+      flash68.imageRequiresBase64 === false && flash68.anthropicSupportsImages === false &&
+      flash68.outputLimitMax === 131072 && flash68.requiresReasoningReplay === false &&
+      flash68.responsesMaxOutputTokens === null,
+      JSON.stringify(flash68));
+    check("the view fills only ABSENT keys — explicit saves win",
+      JSON.stringify(thinkingWithDefaults({ "m-new": [], "m-known": ["low"] }, ["m-new", "m-known", "m-other"]))
+        === JSON.stringify({ "m-new": [], "m-known": ["low"], "m-other": ["high"] }),
+      JSON.stringify(thinkingWithDefaults({ "m-new": [], "m-known": ["low"] }, ["m-new", "m-known", "m-other"])));
+  } catch (error) {
+    fail("thinking first-run defaults", error);
   }
 }
 
@@ -1106,150 +1137,10 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
 }
 
-// --- 11. api key store: env fallback with no service ------------------------
-{
-  const restoreEnv = isolateHostEnv();
-  try {
-    const store = createApiKeyStore({ credentials: null, env: { SENSENOVA_API_KEY: "sk-env" } });
-    const resolved = await store.resolve();
-    check("env provides the key when no service exists",
-      resolved.value === "sk-env" && resolved.source === "env");
-    const state = await store.state();
-    check("state reports hasApiKey + env source + ephemeral host",
-      state.hasApiKey === true && state.keySource === "env" && state.ephemeral === true);
-  } catch (error) {
-    fail("env fallback", error);
-  } finally {
-    restoreEnv();
-  }
-}
-
-// --- 11. api key store: memory save/validate/forget without a service -------
-{
-  const restoreEnv = isolateHostEnv(["SENSENOVA_API_KEY"]);
-  try {
-    const store = createApiKeyStore({ credentials: null, env: {} });
-    check("no key anywhere resolves empty/null source",
-      (await store.resolve()).source === null && (await store.state()).hasApiKey === false);
-
-    let threw = false;
-    try { await store.save("   "); } catch { threw = true; }
-    check("a whitespace-only key is rejected", threw);
-
-    await store.save("  sk-memory  ");
-    const resolved = await store.resolve();
-    check("a saved key is stored verbatim (no trim)", resolved.value === "  sk-memory  " &&
-      resolved.source === "memory");
-
-    await store.forget();
-    check("forget clears the in-memory copy", (await store.resolve()).source === null);
-  } catch (error) {
-    fail("memory save/forget", error);
-  } finally {
-    restoreEnv();
-  }
-}
-
-// --- 12. credentials service: precedence, persistence name, resolver --------
-{
-  const restoreEnv = isolateHostEnv();
-  try {
-    const refs = new Map();
-    const service = {
-      async resolve(ref) { const value = refs.get(ref); return value === undefined ? undefined : { value }; },
-      async set(ref, value) { refs.set(ref, value); },
-      async unset(ref) { refs.delete(ref); }
-    };
-    const store = createApiKeyStore({ credentials: () => service, env: { SENSENOVA_API_KEY: "sk-env" } });
-
-    check("env still serves before a panel save", (await store.resolve()).source === "env");
-    check("state says the host is not ephemeral with a service", (await store.state()).ephemeral === false);
-
-    await store.save("sk-panel");
-    check("the panel value lands under the shared reference name", refs.get(API_KEY_REF) === "sk-panel");
-    const resolved = await store.resolve();
-    check("a stored reference wins over the env fallback",
-      resolved.value === "sk-panel" && resolved.source === "credentials");
-
-    await store.forget();
-    check("forget removes the reference but leaves the env value standing",
-      !refs.has(API_KEY_REF) && (await store.resolve()).source === "env");
-  } catch (error) {
-    fail("credentials service precedence", error);
-  } finally {
-    restoreEnv();
-  }
-}
-
-// --- 13. a failing/absent credentials service falls through safely ----------
-{
-  const restoreEnv = isolateHostEnv();
-  try {
-    const flaky = {
-      async resolve() { throw new Error("credentials file locked"); },
-      async set() { throw new Error("credentials file locked"); },
-      async unset() { throw new Error("credentials file locked"); }
-    };
-    const store = createApiKeyStore({ credentials: flaky, env: { SENSENOVA_API_KEY: "sk-env" } });
-    const resolved = await store.resolve();
-    check("a throwing resolve falls through to env", resolved.source === "env" && resolved.value === "sk-env");
-
-    let threw = false;
-    try { await store.save("sk-x"); } catch { threw = true; }
-    check("a save the service refuses propagates (route reports it, no silent loss)", threw);
-
-    // A service whose READS throw offers no proof a durable copy exists, so
-    // forget degrades to the quiet in-memory delete (the §13 shape: "the key
-    // was never stored anyway"). The case that must NOT stay quiet — an unset
-    // refused while the service still HOLDS a value — is pinned in §13b below.
-    await store.forget();
-    check("forget survives a throwing service", (await store.resolve()).source === "env");
-  } catch (error) {
-    fail("service failure fall-through", error);
-  } finally {
-    restoreEnv();
-  }
-}
-
-// --- 13b. api key store: a refused unset must not read as a clean forget ----
-// `resolve()` reads the credentials service FIRST, so a `forget()` that swallows
-// a failed unset would be followed by the very key it "removed" coming back as
-// `source: "credentials"`. The failure now propagates to the route (ok:false);
-// only the no-proof cases (no service / unreadable / nothing held) stay quiet.
-{
-  const restoreEnv = isolateHostEnv();
-  try {
-    const refs = new Map();
-    refs.set(API_KEY_REF, "sk-durable");
-    const service = {
-      async resolve(ref) { const value = refs.get(ref); return value === undefined ? undefined : { value }; },
-      async set(ref, value) { refs.set(ref, value); },
-      async unset() { throw new Error("credentials service refused the unset"); }
-    };
-    const store = createApiKeyStore({ credentials: () => service, env: {} });
-
-    check("before the forget, the durable copy is what resolve serves",
-      (await store.resolve()).source === "credentials");
-
-    let threw = null;
-    try { await store.forget(); } catch (error) { threw = error; }
-    check("a refused unset with a held value propagates (the route answers ok:false)",
-      threw !== null && /refused the unset/.test(String(threw.message)), String(threw));
-    check("the durable copy survives, still visible to the panel",
-      (await store.resolve()).source === "credentials" && refs.get(API_KEY_REF) === "sk-durable");
-
-    // The quiet path must be unperturbed: nothing held means nothing to unset.
-    refs.delete(API_KEY_REF);
-    await store.forget();
-    check("an unset with no durable value stays a clean forget",
-      (await store.state()).hasApiKey === false, JSON.stringify(await store.state()));
-  } catch (error) {
-    fail("api-key forget failure propagation", error);
-  } finally {
-    restoreEnv();
-  }
-}
-
+// --- 11. (removed 2026-11-03) the api-key store groups — the primary-key
+// concept was dismantled (pool members are peers); the store file is gone.
+// --- 12./13. (removed 2026-11-03) the api-key store precedence/fall-through
+// groups — the primary-key concept was dismantled (pool members are peers).
 // --- 14. redactSecrets: a credential never reaches the panel or a log ------
 // The LLM route's `providerState.error` and `ctx.logger.warn` both pass
 // through `redactSecrets`, because an HTTP error object's `message` often

@@ -133,23 +133,9 @@ check("switch-store.ts partitions under the profile (the shared scaffold)",
     "createFileThrottleStore is called with a profile — it must stay shared");
 }
 
-// --- 5. the credential-backed stores are NOT profile directories -----------
-// A credential (api-key, console token) is "who you are", not "which switch is
-// on". Partitioning it by profile would double-write a secret into a state dir
-// the credentials service already owns. Assert the credential store takes
-// no `profile` in its construction block.
-{
-  const blockOf = (name) => {
-    const start = indexTs.indexOf(`${name}({`);
-    if (start < 0) return "";
-    const end = indexTs.indexOf("});", start);
-    return end < 0 ? indexTs.slice(start) : indexTs.slice(start, end);
-  };
-  const apiKey = blockOf("createApiKeyStore");
-  check("createApiKeyStore is not profile-partitioned",
-    apiKey !== "" && !/\bprofile\b/.test(apiKey),
-    "createApiKeyStore construction mentions profile");
-}
+// --- 5. (removed 2026-11-03) the credential-store partitioning pin — the
+// primary-key store (and with it this pin's subject) was dismantled; the
+// console token store keeps its own coverage above.
 
 // --- 6. doctor reads only (no state writes it could leak) -------------------
 check("doctor.ts only reads state, never writes it",

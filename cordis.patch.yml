@@ -20,8 +20,11 @@
 
         # 趋势表伪倍率：键是模型 id 的「子串」（大小写不敏感，书写顺序首中），
         # 不是精确 id。平台返回原始积分、没有官方单价，这是运营者自备的对比
-        # 系数，面板标 ×N 并注明非官方；{} 关掉全部。值 = 2026-10-31 实测。
-        trendMultipliers: { "glm-5.2": 15, "kimi-k3": 30, "sensenova": 0.8, "deepseek": 1 }
+        # 系数，面板标 ×N 并注明非官方；{} 关掉全部。值 = 实测口径。
+        # 键要写窄到实测的那一个型号：写 "sensenova" 会把没测过的型号全部搭车
+        # （2026-11-03 收窄）。顺序承重：lite 的 id 包含 flash 的 id 作子串，
+        # lite 键必须排在 flash 键前面，否则 lite 被 ×1 首中。
+        trendMultipliers: { "glm-5.2": 15, "kimi-k3": 30, "sensenova-6.8-flash-lite": 0.8, "sensenova-6.8-flash": 1, "deepseek": 1 }
 
         # 每次控制台请求的结果缓存秒数。
         cacheSeconds: 60
@@ -119,10 +122,12 @@
         # 目录会低报（探测比文档滞后），改存储不 stick（下轮刷新冲掉），所以
         # 修正只能住在这里。徽章显示的数 = 请求实际带的数。值 = 文档口径
         # （sensenova-docs-full.md）：deepseek-flash [1, 393216]；kimi-k3 默认
-        # 128K（文档 Responses 表真上限 1M，这里取保守值）。
+        # 128K（文档 Responses 表真上限 1M，这里取保守值）；sensenova-6.8-flash
+        # 128K（运营者口径 2026-11-03，目录探测只有 64K）。
         maxTokensOverrides:
           deepseek-flash: 393216
           kimi-k3: 131072
+          sensenova-6.8-flash: 131072
 
         # 上下文窗口。优先级：本表 > 目录 context_length > 131072 兜底。
         # 动机：目录低报新模型——sensenova-6.8-flash 探测 262144（256K），

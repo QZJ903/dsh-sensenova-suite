@@ -30,9 +30,6 @@ export const SNAPSHOT_PATH = `/api/${NS}/snapshot`;
 /** The account route: lets the panel configure itself, no `.env` editing. */
 export const ACCOUNT_PATH = `/api/${NS}/account`;
 
-/** The inference API-key route: saves the `sk-` key the provider uses. */
-export const API_KEY_PATH = `/api/${NS}/api-key`;
-
 /** The provider-registration switch route (docs/PROVIDER-HOT-RELOAD.md). */
 export const PROVIDER_PATH = `/api/${NS}/provider`;
 

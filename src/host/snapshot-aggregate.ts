@@ -149,7 +149,6 @@ const CATALOG_NO_KEY_MESSAGE = "无可用 key——池为空或全不可用，�
  * @param {Map} context.cache - the console-response cache (shared across polls).
  * @param {Map} context.inflight - the single-flight map (shared across polls).
  * @param {object} context.tokenStore - the `createTokenStore` instance.
- * @param {object} context.apiKeyStore - the `createApiKeyStore` instance.
  * @param {() => Promise<string>} context.resolveCatalogApiKey - the catalog
  *   line's key resolver（池优先、主 key 回落，wiring 缝）。空答案 = 无 key 可用，
  *   上屏 `catalogError` 而非静默跳过（2026-11-03：旧实现只认主 key 且吞错，
@@ -165,7 +164,6 @@ export async function buildSnapshotBody({
   cache,
   inflight,
   tokenStore,
-  apiKeyStore,
   resolveCatalogApiKey,
   publisher,
   catalogStore,
@@ -180,7 +178,6 @@ export async function buildSnapshotBody({
   cache: Map<string, { body: unknown; at: number; gen: number }>;
   inflight: Map<string, Promise<unknown>>;
   tokenStore: { getToken(): Promise<string>; invalidate(token?: string): void; state(): Promise<unknown> };
-  apiKeyStore: { resolve(): Promise<{ value: string }>; state(): Promise<unknown> };
   /** 目录线 key（必传）：池优先、主 key 回落；空 = 无 key 可用（上屏不跳过）。 */
   resolveCatalogApiKey: () => Promise<string>;
   publisher: {
@@ -380,7 +377,6 @@ export async function buildSnapshotBody({
   // every 30 s, so a write/re-register per poll would be pure churn. The
   // reported model counts come from the fresh catalog when one arrived, else
   // from whatever the mount seed had stored.
-  const keyState = (await apiKeyStore.state().catch(() => ({ hasApiKey: false, keySource: null, ephemeral: false }))) as Record<string, unknown>;
   // The effective switch: a panel-saved value beats the patch default. Both
   // are reported so the panel can say which side is in charge.
   const effectivePanelSwitch = await panelSwitch().catch(() => null);
@@ -518,7 +514,6 @@ export async function buildSnapshotBody({
   // Secret-free by construction: the store reports booleans/source only, never
   // the key value.
   const llmStatus = {
-    ...keyState,
     registerProvider: resolveSwitchEnabled(effectivePanelSwitch, settings.registerProvider),
     registerSource: switchSource(effectivePanelSwitch),
     llmAvailable: providerState.llmAvailable,

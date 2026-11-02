@@ -4,7 +4,6 @@
  * GET  返回管理面清单（按账号 id；key 不出——面板只需要 id 与相位）；
  * POST { action, id } 执行单账号操作，{ globalConcurrency } 调整并发。
  *
- * "删除"面板默认 key 时会连带 forget 凭据引用（apiKeyStore 的既有语义）；
  * accounts 里的账号删除只记入 deletedIds（配置重加同名 id 后需再恢复）。
  *
  * @module dsh-sensenova-suite/routes/pool
@@ -26,28 +25,27 @@ export interface PoolAdmin {
     delete(id: string): Promise<void>;
     setGlobalConcurrency(value: number | null): Promise<void>;
     setKeys(keys: Array<{ id: string; name: string }>): Promise<void>;
-    setDefaultNote(note: string): Promise<void>;
     setSection(
       section: "toolsEnabled" | "text2img" | "img2img" | "vision" | "thinking",
       values: Record<string, unknown>
     ): Promise<void>;
   };
+  /** 原生看图模型 id（目录 input_modalities 含 image）——vision 保存据此把
+   * 「期望生效集 − 原生」写进 autoOffIds 墓碑（手动取消不被自动勾翻案）。
+   * 可选：测试替身省略时墓碑退化为不写（自动勾翻案的旧行为）。 */
+  nativeVisionIds?: () => string[];
   /** 账号清单（全量、未过滤）+ 标签；顺序即池序。 */
   accounts(): Promise<Array<{ id: string; label: string | null }>>;
   /** 单账号相位（面板停用/删除的账号读作 absent）。 */
   phaseOf(id: string): "running" | "blocked" | "absent";
   /** 执行停用/恢复/删除的池侧动作。 */
   apply(action: "disable" | "restore" | "delete", id: string): Promise<void>;
-  /** 面板默认 key 的 forget（删除 default 时调用；无面板 key 时 no-op）。 */
-  forgetPanelKey: () => Promise<void>;
   /** 把一把新 key 存入凭据服务（ref 由实现分配，返回稳这篇档的 id）。 */
   addKeySecret: (id: string, apiKey: string) => Promise<void>;
   /** 移除一把 key 的凭据记录（删除 key-<n> 时调用）。 */
   removeKeySecret: (id: string) => Promise<void>;
   /** 生效中的全局并发数（面板保存值 ?? 配置 ?? key 数）。 */
   effectiveConcurrency: () => Promise<number>;
-  /** 面板默认 key 是否存在（编号占位 1）。 */
-  hasPanelKey: () => Promise<boolean>;
   /** 已持有这把 key 值的条目 id（面板 key 记为 default；无人持有 = null）。add 查重用。 */
   findKeyHolder: (value: string) => Promise<string | null>;
   /** 状态文件刷新（写后让 params 的本地记录跟上）。 */
@@ -79,20 +77,10 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
       try {
         if (method === "GET") {
           const record = await poolAdmin.store.read();
-          // 管理面列的是「配置了什么」（store 清单 + 面板默认 key），不是
-          // 「凭据解析成功了什么」——解析失败时列表不能变空，否则加过的 key
-          // 在面板上消失（2026-10-24 事故）。
+          // 管理面列的是「配置了什么」（store 清单），不是「凭据解析成功了
+          // 什么」——解析失败时列表不能变空，否则加过的 key 在面板上消失
+          // （2026-10-24 事故）。
           const keys = [];
-          if (await poolAdmin.hasPanelKey()) {
-            keys.push({
-              id: "default",
-              label: "Key1",
-              note: record.defaultNote !== undefined && record.defaultNote !== "" ? record.defaultNote : null,
-              phase: poolAdmin.phaseOf("default"),
-              disabled: record.disabledIds.includes("default"),
-              deleted: record.deletedIds.includes("default")
-            });
-          }
           for (const entry of record.keys) {
             // name 字段现在是「备注」。存量数据里旧的默认名（Key1/Key2…）
             // 不算备注：匹配 ^Key\d+$ 的旧默认名显示为空备注。
@@ -119,9 +107,21 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
         if (typeof body.value.section === "string"
           && ["toolsEnabled", "text2img", "img2img", "vision", "thinking"].includes(body.value.section)
           && typeof body.value.values === "object" && body.value.values !== null) {
+          const values = body.value.values as Record<string, unknown>;
+          // 可看图保存语义（2026-11-03 拍板：自动勾为底、手动优先级最高）：
+          // 面板提交的是「期望生效集」——原生目录 id 不在其中 = 手动取消，
+          // 进 autoOffIds 墓碑（自动勾不再翻案）；手动勾选原样入 visionModels。
+          // values 含 visionModels 才算勾选集保存；只改 model/bridgePrompt 的
+          // 部分保存不动墓碑。nativeVisionIds 缺席（测试替身）退化为旧行为。
+          if (body.value.section === "vision" && Array.isArray(values.visionModels)
+            && typeof poolAdmin.nativeVisionIds === "function") {
+            const desired = (values.visionModels as unknown[]).filter((id): id is string => typeof id === "string" && id !== "");
+            values.autoOffIds = poolAdmin.nativeVisionIds().filter((id) => !desired.includes(id));
+            values.visionModels = desired;
+          }
           await poolAdmin.store.setSection(
             body.value.section as "toolsEnabled" | "text2img" | "img2img" | "vision" | "thinking",
-            body.value.values as Record<string, unknown>
+            values
           );
           await poolAdmin.refresh();
           writeJson(response, 200, { ok: true }, { "cache-control": "no-store" });
@@ -145,18 +145,14 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
           if (holder !== null) {
             writeJson(response, 200, {
               ok: false,
-              error: holder === "default"
-                ? `这把 key 已是面板主 key（${maskKey(apiKey)}）`
-                : `这把 key 已在池里（${maskKey(apiKey)}）`
+              error: `这把 key 已在池里（${maskKey(apiKey)}）`
             }, { "cache-control": "no-store" });
             return;
           }
           const record = await poolAdmin.store.read();
-          // 编号把面板默认 key 计为 1（有 default 时从 2 起）。
           const usedNumbers = record.keys
             .map((entry) => Number(/^key-(\d+)$/.exec(entry.id)?.[1] ?? 0))
             .filter((n) => n > 0);
-          usedNumbers.push((await poolAdmin.hasPanelKey()) ? 1 : 0);
           const next = Math.max(...usedNumbers, 0) + 1;
           const id = `key-${next}`;
           // name 字段现在是「备注」（面板填的）；缺省/空白 = 无备注。
@@ -178,11 +174,7 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
         // 改备注（原「重命名」语义保留为 update：整行 name 覆盖；备注可为空）。
         if (body.value.action === "rename" && typeof body.value.id === "string" && body.value.id !== "") {
           const note = typeof body.value.name === "string" ? body.value.name.trim() : "";
-          if (body.value.id === "default") {
-            // 面板默认 key 不在 keys 清单里——2026-10-27 真机：rename id=default
-            // 在 keys.map 里零命中、原样写回、返回 ok:true，备注静默丢失。
-            await poolAdmin.store.setDefaultNote(note);
-          } else {
+          {
             const record = await poolAdmin.store.read();
             await poolAdmin.store.setKeys(record.keys.map((entry) =>
               entry.id === body.value.id ? { ...entry, name: note } : entry));
@@ -213,7 +205,6 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
         else if (action === "restore") await poolAdmin.store.restore(id);
         else if (action === "delete") await poolAdmin.store.delete(id);
         await poolAdmin.apply(action, id);
-        if (action === "delete" && id === "default") await poolAdmin.forgetPanelKey();
         await poolAdmin.refresh();
         // 删除/恢复后同步重解析池（与 add 同一条纪律）：不重解析则该 id 滞留
         // idToKey，statusById（快照相位的来源）继续按旧映射报它的相位。恢复更

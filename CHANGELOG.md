@@ -1,5 +1,22 @@
 # 更新日志（Changelog）
 
+## 0.1.47（2026-11-03）
+
+- **拆除主 key（拍板：池成员人人平等）**：
+  - **整删**：`api-key-store.ts`、`routes/api-key.ts`（路由注册 6→5）；`SENSENOVA_API_KEY` ref、env/memory 兜底全废——目录腿七天冻结事故的架构根因就此拔掉。
+  - **池 = key-<n> + accounts 两类**，无 default 成员；池路由 default 行/编号占位/查重「主 key」特判全摘；`defaultNote`/`setDefaultNote`（只写不读死字段）顺手清。
+  - **llm 块 hasApiKey/keySource/ephemeral 三字段删**（wire 同步）；面板催 key 门改「只看池」；**ApiKeyForm 留任**=池加 key 表单（10-29 起本就 POST /pool add，从来不是主 key 写入口）。
+  - **测试**：provider api-key store 三组删（265→247）；routes N 组删 + M/O1/O2/O3/Q 全改池播种，O1 语义翻转钉「删池 key → 目录不可用 = 照服旧目录 + catalogError 上屏，**不拆注册**」（2026-11-03 新契约）；pool-route 33→27；wiring/e2e/panel/render-dom 同步。
+- **目录腿两级回落（免费读不跟推理门瞎）**：
+  - 真机事故实锤：04:55 四把 key 被 pool 429 全标满（30min TTL）→ pickStart 全拒 → 面板红字「无可用 key」——但 /v1/models 免费读不耗积分、不占推理配额，池格标记对它无意义。
+  - 改两级：pickStart（健康 key 优先）→ 任意池 key（尊重 disabled/deleted）；两级全空才上屏 `catalog_unavailable`。
+- **sensenova-6.8-flash 收编静态档案表**（docs/sensenova-api-reference/2 为据）：档位梯 minimal/low/medium/high/xhigh/max **无 none**（文档「不支持关闭思考」）→ `forbidThinkingDisabled=true`、面板首装勾低/中/高/最高（无「关」）；输出上限 128K；**an 线发图 false**（文档「仅 lite」——真机实测后可翻，deepseek-flash 先例）；Responses 上限 null 须实测。
+- **未收录模型思考默认只勾 high**（拍板：不看档案表）：`defaultThinkingLevels` 未收录 → ["high"]（原 []——面板勾选空白 vs DSH 全开的两侧不一致就此收口）；`thinkingWithDefaults` 视图补缺键、已存值（含显式全不勾）不翻案。
+- **可看图自动勾（自动为底、手动优先级最高）**：目录 input_modalities 含 image 自动勾（与面板 vision 徽章同判据 identifyVisionModel）；手动取消的原生模型进 `autoOffIds` 墓碑不翻案、手动勾选原样保留；/pool vision 保存语义 = 面板提交期望生效集、路由算墓碑；`effectiveVisionModels` 纯函数承接。
+- **数值覆盖与倍率**：maxTokensOverrides + `sensenova-6.8-flash: 131072`（128K 口径 vs 探测 64K）；trendMultipliers 收窄（"sensenova" 子串会把没测的 6.8f/u1.5 全搭上 0.8）→ lite ×0.8 / **6.8f ×1**，顺序承重（lite id 包含 flash id，lite 键必须在前）。
+- **文档**：sensenova-api-reference 重编号（6.8 Flash 插为 2 号，Kimi K3 补 9 号）。
+- **验证**：typecheck 两配置 0 错；snapshot 44 / pool 105 / pool-route 27 / config 152 / provider 247 / panel 78 / render-dom 55 / contract 92 / key-health 14 / duplication 14 全绿；wiring·routes·e2e-gate·composer 结构性 SKIP（peer 缺）。
+
 ## 0.1.46（2026-11-03）
 
 - **面板目录腿修源（池优先 key + 失败上屏）**：

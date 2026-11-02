@@ -117,7 +117,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.empty": "请输入 sk- 开头的 API Key",
 			"llm.footnote": "Key 只保存在 DSH 凭据中，不会写入插件目录或日志；请求时按次读取。",
 			"llm.keyRegisterHint": "还没有 API Key？前往官网免费获取 →",
-			"llm.ephemeral": "注意：当前 Host 没有凭据服务，Key 只保存在内存中，重启后失效。",
 			"llm.noKey": "尚未配置——在上方粘贴 sk- Key 并保存。",
 			"llm.off": "未向 DSH 注册——勾选上方开关即可开启（id：{id}）。",
 			"llm.registeredPending": "开关已开但注册尚未生效（id：{id}）——等待下一次自动刷新；若持续未注册，检查 Host 日志。",
@@ -284,7 +283,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.empty": "Enter an API key starting with sk-",
 			"llm.footnote": "The key is kept only in the DSH credentials, never in this plugin's folder or logs; it is read per request.",
 			"llm.keyRegisterHint": "No API key yet? Get a free one on the official site →",
-			"llm.ephemeral": "Note: this Host has no credentials service, so the key lives in memory only and is lost on restart.",
 			"llm.noKey": "Not configured — paste an sk- key above and save.",
 			"llm.off": "Not registered with DSH — tick the switch above (id: {id}).",
 			"llm.registeredPending": "Switch is on but registration has not landed yet (id: {id}) — wait for the next automatic refresh; if it persists, check the Host logs.",
@@ -1638,18 +1636,17 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 //#endregion
 //#region src/client/provider-controls.ts
 /**
-	* The API-key card's status: ONLY a missing-key nudge (+ the ephemeral-host
-	* warning). A stored key is silent — the form's own 显示 button and the save
+	* The key-pool card's status: ONLY a missing-key nudge. A stored key is
+	* silent — the form's own 显示 button and the save
 	* note say it (2026-10-27; the provenance line was noise). Registration
 	* state lives in `ProviderRegStatus` on the provider card — after the panel
 	* split into one card per concern, a line about registration inside the key
 	* card was information flying across card boundaries, repeating what the
 	* provider card's own switch and status already say.
 	*
-	* The nudge tracks "no key ANYWHERE" (2026-10-29 真机：sk- 框的保存进的是
-	* pool，不写面板主 key——按 hasApiKey 单判会让配置了池 key 的卡片永远
-	* 催贴 key，而它指点的动作恰恰不治它自己). `poolConfigured` 是 ApiKeyForm
-	* 算好的「池里有没有 key」；缺省（旧调用方/测试）保持旧行为。
+	* The nudge tracks "no key in the POOL" (`poolConfigured` 是 ApiKeyForm
+	* 算好的「池里有没有 key」；缺省（旧调用方/测试）保持旧行为）。主 key 概念
+	* 已拆除（2026-11-03 拍板：池成员人人平等）——催贴 key 只看池。
 	*
 	* Hook-free on purpose: like the pool cards, it is exercised by the Node
 	* render suite, so a reworded or dropped status line fails a check. It
@@ -1659,17 +1656,13 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	function ProviderStatus({ llm, tt, poolConfigured }) {
 		if (!llm || typeof llm !== "object") return null;
 		const rows = [];
-		if (llm.hasApiKey !== true && poolConfigured !== true) rows.push(h("div", {
+		if (poolConfigured !== true) rows.push(h("div", {
 			style: {
 				fontSize: 12,
 				color: "var(--dsw-alias-label-secondary)"
 			},
 			role: "status"
 		}, tt("llm.noKey")));
-		if (llm.ephemeral === true) rows.push(h("div", { style: {
-			...S.formNote,
-			color: "var(--dsw-alias-state-warn-primary)"
-		} }, tt("llm.ephemeral")));
 		return rows.length === 0 ? null : h("div", { style: {
 			display: "flex",
 			flexDirection: "column",
@@ -2521,7 +2514,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		}, tt("llm.saved")) : null, formError ? h("p", {
 			style: S.formError,
 			role: "alert"
-		}, formError) : null, h("p", { style: S.formNote }, tt("llm.footnote")), llm?.hasApiKey === true || poolConfigured ? null : h("a", {
+		}, formError) : null, h("p", { style: S.formNote }, tt("llm.footnote")), poolConfigured ? null : h("a", {
 			href: SENSENOVA_SIGNUP_URL,
 			target: "_blank",
 			rel: "noreferrer",

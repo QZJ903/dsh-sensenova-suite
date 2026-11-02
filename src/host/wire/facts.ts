@@ -43,7 +43,8 @@ const GENERIC_FACTS: ModelFacts = {
 };
 
 /** 静态档案表（deepseek-v4-pro 已下线，不收录）。
- * 行号锚点：6.8 参数表 :543-560；v4-flash :1288-1320；deepseek-flash :1665-1673；
+ * 行号锚点：6.8 参数表 :543-560；6.8-flash :268/:330（思考/输出上限）；
+ * v4-flash :1288-1320；deepseek-flash :1665-1673；
  * glm-5.2 :2022 起；kimi-k3 :2403-2451；Responses §3.2。 */
 const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['sensenova-6.8-flash-lite', {
@@ -69,6 +70,39 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     imageRequiresBase64: false,
     anthropicSupportsImages: true, // 文档 #api-compatibility-params：仅 6.8 支持图片块
     responsesMaxOutputTokens: 65536,
+    responsesSupportsJsonSchema: false,
+  }],
+  ['sensenova-6.8-flash', {
+    // 2026-11-03 收编（docs/sensenova-api-reference/2、SenseNova 6.8 Flash.md）。
+    // 思考：默认开启且**不支持关闭**（thinking.type 仅 enabled）→ 档位梯无 none、
+    // forbidThinkingDisabled（同 glm 姿态：禁发 thinking disabled）；原生梯含
+    // minimal/xhigh（面板五档表达不了的不出现在勾选集，无 none → 面板默认无「关」）。
+    // 图像：image_url 公网 URL + Base64 均可，JPG/JPEG/PNG/WebP。
+    // Anthropic 线发图：兼容文档明写「仅 6.8-flash-lite 支持」→ false（deepseek-flash
+    // 先例：文档 false 被真机翻 true——上真机测一次，成了翻案）。Responses 线
+    // 输出上限文档无本模型行 → null 未申报（同 deepseek-flash 先例，须实测）。
+    id: 'sensenova-6.8-flash',
+    supportedWires: ['chat-completions', 'responses', 'anthropic'],
+    defaultChain: STANDARD_CHAIN,
+    efforts: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'high',
+    responsesDefaultEffort: 'high',
+    anthropicDefaultEffort: 'high',
+    outputLimitField: 'max_tokens',
+    outputLimitMax: 131072, // 文档 [1, 128K]，默认 64K——与 maxTokensOverrides 131072 同口径
+    supportsStreamOptions: true,
+    requiresReasoningReplay: false, // 文档「通常无需回传 reasoning」
+    forbidThinkingDisabled: true,
+    noneMapsToThinkingDisabled: false,
+    fixedTemperature: null,
+    fixedTopP: null,
+    blockedSampling: [],
+    samplingParameters: ['seed', 'n'],
+    supportsImages: true,
+    imageFormats: ['jpg', 'jpeg', 'png', 'webp'],
+    imageRequiresBase64: false,
+    anthropicSupportsImages: false, // 兼容文档：仅 lite——真机实测后可翻（先例 deepseek-flash）
+    responsesMaxOutputTokens: null,
     responsesSupportsJsonSchema: false,
   }],
   ['deepseek-v4-flash', {
@@ -196,20 +230,38 @@ export function staticFacts(model: string): ModelFacts | undefined {
 const PANEL_LADDER: readonly string[] = ["off", "low", "medium", "high", "max"];
 
 /**
- * 模型的面板思考档位首装默认集（2026-10-27 用户拍板）：按官方文档的**原生
- * 档位**（静态表 efforts 就是文档口径）∩ 面板五档——`none` 与面板 `off` 同义
- * 归一；xhigh/minimal 等面板表达不了的拼写不管（梯子本就没有，0.1.4 移除）。
- * 未收录模型返回 []（文档没覆盖的模型不给臆造默认）。
+ * 模型的面板思考档位首装默认集：已收录模型按官方文档的**原生档位**（静态表
+ * efforts 就是文档口径）∩ 面板五档——`none` 与面板 `off` 同义归一；xhigh/minimal
+ * 等面板表达不了的拼写不管（梯子本就没有，0.1.4 移除）。
+ * 未收录模型（2026-11-03 拍板）：默认只勾 `high`——「不臆造」只约束档案表内的
+ * 档位拼写，未收录模型的档位面本来就没有文档依据，给空白只会让面板勾选与
+ * DSH 可选档位两侧都不一致；high 是宿主默认推理档（DEFAULT_REASONING_EFFORT），
+ * 也是最保守的可用选择。
  */
 export function defaultThinkingLevels(modelId: string): string[] {
   const facts = STATIC_FACTS.get(modelId);
-  if (facts === undefined) return [];
+  if (facts === undefined) return ["high"];
   const out = new Set<string>();
   for (const level of facts.efforts) {
     const panel = level === "none" ? "off" : level;
     if (PANEL_LADDER.includes(panel)) out.add(panel);
   }
   return PANEL_LADDER.filter((level) => out.has(level));
+}
+
+/**
+ * 存储记录 ∪ 目录内缺键模型的默认集——面板勾选与 DSH 可选档位共同读的视图。
+ * 目录里出现的新模型在 pool.json 没有键（播种只发生在写盘时刻），缺键在这里
+ * 按 {@link defaultThinkingLevels} 补默认；**已存键原样尊重**（含显式空数组，
+ * 面板「全不勾」的保存不被翻案）。纯函数：ids 由调用方给（index 的发布在服
+ * 目录），本模块不读目录。
+ */
+export function thinkingWithDefaults(stored: Record<string, string[]>, modelIds: Iterable<string>): Record<string, string[]> {
+  const out: Record<string, string[]> = { ...stored };
+  for (const id of modelIds) {
+    if (typeof id === "string" && id !== "" && out[id] === undefined) out[id] = defaultThinkingLevels(id);
+  }
+  return out;
 }
 
 /** 全部已知模型的默认集（pool-store readThinking 播种用；id → 档位升序）。 */

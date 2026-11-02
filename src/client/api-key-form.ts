@@ -1,13 +1,12 @@
 /**
- * The inference API-key editor (`sk-…`) with the llm section assembled around
- * it. The save path adds to the key POOL (`/pool {action:add}`); pool keys are
- * cleared per-row, so this form has no forget of its own (2026-10-29 用户拍板
- * 退役清除按钮——面板主 key 已无 UI 写入口，按钮成了几乎不可能出现的死件).
- * show/hide, busy and outcome notes stay; the value leaves component state the
- * moment it is saved. It is hook-based, so like AccountForm the render suite
- * does not mount it; the secret-free half it displays IS covered, via
- * `ProviderStatus`. The key is NEVER populated from the snapshot — the Host
- * only reports whether one exists.
+ * The pool key add-form (`sk-…`) with the llm section assembled around it.
+ * The save path adds to the key POOL (`/pool {action:add}`) — the ONE key
+ * ingress since the primary-key concept was dismantled (2026-11-03 拍板：池
+ * 成员人人平等，无面板主 key). show/hide, busy and outcome notes stay; the
+ * value leaves component state the moment it is saved. It is hook-based, so
+ * like AccountForm the render suite does not mount it; the secret-free half
+ * it displays IS covered, via `ProviderStatus`. The key is NEVER populated
+ * from the snapshot — the Host never echoes secrets.
  */
 import { POOL_PATH, SENSENOVA_SIGNUP_URL } from "./const.ts";
 import { postJson, postJsonOrThrow } from "./http.ts";
@@ -65,9 +64,8 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
     }
   }, [apiKey, post, onDone, tt]);
 
-  // 「配置了 key」看两处（2026-10-29 真机：sk- 框的保存进池、不写面板主 key，
-  // 只盯 hasApiKey 会给配置了池 key 的卡片永远催 key）：面板主 key 在，或池
-  // 里有条目，都算配置——催贴 key 的提示与官网注册链接都以这个为准。
+  // 「配置了 key」= 池里有条目（2026-11-03 拍板拆除主 key：表单本就进池）——
+  // 催贴 key 的提示与官网注册链接都以这个为准。
   const poolConfigured = Array.isArray(pool?.keys) && pool.keys.length > 0;
   // A configured key's editor sits inside the SectionCard's single fold: the
   // status block is what a working setup needs daily, while the paste-a-key
@@ -117,8 +115,8 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
     // The official-site link only exists for the no-key state (sign-up
     // nudge). With a key configured the management link was noise — the
     // user reaches the portal from the platform console anyway (2026-10-27).
-    // 「配置了」与催 key 提示同判：面板主 key 或池 key 任一在就不催。
-    (llm?.hasApiKey === true || poolConfigured)
+    // 「配置了」与催 key 提示同判：池里有 key 就不催。
+    poolConfigured
       ? null
       : h("a", { href: SENSENOVA_SIGNUP_URL, target: "_blank", rel: "noreferrer", style: S.externalLink },
           tt("llm.keyRegisterHint"))

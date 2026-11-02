@@ -460,7 +460,40 @@ try {
   check("首装（无文件）vision 默认勾选集就在空记录里（S3）",
     JSON.stringify(fresh.vision.visionModels) === JSON.stringify(["deepseek-flash", "kimi-k3", "sensenova-6.8-flash-lite"]),
     JSON.stringify(fresh.vision));
+  check("首装墓碑为空（自动勾的取消记录只在显式取消后出现）",
+    Array.isArray(fresh.vision.autoOffIds) && fresh.vision.autoOffIds.length === 0,
+    JSON.stringify(fresh.vision.autoOffIds));
 } catch (e) { fail("vision-defaults", e); }
+
+// ── vision 生效集（2026-11-03 拍板：自动勾为底、手动优先级最高）──────────────
+try {
+  const { effectiveVisionModels, parsePoolPayload, emptyPoolRecord } = await import("../src/host/pool-store.ts");
+  check("原生模型自动入列（底集），已存勾选保序在前",
+    JSON.stringify(effectiveVisionModels(
+      { visionModels: ["deepseek-flash"] },
+      ["sensenova-6.8-flash", "sensenova-6.8-flash-lite"]
+    )) === JSON.stringify(["deepseek-flash", "sensenova-6.8-flash", "sensenova-6.8-flash-lite"]),
+    JSON.stringify(effectiveVisionModels({ visionModels: ["deepseek-flash"] }, ["sensenova-6.8-flash", "sensenova-6.8-flash-lite"])));
+  check("墓碑里的原生模型不再自动入列（手动取消赢）",
+    JSON.stringify(effectiveVisionModels(
+      { visionModels: ["deepseek-flash"], autoOffIds: ["sensenova-6.8-flash"] },
+      ["sensenova-6.8-flash", "sensenova-6.8-flash-lite"]
+    )) === JSON.stringify(["deepseek-flash", "sensenova-6.8-flash-lite"]),
+    JSON.stringify(effectiveVisionModels(
+      { visionModels: ["deepseek-flash"], autoOffIds: ["sensenova-6.8-flash"] },
+      ["sensenova-6.8-flash", "sensenova-6.8-flash-lite"])));
+  check("无记录时纯底集", JSON.stringify(effectiveVisionModels(undefined, ["m-v"])) === JSON.stringify(["m-v"]),
+    JSON.stringify(effectiveVisionModels(undefined, ["m-v"])));
+  // 磁盘面：autoOffIds 随分区往返（readVision 解析，非 visionModels 键丢失）。
+  const parsed = parsePoolPayload({
+    ...emptyPoolRecord(),
+    vision: { visionModels: ["deepseek-flash"], autoOffIds: ["m-native-off"] }
+  });
+  check("autoOffIds 随盘解析往返",
+    JSON.stringify(parsed?.vision.autoOffIds) === JSON.stringify(["m-native-off"]) &&
+      JSON.stringify(parsed?.vision.visionModels) === JSON.stringify(["deepseek-flash"]),
+    JSON.stringify(parsed?.vision));
+} catch (e) { fail("vision-effective", e); }
 
 // ── N. pool-store 文件面：ADR-006 拒绝表面化 + 读-改-写串行化（2026-10-31 处置轮）──
 try {
@@ -506,12 +539,13 @@ try {
     const store = createFilePoolStore({ logger });
     await Promise.all([
       store.setGlobalConcurrency(4),
-      store.setDefaultNote("备注"),
+      store.setGlobalConcurrency(6),
       store.disable("key-1")
     ]);
     const record = await store.read();
+    // 串行化判据取最后写者（队列保序）：全局并发 6 后写覆盖 4，disable 同轮落盘。
     check("并发变更不丢更新（读-改-写串行化）",
-      record.globalConcurrency === 4 && record.defaultNote === "备注" && record.disabledIds.includes("key-1"),
+      record.globalConcurrency === 6 && record.disabledIds.includes("key-1"),
       JSON.stringify(record));
   });
 
@@ -524,10 +558,10 @@ try {
     await store.setGlobalConcurrency(4).catch(() => {});
     // 外来构建退场：换回本构建可认的载荷，下一个变更必须照常落盘。
     fs.writeFileSync(poolFileOf(home), JSON.stringify({ version: 1, disabledIds: [], deletedIds: [], globalConcurrency: null, keys: [] }), "utf8");
-    await store.setDefaultNote("拒绝之后仍要落盘");
+    await store.disable("key-9");
     const onDisk = JSON.parse(fs.readFileSync(poolFileOf(home), "utf8"));
     check("拒绝不毒化队列：后一个变更照常落盘（且被拒的全局并发数没有被 remember）",
-      onDisk.defaultNote === "拒绝之后仍要落盘" && onDisk.globalConcurrency === null,
+      onDisk.disabledIds.includes("key-9") && onDisk.globalConcurrency === null,
       JSON.stringify(onDisk));
   });
 } catch (e) { fail("pool-store-file-surface", e); }

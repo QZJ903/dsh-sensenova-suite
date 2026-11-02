@@ -29,7 +29,7 @@ const restoreHostEnv = isolateHostEnv();
 // red, because there the job installs the runtime).
 const skipMissingPeer = skipOnMissingPeer(suiteName(import.meta.url), [
   "NOT verified in this run: the whole HTTP route family — snapshot / account /",
-  "api-key / provider / models — including the same-origin",
+  "provider / models — including the same-origin",
   "trust fence and the 200-with-ok:false failure envelope.",
   "restore health with the desktop runtime or `npm install -g @deepseek-ai/dsh`.",
 ]);
@@ -42,7 +42,6 @@ const restoreStateDir = isolateStateDir();
 
 const SNAPSHOT_PATH = "/api/dsh-sensenova-suite/snapshot";
 const ACCOUNT_PATH = "/api/dsh-sensenova-suite/account";
-const API_KEY_PATH = "/api/dsh-sensenova-suite/api-key";
 const PROVIDER_PATH = "/api/dsh-sensenova-suite/provider";
 const MODELS_PATH = "/api/dsh-sensenova-suite/models";
 const POOL_PATH = "/api/dsh-sensenova-suite/pool";
@@ -231,6 +230,22 @@ async function withNetwork(stub, body) {
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+
+/**
+ * Seed ONE pool key (a pool.json row + its credentials ref) — the primary-key
+ * concept is gone (2026-11-03 拍板：池成员人人平等), so the catalog rides pool
+ * members now. `key` differs per block so stub fetches can tell runs apart.
+ */
+async function seedPoolKey(credentials, key) {
+  const { emptyPoolRecord } = await import("../src/host/pool-store.ts");
+  const dir = join(process.env.DSH_HOME, "state", "dsh-sensenova-suite");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "pool.json"), JSON.stringify({
+    ...emptyPoolRecord(), keys: [{ id: "key-1", name: "" }]
+  }));
+  credentials.refs.set("dsh_pool_key_1", key);
 }
 
 // === A. a fresh stored token reaches the console and returns pools ========
@@ -724,8 +739,7 @@ async function withNetwork(stub, body) {
 // that degrades to "the info layer only", never a dependency of the response.
 {
   const credentials = makeCredentials(storedGrant(jwtExpiring(120), "r", 7200));
-  // Give the credentials service the API key ref so the catalog is computed.
-  credentials.refs.set("SENSENOVA_API_KEY", "sk-test-key-for-routing-only");
+  await seedPoolKey(credentials, "sk-test-key-for-routing-only");
   // Build on top of a real login stub so the token flow works; extend it
   // with the /v1/models answer.
   const net = await loginNetwork();
@@ -755,13 +769,11 @@ async function withNetwork(stub, body) {
       snapshot.payload.visionModels.length === 1 &&
       snapshot.payload.visionModels[0].id === "sensenova-6.8-flash-lite",
       JSON.stringify(snapshot.payload.visionModels));
-    // Step three status rides the same poll: the key ref is recognized, the
-    // counts follow the catalog, and the opt-in defaults to off.
+    // Step three status rides the same poll: the pool key feeds the catalog,
+    // the counts follow it, and the opt-in defaults to off.
     const llm = snapshot.payload.llm;
     check("the snapshot carries the secret-free llm block",
-      llm && llm.ok === undefined && typeof llm.hasApiKey === "boolean", JSON.stringify(llm));
-    check("the llm block sees the credential reference",
-      llm.hasApiKey === true && llm.keySource === "credentials", JSON.stringify(llm));
+      llm && llm.ok === undefined, JSON.stringify(llm));
     check("the llm block counts models and vision models",
       llm.modelCount === 1 && llm.visionCount === 1, JSON.stringify(llm));
     // The image-output model (sensenova-u1.5-lite) is not a chat model and
@@ -776,145 +788,9 @@ async function withNetwork(stub, body) {
   }).catch((error) => fail("M: vision publish without settings service", error));
 }
 
-// === N. the inference API-key route: save / state / forget / fence =========
-// The `sk-` key is a credential REFERENCE the catalog poll and the registered
-// provider share. These checks pin the three sources (reference, memory, env),
-// the no-echo contract, and the same-origin fence the account route has.
-{
-  // N1. a credentials-backed Host: reference save and forget.
-  try {
-    const credentials = makeCredentials(storedGrant(jwtExpiring(120), "r", 7200));
-    const call = await mount(credentials);
-    const initial = await call(API_KEY_PATH, makeRequest());
-    check("N1 GET reports no key initially",
-      initial.payload.ok === true && initial.payload.hasApiKey === false &&
-      initial.payload.keySource === null && initial.payload.ephemeral === false,
-      JSON.stringify(initial.payload));
-    check("N1 the state never echoes a value field",
-      !("value" in initial.payload) && !("apiKey" in initial.payload));
-
-    const blank = await call(API_KEY_PATH, makePost({ apiKey: "   " }));
-    check("N1 a whitespace key is refused", blank.payload.ok === false && typeof blank.payload.error === "string",
-      JSON.stringify(blank.payload));
-
-    const saved = await call(API_KEY_PATH, makePost({ apiKey: "sk-panel-saved" }));
-    check("N1 save stores the shared reference",
-      saved.payload.ok === true && saved.payload.hasApiKey === true &&
-      saved.payload.keySource === "credentials" && credentials.refs.get("SENSENOVA_API_KEY") === "sk-panel-saved",
-      JSON.stringify(saved.payload));
-    check("N1 the save response carries no echo",
-      !JSON.stringify(saved.payload).includes("sk-panel-saved"));
-
-    // The catalog poll resolves the SAME reference (the two surfaces share one
-    // stored value): the snapshot's secret-free state agrees.
-    const net = await loginNetwork();
-    await withNetwork(async (url, init) => {
-      const target = String(url);
-      if (target.includes("/v1/models") || target.includes("/models")) {
-        return new Response(JSON.stringify({ data: [{ id: "m1", input_modalities: ["text"] }] }),
-          { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return net(url, init);
-    }, async () => {
-      const polled = await call(SNAPSHOT_PATH, makeRequest());
-      check("N1 the snapshot sees the panel-saved key",
-        polled.payload.ok === true && polled.payload.llm?.keySource === "credentials" &&
-        polled.payload.catalogAvailable === true, JSON.stringify(polled.payload.llm));
-    });
-
-    const forgotten = await call(API_KEY_PATH, makePost({ forget: true }));
-    check("N1 forget clears the reference",
-      forgotten.payload.ok === true && forgotten.payload.hasApiKey === false &&
-      !credentials.refs.has("SENSENOVA_API_KEY"), JSON.stringify(forgotten.payload));
-  } catch (error) { fail("N1: credentials-backed API-key route", error); }
-
-  // N2. a Host with no credentials service: memory + ephemeral.
-  try {
-    const call = await mount(null);
-    const saved = await call(API_KEY_PATH, makePost({ apiKey: "sk-memory" }));
-    check("N2 a keyless-service host keeps the key in memory and says so",
-      saved.payload.ok === true && saved.payload.hasApiKey === true &&
-      saved.payload.keySource === "memory" && saved.payload.ephemeral === true,
-      JSON.stringify(saved.payload));
-    const forgotten = await call(API_KEY_PATH, makePost({ forget: true }));
-    check("N2 forget clears the in-memory key",
-      forgotten.payload.ok === true && forgotten.payload.hasApiKey === false,
-      JSON.stringify(forgotten.payload));
-  } catch (error) { fail("N2: memory API-key route", error); }
-
-  // N3. the environment fallback stays authoritative without a reference.
-  {
-    process.env.SENSENOVA_API_KEY = "sk-from-env";
-    try {
-      const credentials = makeCredentials(null);
-      const call = await mount(credentials);
-      const state = await call(API_KEY_PATH, makeRequest());
-      check("N3 an env key is reported with its source",
-        state.payload.hasApiKey === true && state.payload.keySource === "env",
-        JSON.stringify(state.payload));
-      await call(API_KEY_PATH, makePost({ forget: true }));
-      const after = await call(API_KEY_PATH, makeRequest());
-      check("N3 forget leaves the environment value standing",
-        after.payload.hasApiKey === true && after.payload.keySource === "env",
-        JSON.stringify(after.payload));
-    } catch (error) {
-      fail("N3: env fallback", error);
-    } finally {
-      delete process.env.SENSENOVA_API_KEY;
-    }
-  }
-
-  // N4. the trust fence: a foreign page cannot plant or read the key.
-  try {
-    const call = await mount(makeCredentials(null));
-    const foreign = await call(API_KEY_PATH, {
-      method: "POST",
-      headers: { host: "127.0.0.1:19387", origin: "https://evil.example", "content-type": "application/json" },
-      async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ apiKey: "sk-x" }), "utf8"); }
-    });
-    check("N4 a cross-origin API-key POST is refused", foreign.statusCode === 403,
-      String(foreign.statusCode));
-  } catch (error) { fail("N4: API-key trust fence", error); }
-
-  // N5. catalog identity isolation: a key swap that happens OUT OF BAND (the
-  // credentials reference is written directly, so no save/forget route ran
-  // and its cache clear did not either) must not be served the previous
-  // key's cached catalog. The catalog's one-hour TTL is exactly the window
-  // where that would go unnoticed; the per-key cache key is what closes it.
-  try {
-    const credentials = makeCredentials(storedGrant(jwtExpiring(120), "r", 7200));
-    credentials.refs.set("SENSENOVA_API_KEY", "sk-key-A");
-    let modelsCalls = 0;
-    const net = await loginNetwork();
-    await withNetwork(async (url, init) => {
-      const target = String(url);
-      if (target.includes("/v1/models") || target.includes("/models")) {
-        modelsCalls += 1;
-        // The answer echoes which key the request carried, so isolation is
-        // visible in the data, not only in the fetch count.
-        const bearer = String(init?.headers?.authorization ?? "");
-        const which = bearer === "Bearer sk-key-A" ? "model-a" : "model-b";
-        return new Response(JSON.stringify({ data: [{ id: which, input_modalities: ["text"] }] }),
-          { status: 200, headers: { "content-type": "application/json" } });
-      }
-      return net(url, init);
-    }, async () => {
-      const call = await mount(credentials);
-      const first = await call(SNAPSHOT_PATH, makeRequest());
-      check("N5 the first poll fetched under the first key",
-        first.payload.catalogAvailable === true && first.payload.llm?.models?.[0]?.id === "model-a",
-        JSON.stringify(first.payload.llm?.models));
-      // The out-of-band swap: the reference is rewritten directly, so neither
-      // the save nor the forget route ran, and no cache clear happened.
-      credentials.refs.set("SENSENOVA_API_KEY", "sk-key-B");
-      const second = await call(SNAPSHOT_PATH, makeRequest());
-      check("N5 an out-of-band key swap serves the new key's catalog",
-        second.payload.llm?.models?.[0]?.id === "model-b" && modelsCalls === 2,
-        JSON.stringify({ models: second.payload.llm?.models, modelsCalls }));
-    });
-  } catch (error) { fail("N5: catalog identity isolation", error); }
-}
-
+// === N. (removed 2026-11-03) the inference API-key route — the primary-key
+// concept was dismantled (pool members are peers); the pool route and its
+// pool-route suite now own every key-ingress pin.
 // === O. step three registration: the opt-in drives the llm service =========
 // The peer-dependent adapter never loads in this suite: a fake factory is
 // injected through apply's third argument, so what is asserted here is the
@@ -953,7 +829,7 @@ async function withNetwork(stub, body) {
   // O1. enabled + llm service + a catalog poll: one registration for the set.
   try {
     const credentials = makeCredentials(storedGrant(jwtExpiring(120), "r", 7200));
-    credentials.refs.set("SENSENOVA_API_KEY", "sk-routing");
+    await seedPoolKey(credentials, "sk-routing");
     const llm = makeFakeLlm();
     const adapterDeps = makeFakeAdapterDeps();
     const events = [];
@@ -1004,20 +880,26 @@ async function withNetwork(stub, body) {
         `${buildsAfterSecond} -> ${adapterDeps.builds.length}`);
       check("O1 the repeated poll still reports registered", again.payload.llm?.providerRegistered === true);
 
-      // Forgetting the key tears the offer down (empty model list).
-      await call(API_KEY_PATH, makePost({ forget: true }));
-      check("O1 forget republishes with an empty model set",
-        adapterDeps.builds.at(-1).entries.length === 0,
-        String(adapterDeps.builds.at(-1).entries.length));
-      check("O1 the previous registration pair was released on republish",
-        llm.calls.releases >= 2, String(llm.calls.releases));
+      // Deleting the pool key makes the catalog UNAVAILABLE — and the new
+      // contract (2026-11-03) is "serve the last-good catalog, loudly": the
+      // offer STAYS (no teardown), the snapshot carries catalogError.
+      const removed = await call(POOL_PATH, makePost({ action: "delete", id: "key-1" }));
+      check("O1 the pool key delete answers ok",
+        removed.payload.ok === true, JSON.stringify(removed.payload ?? {}).slice(0, 120));
+      const afterDelete = await call(SNAPSHOT_PATH, makeRequest());
+      check("O1 a keyless catalog keeps the last-good offer registered",
+        afterDelete.payload.llm?.providerRegistered === true,
+        JSON.stringify(afterDelete.payload.llm ?? {}).slice(0, 200));
+      check("O1 the stale catalog is reported, not silent",
+        afterDelete.payload.catalogError?.code === "catalog_unavailable",
+        JSON.stringify(afterDelete.payload.catalogError ?? null));
     });
   } catch (error) { fail("O1: provider registration on catalog poll", error); }
 
   // O2. enabled on a Host WITHOUT an llm service degrades, never crashes.
   try {
     const credentials = makeCredentials(storedGrant(jwtExpiring(120), "r", 7200));
-    credentials.refs.set("SENSENOVA_API_KEY", "sk-routing2");
+    await seedPoolKey(credentials, "sk-routing2");
     const adapterDeps = makeFakeAdapterDeps();
     const net = await loginNetwork();
     await withNetwork(async (url, init) => {
@@ -1050,7 +932,7 @@ async function withNetwork(stub, body) {
   // build followed.)
   try {
     const credentials = makeCredentials(storedGrant(jwtExpiring(120), "r", 7200));
-    credentials.refs.set("SENSENOVA_API_KEY", "sk-routing3");
+    await seedPoolKey(credentials, "sk-routing3");
     const llm = makeFakeLlm();
     const builds = [];
     let failNextBuild = false;
@@ -1218,7 +1100,7 @@ async function withNetwork(stub, body) {
   // Q2-Q7. with a real session, a catalog, and an llm service.
   try {
     const credentials = makeCredentials(storedGrant(jwtExpiring(120), "r", 7200));
-    credentials.refs.set("SENSENOVA_API_KEY", "sk-roster");
+    await seedPoolKey(credentials, "sk-roster");
     const llm = makeFakeLlm();
     const adapterDeps = makeFakeAdapterDeps();
     const net = await loginNetwork();
@@ -1354,14 +1236,6 @@ async function withNetwork(stub, body) {
         JSON.stringify(persisted.payload.llm?.enabledModelIds) === JSON.stringify(["__hide_all__"]),
         JSON.stringify(persisted.payload.llm?.enabledModelIds));
 
-      // Q9. Forgetting the key also forgets the curation: a new key starts
-      // uncurated, not under a filter the previous key's owner set.
-      await call(MODELS_PATH, makePost({ enabledModelIds: ["SenseNova-Lite"] }));
-      await call(API_KEY_PATH, makePost({ forget: true }));
-      const after = await call(SNAPSHOT_PATH, makeRequest());
-      check("Q9 forgetting the key clears the curation with it",
-        JSON.stringify(after.payload.llm?.enabledModelIds) === JSON.stringify([]),
-        JSON.stringify(after.payload.llm?.enabledModelIds));
     });
   } catch (error) { fail("Q: the model roster route", error); }
 }

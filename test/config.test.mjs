@@ -380,8 +380,8 @@ check("patch tokenSkewSeconds matches code default", Number(activeValue("tokenSk
   const viaSettings = resolveSettings({ maxTokensOverrides: { "deepseek-v4-flash": 131072, bad: 0 } }).settings.maxTokensOverrides;
   check("resolveSettings routes the map through the sanitizer",
     JSON.stringify(viaSettings) === JSON.stringify({ "deepseek-v4-flash": 131072 }), JSON.stringify(viaSettings));
-  check("the shipped default pins the DOCUMENTED ceilings (deepseek-flash, kimi-k3)",
-    JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides) === JSON.stringify({ "deepseek-flash": 393216, "kimi-k3": 131072 }),
+  check("the shipped default pins the DOCUMENTED ceilings (deepseek-flash, kimi-k3, sensenova-6.8-flash)",
+    JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides) === JSON.stringify({ "deepseek-flash": 393216, "kimi-k3": 131072, "sensenova-6.8-flash": 131072 }),
     JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides));
 }
 
@@ -463,9 +463,9 @@ check("patch tokenSkewSeconds matches code default", Number(activeValue("tokenSk
   const wiringBody = typesSrc.match(/export interface Wiring \{([\s\S]*?)\n\}/)?.[1] ?? "";
   const wiringFields = wiringBody.split("\n")
     .filter((line) => /^\s{2}[A-Za-z_]\w*\??\s*:/.test(line));
-  // 19 → 20（0.1.34 加 `onQuotaPools` 时漏更，b6469b1 的 config 套件因此一直红）。
+  // 2026-11-03 拆除主 key：apiKeyStore 出场，20 → 19。
   check("Wiring's field count is the one this suite reasons about",
-    wiringFields.length === 20, `${wiringFields.length} fields`);
+    wiringFields.length === 19, `${wiringFields.length} fields`);
 
   // Every route declares its own subset, and `registerRoutes` calls each exactly
   // once. A route module added without joining the facade would mount nothing

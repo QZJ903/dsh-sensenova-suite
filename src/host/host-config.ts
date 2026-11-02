@@ -60,7 +60,9 @@ export const CONFIG_DEFAULTS = Object.freeze({
    * Shipped defaults = 2026-10-31 运营者实测（kimi 30 / glm 15 / 商汤 0.8 /
    * deepseek 1）——初版 ×10/×20 是移植源的拍脑袋值，与实测不符，已替换。
    */
-  trendMultipliers: { "glm-5.2": 15, "kimi-k3": 30, "sensenova": 0.8, "deepseek": 1 },
+  // 顺序承重：lite 的 id 包含 flash 的 id 作子串，lite 键必须在 flash 键前
+  // （首中语义），否则 lite 被 ×1 抢走。
+  trendMultipliers: { "glm-5.2": 15, "kimi-k3": 30, "sensenova-6.8-flash-lite": 0.8, "sensenova-6.8-flash": 1, "deepseek": 1 },
   cacheSeconds: 60,
   pollSeconds: 30,
   consoleTimeoutMs: 15_000,
@@ -116,7 +118,7 @@ export const CONFIG_DEFAULTS = Object.freeze({
    * roster that mirrors it.
    */
   // 单行值：docs.test 按行解析 CONFIG_DEFAULTS，多行对象会让它 JSON.parse 失败。
-  maxTokensOverrides: { "deepseek-flash": 393216, "kimi-k3": 131072 },
+  maxTokensOverrides: { "deepseek-flash": 393216, "kimi-k3": 131072, "sensenova-6.8-flash": 131072 },
   /**
    * Per-model CONTEXT WINDOW overrides ({ modelId → tokens }), the same shape
    * and precedence as `maxTokensOverrides` above: override > the catalogue's

@@ -21,15 +21,11 @@ export const SNAPSHOT_PATH = `/api/${name}/snapshot`;
 
 /**
  * Register the snapshot route. Wiring subset: `settings`, `configError`,
- * `cache`, `inflight`, `tokenStore`, `apiKeyStore`, `publisher`,
+ * `cache`, `inflight`, `tokenStore`, `publisher`,
  * `catalogStore`, `providerStore`, `visionPublish`, `logger`.
  * @param ctx - the host root context (only `ctx.webServer` is used here).
- * @param {Pick<Wiring, "settings" | "configError" | "cache" | "inflight" | "tokenStore" | "apiKeyStore" | "publisher" | "catalogStore" | "providerStore" | "logger">} wiring
+ * @param {Pick<Wiring, "settings" | "configError" | "cache" | "inflight" | "tokenStore" | "publisher" | "catalogStore" | "providerStore" | "logger">} wiring
  *   - the subset this route reads, as assembled by `apply()` in `index.ts`.
- *   The widest surface in the family, and the reason the declaration is worth
- *   having: `apiKeyStore` is read directly off the bag rather than
- *   destructured, so it was invisible to a grep of the destructuring line and
- *   the `Pick` now names it in the type instead.
  *
  *   No count is spelled out here on purpose. The field list above IS the
  *   contract, and a hand-written "twelve of twenty-two" beside it is a second
@@ -38,7 +34,7 @@ export const SNAPSHOT_PATH = `/api/${name}/snapshot`;
  *   size counts the names, or asks `tsc` by adding a key.
  * @returns {Function} the `off()` unregister callback.
  */
-export function registerSnapshotRoute(ctx: any, wiring: Pick<Wiring, "settings" | "configError" | "cache" | "inflight" | "tokenStore" | "apiKeyStore" | "resolveCatalogApiKey" | "publisher" | "catalogStore" | "providerStore" | "logger"> & { poolSnapshot?: () => unknown; thinkingOverrides?: () => Record<string, string[]> }) {
+export function registerSnapshotRoute(ctx: any, wiring: Pick<Wiring, "settings" | "configError" | "cache" | "inflight" | "tokenStore" | "resolveCatalogApiKey" | "publisher" | "catalogStore" | "providerStore" | "logger"> & { poolSnapshot?: () => unknown; thinkingOverrides?: () => Record<string, string[]> }) {
   const { settings, configError, cache, inflight, tokenStore, publisher, catalogStore, providerStore, logger } = wiring;
   const poolSnapshot = wiring.poolSnapshot;
 
@@ -67,7 +63,6 @@ export function registerSnapshotRoute(ctx: any, wiring: Pick<Wiring, "settings" 
           cache,
           inflight,
           tokenStore,
-          apiKeyStore: wiring.apiKeyStore,
           resolveCatalogApiKey: wiring.resolveCatalogApiKey,
           publisher,
           catalogStore,

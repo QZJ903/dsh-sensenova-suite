@@ -246,12 +246,11 @@ async function bootPlugin({ withCredentials = true, withLlm = false, config = {}
   const routes = [
     "/api/dsh-sensenova-suite/snapshot",
     "/api/dsh-sensenova-suite/account",
-    "/api/dsh-sensenova-suite/api-key",
     "/api/dsh-sensenova-suite/provider",
     "/api/dsh-sensenova-suite/models",
 
   ];
-  check("all seven routes are registered on mount",
+  check("all routes are registered on mount",
     routes.every((path) => webServer.registered.has(path)),
     [...webServer.registered.keys()].join(", "));
   // The registered values must be callable handlers, not specs: the real
@@ -357,13 +356,6 @@ async function bootPlugin({ withCredentials = true, withLlm = false, config = {}
     de.builds.length === 1 && typeof de.builds[0].resolveApiKey === "function" &&
     de.builds[0].baseUrl === "https://token.sensenova.cn/v1",
     JSON.stringify({ builds: de.builds.length, baseUrl: de.builds[0]?.baseUrl }));
-  // The API-key route is served by the same container while registered.
-  const keyRes = response();
-  await webServer.registered.get("/api/dsh-sensenova-suite/api-key")(request(), keyRes);
-  check("the api-key route answers inside the container",
-    keyRes.statusCode === 200 && keyRes.payload?.ok === true && keyRes.payload?.hasApiKey === false,
-    JSON.stringify(keyRes.payload));
-
   const releasedBefore = llm.calls.released;
   await stop();
   check("disposing the fiber released the registered pair",

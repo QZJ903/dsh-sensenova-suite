@@ -37,10 +37,11 @@ import { createFileThrottleStore } from "./throttle-store.ts";
 import { createFileCatalogStore } from "./catalog-store.ts";
 import { createFileProviderStore } from "./provider-store.ts";
 import { profileSegment, profileStateDir } from "./state-store.ts";
-import { createApiKeyStore } from "./api-key-store.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "./key-orchestrator.ts";
 import { bucketCountsStrike } from "./rate-classify.ts";
-import { createFilePoolStore, emptyPoolRecord } from "./pool-store.ts";
+import { createFilePoolStore, emptyPoolRecord, effectiveVisionModels } from "./pool-store.ts";
+import { thinkingWithDefaults } from "./wire/facts.ts";
+import { identifyVisionModel } from "./llm-models.ts";
 import { createImageSwapper, installCapabilityOverride } from "./vision/bridge.ts";
 import { createProviderPublisher } from "./provider-publish.ts";
 import { registerRoutes } from "./routes.ts";
@@ -89,7 +90,7 @@ export const credentialKey = (scope: string, id: string) => `${scope}/${id}`;
 export { catalogSignature } from "./provider-publish.ts";
 
 /**
- * Host body: assemble the wiring, register the six routes, run the mount
+ * Host body: assemble the wiring, register the five routes, run the mount
  * side effects, and hang the unmount effect. The route handlers live in
  * `routes.ts`, the side effects in `lifecycle.ts` — this function only
  * decides what they may touch.
@@ -125,18 +126,6 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       configError = errMsg(error);
     }
   }
-  // The inference API key (`sk-…`) is shared by the catalog poll and the
-  // directly-registered LLM provider. It is held as the `SENSENOVA_API_KEY`
-  // CREDENTIAL REFERENCE (owner-only credentials service), with the raw
-  // process environment as a fallback — the value may live in
-  // `~/.dsh/.credentials.yaml` alone, which a sibling shell never sees, so
-  // reading `process.env` first is what left this panel blind on machines
-  // where the key is stored there. The panel save/forget route below writes
-  // the reference through the same store. Treated as optional: absent → the
-  // model lists and provider degrade, the quota panel still works.
-  const apiKeyStore = createApiKeyStore({
-    credentials: () => ctx.get("credentials") ?? null
-  });
   /** @type {Map<string, import("./console-client.ts").CacheEntry>} */
   const cache = new Map();
   /** One in-flight console fetch per URL, so concurrent polls share a call. */
@@ -189,10 +178,10 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // stays false. Everything registration-related is wrapped so a peer that
   // fails to load degrades to "models absent", never "panel down".
   // ── Key 编排层：多账号池 / 按积分组亲和 / (key,组) 池格 / 全局并发 / 探测 ──
-  // key 清单 = 面板默认 key（apiKeyStore，credential-ref SENSENOVA_API_KEY 语义）
-  // + 配置面 accounts[]（各自 credential-ref，经宿主凭据服务解析；解析失败静默跳过，
-  // 缺 key 不拖垮其他账号）。activeAccount 钉选暂由池序首位语义承担（钉选 = 面板只
-  // 配一把 key 的特例），完整钉选优先级在面板账号 UI（第 5 步）落位时接线。
+  // key 清单 = 配置面 accounts[]（各自 credential-ref，经宿主凭据服务解析；
+  // 解析失败静默跳过，缺 key 不拖垮其他账号）。activeAccount 钉选暂由池序首位
+  // 语义承担（钉选 = 面板只配一把 key 的特例），完整钉选优先级在面板账号 UI
+  // （第 5 步）落位时接线。
   // 面板添加的池 key 的 credential-ref 名：dsh-credentials 只允许
   // /^[A-Za-z_][A-Za-z0-9_]*$/（字母开头、仅字母数字下划线）——旧的
   // `dsh-sensenova-suite/pool-key-<n>` 带 `/` 和 `-`，宿主启动解析凭据文件即抛
@@ -211,10 +200,10 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       return undefined;
     }
   };
+  // 池成员人人平等（2026-11-03 拍板拆除主 key）：key-<n> 面板池 key +
+  // accounts 账号 key，按值去重；不再有「面板默认 key」这一特殊成员。
   const resolvePoolKeys = async (): Promise<Array<{ id: string; key: string }>> => {
     const entries: Array<{ id: string; key: string }> = [];
-    const panelKey = (await apiKeyStore.resolve().catch(() => ({ value: "" }))).value;
-    if (typeof panelKey === "string" && panelKey !== "") entries.push({ id: "default", key: panelKey });
     const credentials = getService("credentials");
     // 面板「多模态/接入 API」添加的 key（key-<n>）：秘钥在凭据服务 pool-<id> ref。
     const savedPool = await poolStore.read().catch(() => null);
@@ -301,20 +290,27 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     },
     logger: ctx.logger,
   });
-  // 面板目录线的 key：池优先（与适配器同源 pickStart，通用组无亲和——pickStart
-  // 只「挑一把能用的」，不推进游标、不占并发槽），主 key 仅回落。2026-11-03 修复：
-  // sk- 框迁池后主 key ref 常空，旧实现（已删的死 wiring 字段 resolveApiKey）
-  // 只认主 key——目录腿静默跳过，catalog.json 七天零更新（面板清单冻结在旧目录，
-  // 平台上新模型永不见）。pickStart 抛错（池空/全标满/凭据服务未就绪）不算失败，
-  // 回落主 key；两边都空由聚合层上屏 catalog_unavailable，不再无声。
+  // 面板目录线的 key，两级回落：①pickStart（健康 key 优先，与适配器同源，
+  // 通用组无亲和——不推进游标、不占并发槽）→ ②任意一把已解析的池 key。
+  // 2026-11-03 两修：**(a)** 目录腿曾只认「主 key」——那个概念已整体拆除
+  // （池成员人人平等），旧实现主 key ref 常空导致 catalog.json 七天零更新；
+  // **(b)** ①被拒时直落会跟着推理健康门瞎：pickStart 尊重池格标记/blocked
+  // （真机 04:55 四把 key 被 pool 429 全标满 30min，目录腿跟着报「无可用
+  // key」）——但 /v1/models 是免费读，不耗积分、不占推理配额，池格标记对它
+  // 无意义，所以标满时仍可用②取 key。仍尊重 disabled/deleted（用户明确踢出
+  // 的 key 不借）。两级全空由聚合层上屏 catalog_unavailable。
   const resolveCatalogApiKey = async (): Promise<string> => {
     try {
       const picked = await orchestrator.pickStart({ model: "" });
       if (typeof picked?.key === "string" && picked.key !== "") return picked.key;
     } catch {
-      // 池侧不可用不是目录线的终点：回落主 key（api-key-store 自带 env 兜底）。
+      // 池健康门拒绝（全标满/全 blocked/凭据服务未就绪）：不是目录线的终点。
     }
-    return (await apiKeyStore.resolve().catch(() => ({ value: "" }))).value;
+    const excluded = new Set([...poolRecord.disabledIds, ...poolRecord.deletedIds]);
+    const fallback = (await resolvePoolKeys()).find(
+      (entry) => !excluded.has(entry.id) && typeof entry.key === "string" && entry.key !== ""
+    );
+    return fallback !== undefined ? fallback.key : "";
   };
   // 字面量动态 import 必须保持字面量：rolldown 构建期据此把 "./llm-adapter.ts"
   // 改写为产物 "./llm-adapter.js"（llm-adapter 是独立 entry）；改成变量路径会让
@@ -349,7 +345,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
         bridgePrompt: poolRecord.vision?.bridgePrompt ?? settings.visionBridgePrompt,
         relayOn: settings.visionToolsEnabled || poolRecord.toolsEnabled.visionTools === true,
       }),
-      checkedIds: () => poolRecord.vision?.visionModels ?? [],
+      checkedIds: () => visionView(),
       resolveKey: async () => {
         const picked = await orchestrator.pickStart({ model: poolRecord.vision?.model ?? settings.visionModel });
         return picked.key;
@@ -359,7 +355,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       },
       loadImage: loadImageAttachment,
     });
-    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, protocolOverrides: () => poolRecord.modelProtocols, thinkingOverrides: () => poolRecord.thinking, visionSwapper: imageSwapper as (messages: unknown, context: { model: string }) => Promise<unknown>, resolveImageAccess, visionModelIds: () => poolRecord.vision?.visionModels ?? [] }) };
+    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, protocolOverrides: () => poolRecord.modelProtocols, thinkingOverrides: () => thinkingView(), visionSwapper: imageSwapper as (messages: unknown, context: { model: string }) => Promise<unknown>, resolveImageAccess, visionModelIds: () => visionView() }) };
   });
   const publisher = createProviderPublisher({
     settings,
@@ -377,6 +373,35 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   });
   const providerState = publisher.state;
   publishSignature = publisher.state;
+  // ── 每模型用户配置的「生效视图」（2026-11-03 拍板）────────────────────────
+  // 目录里出现的新模型在 pool.json 没有键（播种只发生在写盘时刻），缺键在
+  // 这两个视图里按默认补齐，面板勾选与 DSH 可选面读同一份，不会各说各话。
+  // ids 取 providerState.entries（发布在服目录，同步可得，与适配器同一目录
+  // 事实）；已存键原样尊重（含显式空数组——「全不勾」的保存不被翻案）。
+  // 只在挂载完成后的调用点使用（适配器 deps / 快照投影/池路由），首种前的
+  // refreshPoolRecord 变更检测仍比原始记录，无 TDZ 面。
+  const catalogIdsInView = (): string[] => {
+    const ids: string[] = [];
+    for (const entry of (providerState.entries ?? []) as Array<{ id?: unknown }>) {
+      const id = str(entry?.id, "");
+      if (id !== "") ids.push(id);
+    }
+    return ids;
+  };
+  /** 思考档位视图：存储记录 ∪ 缺键默认集（未收录模型默认只勾 high）。 */
+  const thinkingView = (): Record<string, string[]> => thinkingWithDefaults(poolRecord.thinking ?? {}, catalogIdsInView());
+  /** 原生看图 id（目录 input_modalities 含 image——与面板 vision 徽章同一判据
+   * identifyVisionModel）：「可看图自动勾」的底集。目录错报时以手动为准。 */
+  const nativeVisionIds = (): string[] => {
+    const out: string[] = [];
+    for (const entry of (providerState.entries ?? []) as Array<Record<string, unknown>>) {
+      const id = str(entry?.id, "");
+      if (id !== "" && identifyVisionModel(entry).vision === true) out.push(id);
+    }
+    return out;
+  };
+  /** 可看图生效集：显式勾选 ∪（原生 − 手动取消墓碑），手动优先级最高。 */
+  const visionView = (): string[] => effectiveVisionModels(poolRecord.vision, nativeVisionIds());
   // `unavailableModelIds` is annotated rather than left to the `= []`
   // initializer: a default initializer types the parameter from it, so without
   // the annotation it read as `never[]` and `publisher.publish` (which takes a
@@ -430,8 +455,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // by `startSideEffects`; until then it is a no-op, so a Host without a
   // settings service still answers polls.
 
-  // 池管理面（pool 路由）：标签（default=面板 key，accounts 用配置 label）、
-  // 相位、池侧动作、面板 key 的 forget。
+  // 池管理面（pool 路由）：标签（accounts 用配置 label）、相位、池侧动作。
   const accountLabel = (id: string): string | null => {
     if (id === "default") return null;
     return settings.accounts.find((account) => account.id === id)?.label ?? null;
@@ -457,19 +481,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       id: string; label: string | null; note: string | null;
       phase: "running" | "blocked" | "absent"; disabled: boolean; deleted: boolean;
     }> = [];
-    const panelKeyValue = (await apiKeyStore.resolve().catch(() => ({ value: "" }))).value;
-    if (typeof panelKeyValue === "string" && panelKeyValue !== "") {
-      rows.push({
-        id: "default", label: maskKey(panelKeyValue),
-        note: poolRecord.defaultNote !== undefined && poolRecord.defaultNote !== "" ? poolRecord.defaultNote : null,
-        phase: phaseById.get("default") ?? "absent",
-        disabled: poolRecord.disabledIds.includes("default"),
-        deleted: poolRecord.deletedIds.includes("default")
-      });
-    }
-    // 已见过的 key 值：default 与新 key 值相同时不重复列（按 key 去重）。
+    // 已见过的 key 值：同值不重复列（按 key 去重，accounts 与池条目可能同值）。
     const seenKeys = new Set<string>();
-    if (typeof panelKeyValue === "string" && panelKeyValue !== "") seenKeys.add(panelKeyValue);
     for (const entry of savedPool?.keys ?? []) {
       // 凭据服务必须现查：mount 时捕获的实例在 DSH 服务注册晚于插件挂载时是
       // null，全部 label 会回退成裸 id（2026-10-27 真机：三行全显示 key-<n>）。
@@ -503,19 +516,20 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     cache,
     inflight,
     tokenStore,
-    apiKeyStore,
     catalogStore,
     providerStore,
     poolAdmin: {
       store: poolStore,
       accounts: listAccounts,
+      // 「可看图自动勾」的底集来源（目录原生看图 id）；vision 保存路径据此把
+      // 「期望生效集 − 原生」写进墓碑（手动取消不被自动勾翻案）。
+      nativeVisionIds,
       phaseOf: (id: string) => orchestrator.phaseOf(orchestrator.keyOf(id)),
       apply: async (action: "disable" | "restore" | "delete", id: string) => {
         if (action === "disable") orchestrator.disableById(id);
         else if (action === "restore") await orchestrator.restoreById(id);
         else orchestrator.deleteById(id);
       },
-      forgetPanelKey: async () => { await apiKeyStore.forget().catch(() => undefined); },
       addKeySecret: async (id: string, apiKey: string) => {
         const credentials = getService("credentials");
         // 凭据 ref 名必须合规（^[A-Za-z_][A-Za-z0-9_]*$）；旧 `…/pool-key-<n>`
@@ -536,12 +550,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
         await refreshPoolRecord();
         return effectiveConcurrency();
       },
-      hasPanelKey: async () => {
-        const value = (await apiKeyStore.resolve().catch(() => ({ value: "" }))).value;
-        return typeof value === "string" && value !== "";
-      },
       // add 查重的解析半边：resolvePoolKeys 本身按值去重、先到先得，
-      // 其首个持有者与池/面板的生效条目一致，正好是查重的判据。
+      // 其首个持有者与池的生效条目一致，正好是查重的判据。
       findKeyHolder: async (value: string) =>
         (await resolvePoolKeys()).find((entry) => entry.key === value)?.id ?? null,
       /** 面板改凭据后重解析池（加 key / 面板 key 保存与清除后调用，免重启入池）。 */
@@ -564,13 +574,15 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
         inflight: snap.inflight,
         modelProtocols: poolRecord.modelProtocols,
         globalConcurrency: effectiveConcurrency(),
-        // 多模态面板设置（已保存值；面板以此渲染控件初值）。
+        // 多模态面板设置（已保存值；面板以此渲染控件初值）。vision/thinking
+        // 走「生效视图」：目录内缺键的新模型补默认（可看图自动勾/思考只勾
+        // high），已存键原样——面板看到的即适配器在用的，两侧不各说各话。
         settings: {
           toolsEnabled: { ...poolRecord.toolsEnabled },
           text2img: { ...poolRecord.text2img },
           img2img: { ...poolRecord.img2img },
-          vision: { ...poolRecord.vision },
-          thinking: { ...poolRecord.thinking }
+          vision: { ...poolRecord.vision, visionModels: visionView() },
+          thinking: { ...thinkingView() }
         }
       };
     },
@@ -599,7 +611,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     }
   };
 
-  // The six route handlers (trust fence, method allowances, body ceilings,
+  // The five route handlers (trust fence, method allowances, body ceilings,
   // trace writes, publish-after-save) — see routes.ts.
   const offs = registerRoutes(ctx, wiring);
   // Mount-time side effects (persisted-catalog seed, vision step two) — see

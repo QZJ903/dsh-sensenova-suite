@@ -123,9 +123,6 @@ export interface AuthData {
 
 /** The `llm` block: key presence, registration state, and the roster. */
 export interface LlmData {
-  hasApiKey?: boolean;
-  keySource?: string | null;
-  ephemeral?: boolean;
   registerProvider?: boolean;
   registerSource?: string;
   llmAvailable?: boolean;

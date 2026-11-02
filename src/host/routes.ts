@@ -16,7 +16,6 @@
  *   - `routes/snapshot.ts`  — the polled read-only snapshot (and the
  *                             failure-code taxonomy);
  *   - `routes/account.ts`   — panel sign-in / forget, trace writes;
- *   - `routes/api-key.ts`   — the `sk-` reference, forget-and-republish;
  *   - `routes/provider.ts`  — the registration switch;
  *   - `routes/models.ts`    — the curated allow-list;
  *   - `routes/pool.ts`      — the pool admin surface (stop / restore / delete
@@ -24,7 +23,7 @@
  *                             partition — the panel's read-only pool card).
  *
  * The returned `off()` callbacks are handed to `teardown` in this order; the
- * six routes are path-disjoint exact matches, so no unregister depends on
+ * five routes are path-disjoint exact matches, so no unregister depends on
  * another. Public API and export surface are unchanged.
  *
  * 2026-10 收编裁定：出图与第二上游路由随功能移除。
@@ -33,7 +32,6 @@
  */
 import { registerSnapshotRoute } from "./routes/snapshot.ts";
 import { registerAccountRoute } from "./routes/account.ts";
-import { registerApiKeyRoute } from "./routes/api-key.ts";
 import { registerProviderRoute } from "./routes/provider.ts";
 import { registerModelsRoute } from "./routes/models.ts";
 import { registerPoolRoute } from "./routes/pool.ts";
@@ -56,7 +54,6 @@ export function registerRoutes(ctx: any, wiring: Wiring) {
   return [
     registerSnapshotRoute(ctx, wiring),
     registerAccountRoute(ctx, wiring),
-    registerApiKeyRoute(ctx, wiring),
     registerProviderRoute(ctx, wiring),
     registerModelsRoute(ctx, wiring),
     registerPoolRoute(ctx, wiring)

@@ -93,13 +93,6 @@ function harness({ stateOverrides = {}, published = [], publishResult = { ok: tr
         invalidate: () => {},
         state: async () => ({ configured: true, ephemeral: false })
       },
-      apiKeyStore: {
-        // No key by default: the catalogue fetch is skipped, so the groups
-        // below exercise the quota path alone (which is where the three-state
-        // bug lived). `apiKey` opts a group into the catalogue branch.
-        resolve: async () => ({ value: apiKey }),
-        state: async () => ({ hasApiKey: apiKey !== "", keySource: apiKey !== "" ? "memory" : null, ephemeral: false })
-      },
       // The catalog line's key, injected exactly as the wiring does at runtime
       // (pool-first with the primary key as fallback — the aggregator never
       // touches the stores for it). Empty = no key anywhere → `catalogError`,
