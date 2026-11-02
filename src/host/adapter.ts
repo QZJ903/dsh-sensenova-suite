@@ -35,9 +35,9 @@ import type {
   StreamChunk,
   TokenUsage,
 } from '@deepseek-ai/dsh-llm';
-import { parseRetryAfterMs, classify429Body, classify429Full, rateKindCountsStrike, QUOTA_RATE_RETRY_FLOOR_MS, TPM_PROBE_BACKOFF_STEPS_MS } from './rate-classify.ts';
+import { parseRetryAfterMs, classify429Body, classify429Full, bucketCountsStrike, probeFloorFor } from './rate-classify.ts';
 import { shouldRotateUnclassified } from './key-health.ts';
-import { retryableCodes, ANTHROPIC_TRUNCATED_CODE } from './llm-retry.ts';
+import { retryableCodes, ANTHROPIC_TRUNCATED_CODE, QUOTA_CODES } from './llm-retry.ts';
 import { MODELS_TIMEOUT_MS, CATALOG_FAILURE_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
 import { KNOWN_UNROUTABLE_MODELS, CONTEXT_WINDOW_FIELDS, MAX_OUTPUT_FIELDS, FALLBACK_CONTEXT_WINDOW, maxTokensForId } from './llm-models.ts';
@@ -63,7 +63,29 @@ const PROVIDER_RETRY_AFTER_CAP_MS = 60_000;
  * 对齐后保证任何采用值都会被宿主按指导延迟重试；不影响 TPM 分级档（3–30s）与
  * code 8 固定档（15s）的正常取值。 */
 const QUOTA_RETRY_AFTER_CEILING_MS = 60_000;
-/** 配额类 429（code 8，rps/rpm exhausted）退避下限（毫秒）。2026-09-04 实测：速率桶补充 ≈1 个/14s，15s 覆盖一个完整补充周期。 */
+/** 轮间抖动等待窗口（毫秒）：3 轮全 429 之后、第 4 轮之前等一次，每请求独立算。
+ * 目的是避免多个并发请求同时结束等待、造成第二波请求洪峰（2026-11-02 他拍板）。 */
+const JITTER_WAIT_MIN_MS = 5_000;
+const JITTER_WAIT_MAX_MS = 10_000;
+
+/** 可中断 sleep（毫秒）：signal abort 时立即醒来。轮间等待用。 */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (ms <= 0 || signal?.aborted === true) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 /** 生成请求连接/首字节超时（毫秒）。2026-09-04 实测：传输挂起 ≈1/5 且无 RST，45s 覆盖大 prompt 建连+首包（design D4/D6）。 */
 export const CONNECT_TIMEOUT_MS = 45_000;
 /** SSE 流空闲看门狗（毫秒）：距上一事件 ≥ 该值无任何 chunk/事件即按停摆结束。2026-09-04 实测：思考期渠道有空事件/心跳自然重置计时（design D4/D6）。 */
@@ -132,6 +154,12 @@ export interface SensenovaAdapterDeps {
     model: string | undefined,
   ) => Promise<string | undefined>;
   /**
+   * 该模型所属积分组是否「每把 key（含阻塞态）都被池格标记」——4 轮轮询里
+   * 唯一「不等就终止」的判据（全组积分耗尽 → 抛 ACCOUNT_QUOTA，宿主不重试）。
+   * 缺省 undefined = 不判（行为退化为普通轮尽）。
+   */
+  poolFullyMarked?: (model: string | undefined) => boolean;
+  /**
    * 请求结局上报（dsh-sensenova-suite 扩展，可选）：2xx 时回调 'success'，
    * 池层据此清连续限流计数并救回被借用的阻塞 key。缺省 undefined 不影响原行为。
    */
@@ -172,6 +200,14 @@ export interface SensenovaAdapterDeps {
    * 缺省 undefined 时回落 resolveApiKey（行为与原 provider 插件一致）。
    */
   resolveApiKeyForRequest?: (request: { sessionId: string | undefined; model: string }) => Promise<string>;
+  /**
+   * 每轮重新解析起点 key（4 轮轮询用，可选）：与首轮同源（池层 pickStart），
+   * 商汤组返回亲和 key（恒第一）、通用组推进游标（起点轮换）。返回 undefined =
+   * 池里没有可用 key（池空或该组全标）。缺省 undefined 时用首轮 key 继续。
+   * `excludeStart` = 上一轮起点：裸轮转组据此把起点推进一位（每轮起始账户
+   * 轮换，避免总是固定账户优先）；亲和组忽略它。
+   */
+  pickStartKeyForRequest?: (request: { sessionId: string | undefined; model: string; excludeStart?: string }) => Promise<string | undefined>;
   /**
    * 全局在途槽（dsh-sensenova-suite 扩展点，可选）：一次 stream() 请求全程持有，
    * 结束（含异常）释放；缺省 undefined 时不限全局并发（仅每 key 闸）。
@@ -852,11 +888,13 @@ function anthropicErrorType(errText: string): string | undefined {
 }
 
 /** 把预流 HTTP 失败映射为稳定 LlmError。
- * dynamicFloorMs：stream 层算好的配额类动态退避下限（429001 分级探测），
+ * dynamicFloorMs：stream 层算好的配额类动态退避下限（分级探测档），
  * 覆盖 classify429Body 返回的静态 floor；undefined 时用静态 floor。
  * wire：当前请求走的协议；Anthropic 协议的错误体用 type 字符串而非数字 code，
- * 需单独识别 overloaded / rate_limit，否则会被当成普通 HTTP 5xx/4xx 漏判。 */
-function httpError(status: number, errText: string, retryAfterMs: number | undefined, dynamicFloorMs?: number, wire?: WireKind): LlmError {
+ * 需单独识别 overloaded / rate_limit，否则会被当成普通 HTTP 5xx/4xx 漏判。
+ * poolExhausted：该组积分池已全标（4 轮轮询的唯一「不等就终止」路径）——
+ * 抛 ACCOUNT_QUOTA（不在宿主可重试清单里，直接上屏）而不是 RATE_LIMIT。 */
+function httpError(status: number, errText: string, retryAfterMs: number | undefined, dynamicFloorMs?: number, wire?: WireKind, poolExhausted = false): LlmError {
   const anthropicType = wire === 'anthropic' ? anthropicErrorType(errText) : undefined;
   if (status === 401) {
     return new LlmError(
@@ -873,17 +911,27 @@ function httpError(status: number, errText: string, retryAfterMs: number | undef
     );
   }
   if (status === 429) {
-    // SenseNova 429 按 error.code 二分类（design D1，2026-09-04 实测）：
-    // 配额类（code 8 速率耗尽 / 429001 TPM 耗尽）携带退避下限 providerRetryAfterMs；
-    // 429001 用 stream 层算好的分级探测档（dynamicFloorMs：3/5/10/15s，成功清零），
-    // code 8 用静态 floor（15s≈一个桶补充周期）。响应 Retry-After 大于下限时优先采用，
-    // 但整体封顶（防异常 Retry-After 把退避拖到分钟级外）。
-    // 非配额类维持现行短退避语义：Retry-After <= 上限时透传，超长整值不透传
-    // （也不截断），由宿主本地退避策略计算。任何 429 都不轮换、不冷却账号。
+    // SenseNova 429 分类（design D1，2026-09-04 实测；2026-11-02 统一退避）：
+    // 所有配额类都用 stream 层算好的分级探测档（dynamicFloorMs：3/5/10/15/30s，
+    // 成功清零；入口快照、整轮推进一档）。响应 Retry-After 大于下限时优先采用，
+    // 但整体封顶（防异常 Retry-After 把退避拖到分钟级外）。非配额类维持现行短退避
+    // 语义：Retry-After <= 上限时透传，超长整值不透传（也不截断），由宿主本地
+    // 退避策略计算。
+    //
+    // 积分池全标（poolExhausted）走 ACCOUNT_QUOTA：滚动 5h/周窗口，宿主重试
+    // 毫无意义，快速失败让面板说出原因才是可处置的形态。
+    if (poolExhausted) {
+      return new LlmError(
+        'llm-sensenova: SenseNova credit pool exhausted for this model group；SenseNova 积分池已耗尽（该模型组所有 key 均无额度），等待额度恢复或更换账号',
+        QUOTA_CODES.accountQuota,
+        { status: 429 },
+      );
+    }
     const classified = classify429Body(errText);
     // Anthropic 协议用 type 字符串表达限流（无数字 code）：同样按配额类处理。
+    // 无桶标记 ⇒ 按 TPM 桶兜底（与 bucketOfCode 同口径：闸门往严的一侧兜）。
     const classifiedWithAnthropic = anthropicType === ANTHROPIC_RATE_LIMIT && !classified.quota
-      ? { quota: true, retryFloorMs: QUOTA_RATE_RETRY_FLOOR_MS, kind: 'rate' as const }
+      ? { quota: true, retryFloorMs: probeFloorFor(0), kind: 'rate' as const, bucket: 'tpm' as const }
       : classified;
     const floorMs = dynamicFloorMs ?? classifiedWithAnthropic.retryFloorMs;
     let providerRetryAfterMs: number | undefined;
@@ -965,10 +1013,11 @@ export class SensenovaAdapter extends LlmAdapter {
    */
   private readonly quotaStickyKeys = new Map<string | undefined, string>();
   /**
-   * 429001 连续命中计数（per-session，分级探测用）：命中 +1、成功/换 key 清零，
-   * 决定下次探测档位 TPM_PROBE_BACKOFF_STEPS_MS[count]。仅内存，随适配器生命周期。
+   * 配额类 429 连续命中计数（per-session，分级退避用）：每次 stream() 调用至多 +1
+   * （入口快照、finally 推进），成功清零，决定下次退避档位
+   * PROBE_BACKOFF_STEPS_MS[count]（3/5/10/15/30s）。仅内存，随适配器生命周期。
    */
-  private readonly tpmHitCounts = new Map<string | undefined, number>();
+  private readonly probeHitCounts = new Map<string | undefined, number>();
 
   /**
    * 429 轨迹账本（per-session，纯诊断）：同一逻辑请求跨宿主重试吃过的 key
@@ -1176,6 +1225,24 @@ export class SensenovaAdapter extends LlmAdapter {
     };
   }
 
+  /**
+   * 4 轮轮询的「新一轮起点」：走池层 pickStart（商汤组亲和 key 恒第一、
+   * 通用组游标推进）。返回 undefined = 池里没有可用 key（池空或该组全标）。
+   * 缺省缝未接时退回 undefined（调用方按「无可用 key」收尾）。
+   */
+  private async pickRoundStart(options: GenerateOptions, excludeStart?: string): Promise<string | undefined> {
+    if (this.deps.pickStartKeyForRequest === undefined) return undefined;
+    try {
+      return await this.deps.pickStartKeyForRequest({
+        sessionId: options.sessionId,
+        model: options.model,
+        ...(excludeStart !== undefined ? { excludeStart } : {}),
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const connection = this.deps.options();
     // 全局在途槽：排队等待而非报错，异常/中止同样释放。
@@ -1273,9 +1340,30 @@ export class SensenovaAdapter extends LlmAdapter {
     let release: Release | undefined;
     // 各 attempt 的连接超时清理（清计时器 + 摘除宿主 abort 转发 listener），finally 统一执行。
     const connectCleanups: Array<() => void> = [];
+    // 配额类 429 退避档位入口快照（上游 W3）：整轮共用一档，finally 里推进一格。
+    // 2026-11-02 统一：快慢窗口共用同一套梯子（PROBE_BACKOFF_STEPS_MS）。
+    const entryProbeHits = this.probeHitCounts.get(options.sessionId) ?? 0;
+    const entryProbeFloorMs = probeFloorFor(entryProbeHits);
+    let probeHitThisCall = false;
+    let probeResetBySuccess = false;
+    // 4 轮轮询（2026-11-02 他拍板，取代单圈轮换）：
+    //   3 轮（每轮把所有可试的 key 各试一次）→ 抖动等待 5-10s → 第 4 轮 → 抛。
+    // 轮边界 = rotateApiKey 选不出本轮未试过的 key（不是固定 accountCount），
+    // 每轮清空 tried 让各 key 重新获得一次机会。pool 类只打标不打断流程——它的
+    // 格子由池层在选 key 时自动跳过，只有「全组都标满」才算换无可换。
+    let round = 1;
+    const MAX_POLL_ROUNDS = 3;
+    /** 第 4 轮（等待之后的那一轮）——不再有任何等待。 */
+    const FINAL_ROUND = MAX_POLL_ROUNDS + 1;
+    /** 累计上游尝试次数（日志与收尾行用）。 */
+    let totalAttempts = 1;
+    // 本轮起点（每轮推进）：裸轮转组据此把下一轮起点排除、从它的下一位环回，
+    // 实现「每轮起始账户轮换，避免总是固定账户优先」（2026-11-02 他要求）。
+    // 亲和组（商汤组）忽略它——亲和 key 恒第一。
+    let roundStartKey: string | undefined = apiKey;
 
     try {
-      for (let rotations = 0; ; ) {
+      for (;;) {
         tried.add(apiKey);
         // 按本次 attempt 实际使用的 key 获取并发额度；排队期间中止会在此 reject
         // （不占额度），排队超时以 TimeoutError reject（同样不占额度），统一映射
@@ -1342,16 +1430,17 @@ export class SensenovaAdapter extends LlmAdapter {
           // 恢复行放宽到 rate 类（2026-10-31 他批）：trail 非空 = 本会话刚吃过
           // 限流，「限速解除」时刻显式可读（第一条 429 到本行的时间差 = 窗口
           // 时长），不再靠账本重置反推。
-          const tpmHits = this.tpmHitCounts.get(options.sessionId);
+          const priorHits = this.probeHitCounts.get(options.sessionId);
           const trailLen = this.session429Trail.get(options.sessionId)?.length ?? 0;
-          if (tpmHits !== undefined || trailLen > 0) {
+          if (priorHits !== undefined || trailLen > 0) {
             traceLog(`[dsh-sensenova-suite] 429 恢复 model=${options.model} key=${maskKey(apiKey)} ` +
-              (tpmHits !== undefined
+              (priorHits !== undefined
                 ? "连续限流结束，探测档归零"
                 : `连续 ${trailLen} 次限流后成功`));
           }
-          this.tpmHitCounts.delete(options.sessionId);
+          this.probeHitCounts.delete(options.sessionId);
           this.session429Trail.delete(options.sessionId);
+          probeResetBySuccess = true;
           this.deps.reportOutcome?.(apiKey, 'success');
           break; // 额度随 response 保留，由外层 finally 在流结束后释放
         }
@@ -1409,13 +1498,16 @@ export class SensenovaAdapter extends LlmAdapter {
         // suite 扩展：积分池类 429（Allocated quota exceeded 形态）同样参与
         // 粘性换 key；池类不冷却不禁用，只由池层记 (key, 组) 格子。
         const pool429 = attempt.status === 429 && !classified.quota && full.kind === 'pool';
-        // 429001 分级探测档位：连续命中计数决定本次退避（3/5/10/15s，封顶后保持），
-        // 命中即 +1——每次宿主重试都带一个递增的探测等待，成功后清零回到最短档。
+        // 配额类 429 的退避档位：取**入口快照**（上游 W3，2026-11-02 对齐）——
+        // 整次 stream() 调用（= 一次宿主重试周期）内所有 internal attempt 共用
+        // 同一档，整轮失败才在 finally 里 +1。原实现在 attempt 循环内就地 +1，
+        // 配额轮换的 continue 会让一次调用吃多档（4 把 key 各撞一次就从 0 跳到
+        // 索引 3=15s 起），宿主预算被浪费在没有区分度的区间里。
+        // 2026-11-02 统一：快慢窗口共用这一套梯子（3/5/10/15/30s）。
         let dynamicFloorMs: number | undefined;
-        if (classified.kind === 'tpm') {
-          const hits = this.tpmHitCounts.get(options.sessionId) ?? 0;
-          dynamicFloorMs = TPM_PROBE_BACKOFF_STEPS_MS[Math.min(hits, TPM_PROBE_BACKOFF_STEPS_MS.length - 1)];
-          this.tpmHitCounts.set(options.sessionId, hits + 1);
+        if (classified.quota) {
+          dynamicFloorMs = entryProbeFloorMs;
+          probeHitThisCall = true;
         }
         // 429 诊断（2026-10-27）：限流本身此前全程静默——「为什么慢了」「key 是不是
         // 被限」无从判断。每次 429 一行：模型/key/分类/本档退避；30s 级退避下量可控。
@@ -1425,23 +1517,26 @@ export class SensenovaAdapter extends LlmAdapter {
         this.session429Trail.set(options.sessionId, trail429);
         traceLog(`[dsh-sensenova-suite] 429 model=${options.model} key=${maskKey(apiKey)} ` +
           `kind=${pool429 ? "pool" : classified.quota ? classified.kind : "unknown"} ` +
+          `bucket=${full.bucket ?? "-"} round=${round}/${FINAL_ROUND} ` +
           `退避=${dynamicFloorMs !== undefined ? `${Math.round(dynamicFloorMs / 1000)}s` : retryAfterMs !== undefined ? `${Math.round(retryAfterMs / 1000)}s(retry-after)` : "宿主默认"}`);
-        // 配额类 429 且开关开启：轮换到下一把本请求未试过的 key（tried 集合做单次
-        // 请求内防乒乓——每次宿主重试都会清空 tried、重新探测各 key，因此配额恢复
-        // 或另一把 key 空闲时下一次重试即可切过去；不再用跨请求环回 Set，那会把
-        // 会话永久锁死在已耗尽的 key 上干等退避）。
+        // 配额类 429 且开关开启：轮换到下一把本请求本轮未试过的 key（tried 集合做
+        // 本轮内防乒乓——轮边界处清空，各 key 在下一轮重新获得一次机会）。
+        // 积分池类（pool）同样参与换 key，但**只打标不打断流程**：格子由池层在选
+        // key 时自动跳过，D 耗尽不代表 A/B/C 也耗尽；只有该组全部 key 都标满
+        // （rotateApiKey 返回 undefined 且池层确认全标）才提前终止并抛 QUOTA。
         const quotaRotate = (quota429 || pool429) && quotaRotation;
         const rotatable = attempt.status === 401 || quotaRotate;
-        if (rotatable && options.signal?.aborted !== true && rotations < connection.accountCount) {
+        if (rotatable && options.signal?.aborted !== true) {
           // 'quota-exhausted' / 'pool-exhausted' 不写任何账号状态；401 仍走禁用轮换。
           const next = await this.deps.rotateApiKey(
             apiKey,
             attempt.status === 401
               ? 'invalid-credential'
-              // 软限流（code 8 与 429003 两个速率桶形态，rateKindCountsStrike=false）
-              // 轮换但不记 strike——rpm 桶 14s 级自愈，计入踢出阈值会误伤贴线限流
-              // 的健康 key（2026-10-31 他拍板，先 429003 后 code 8）。
-              : pool429 ? 'pool-exhausted' : rateKindCountsStrike(full.kind) ? 'quota-exhausted' : 'rate-soft',
+              // 踢出判据按桶：RPM 桶（code 8 / 429003 / *RPM* 族）只换不记——
+              // 14s 级自愈，计入踢出阈值会误伤贴线限流的健康 key（2026-10-31 他
+              // 拍板，先 429003 后 code 8）；2026-11-02 退避值统一后，这条判据
+              // 仍是按桶的正判据，不随退避策略变化。
+              : pool429 ? 'pool-exhausted' : bucketCountsStrike(full.bucket) ? 'quota-exhausted' : 'rate-soft',
             options.model,
           );
           if (next !== undefined && !tried.has(next)) {
@@ -1450,11 +1545,13 @@ export class SensenovaAdapter extends LlmAdapter {
             release = undefined;
             const previousKey = apiKey;
             apiKey = next;
-            rotations += 1;
-            traceLog(`[dsh-sensenova-suite] 429 换 key model=${options.model} ${maskKey(previousKey)} → ${maskKey(next)}（粘性已更新，已轮换 ${rotations}/${connection.accountCount}）`);
+            totalAttempts += 1;
+            traceLog(`[dsh-sensenova-suite] 429 换 key model=${options.model} ${maskKey(previousKey)} → ${maskKey(next)}（轮 ${round}/${FINAL_ROUND}，本轮已试 ${tried.size} 把，累计 ${totalAttempts} 次）`);
             if (quotaRotate) {
               this.quotaStickyKeys.set(options.sessionId, next); // 粘住新 key
-              this.tpmHitCounts.delete(options.sessionId); // 新 key 配额新鲜，探测档位归零
+              // 不在此清 probeHitCounts：计数是 per-session（不区分 key），且按入口
+              // 快照语义整轮只推进一档，循环内 delete 会被 finally 的 set 覆盖——
+              // 写了等于没写，还会误导后来者以为「换 key 就重置档位」。
             }
             continue;
           }
@@ -1470,7 +1567,6 @@ export class SensenovaAdapter extends LlmAdapter {
         // 两者都不记 strike：形状不明时判死一把 key 太武断（key-health.ts 的边界）。
         if (shouldRotateUnclassified(attempt.status, quota429 || pool429)
           && options.signal?.aborted !== true
-          && rotations < connection.accountCount
           && (attempt.status === 429 || !unclassifiedFallbackUsed)) {
           const next = await this.deps.rotateApiKey(apiKey, 'rate-unclassified', options.model);
           if (next !== undefined && !tried.has(next)) {
@@ -1478,33 +1574,66 @@ export class SensenovaAdapter extends LlmAdapter {
             release = undefined;
             const previousKey = apiKey;
             apiKey = next;
-            rotations += 1;
+            totalAttempts += 1;
             if (attempt.status !== 429) unclassifiedFallbackUsed = true;
             traceLog(`[dsh-sensenova-suite] 未分类失败换 key model=${options.model} ` +
-              `status=${attempt.status} ${maskKey(previousKey)} → ${maskKey(next)}（${attempt.status === 429 ? "本请求内轮满池" : "仅兜底一次"}，已轮换 ${rotations}/${connection.accountCount}）`);
+              `status=${attempt.status} ${maskKey(previousKey)} → ${maskKey(next)}（${attempt.status === 429 ? "本请求内轮满池" : "仅兜底一次"}，轮 ${round}/${FINAL_ROUND}，累计 ${totalAttempts} 次）`);
             continue;
           }
         }
+        // ── 本轮已无可试 key：进入下一轮 / 第 4 轮 / 终止 ─────────────────────
+        // **只有 429 才走轮询**：400/404/413/422 是请求问题、5xx/超时/传输是平台
+        // 问题、402/403 是账号态——换 key 与重打都不会变好，落到下方统一抛出。
+        // （2026-11-02 修：本块此前无状态码守卫，非 429 失败会被误判成「轮尽」
+        // 而白等 5-10s 重打 3 轮。）
+        // 全组池耗尽：该组每把 key（含阻塞态）都被池格标记 ⇒ 不再有任何轮次有意义，
+        // 立即终止并抛 ACCOUNT_QUOTA（宿主不重试）。这是唯一「不等」的终止路径。
+        // 注意：单把 key 的池耗尽**只打标不打断流程**——D 耗尽不代表 A/B/C 也耗尽，
+        // 格子由池层在下一轮选 key 时自动跳过（这就是「D 不参与下一次轮询」）。
+        const allPoolMarked = attempt.status === 429 && this.deps.poolFullyMarked?.(options.model) === true;
+        if (attempt.status === 429 && !allPoolMarked && round < FINAL_ROUND) {
+          // 3 轮结束 → 抖动等待 5-10s（每请求独立、可中止）→ 第 4 轮。
+          // 第 4 轮之后不再等待（「最大主动等待次数 1 次」）。
+          if (round === MAX_POLL_ROUNDS) {
+            const waitMs = JITTER_WAIT_MIN_MS + Math.floor(Math.random() * (JITTER_WAIT_MAX_MS - JITTER_WAIT_MIN_MS));
+            traceLog(`[dsh-sensenova-suite] 429 轮间等待 model=${options.model} ${Math.round(waitMs / 100) / 10}s（${MAX_POLL_ROUNDS} 轮全 429，抖动等待后进第 ${FINAL_ROUND} 轮）`);
+            release?.();
+            release = undefined;
+            await abortableSleep(waitMs, options.signal);
+            if (options.signal?.aborted === true) throw new LlmError('llm-sensenova: aborted during retry wait', 'TRANSPORT');
+          }
+          round += 1;
+          tried.clear();
+          // 新一轮起点重新解析（商汤组=亲和 key 恒第一；通用组=游标推进）。
+          // 起点轮换：把上一轮起点排除（裸轮转组从它的下一位环回）。
+          const nextStart = await this.pickRoundStart(options, roundStartKey);
+          if (nextStart === undefined) {
+            traceLog(`[dsh-sensenova-suite] 429 轮 ${round} 无可用 key model=${options.model}（池空或该组全标）`);
+            throw httpError(attempt.status, errText, retryAfterMs, dynamicFloorMs, wire, allPoolMarked);
+          }
+          apiKey = nextStart;
+          roundStartKey = nextStart;
+          tried.add(apiKey);
+          traceLog(`[dsh-sensenova-suite] 429 进入第 ${round}/${FINAL_ROUND} 轮 model=${options.model} 起点 key=${maskKey(apiKey)}`);
+          continue;
+        }
         if (attempt.status === 429) {
-          // 文案三分（2026-10-31 他问「都试了吗，试了哪些 key 怎么不写出来」——
-          // 旧「换无可换」对 rate 类是张冠李戴：rate 是设计上不换，不是没得换）：
-          // rate=设计上不轮换；quota/pool/endpoint/account 想换但池里没得换；
-          // 且轮换开关关闭=根本没尝试换。已试列表 = 跨宿主重试累计。
-          // 「换 key 同样限速」的半句已删：2026-10-31 实测 A/C 200、B 429，
-          // 换 key 能绕开，原措辞没有实测支撑（交接文档 5 的旧结论已推翻）。
-          // 未分类 429 的兜底已在上方走过：标注本请求轮过几把，避免读起来像是
-          // 「不轮换」却其实换过。
-          const label = quota429 || pool429
-            ? (quotaRotation ? "429 换无可换" : "429 未轮换（quotaRotation 未开）")
-            : rotations > 0
-              ? `429 未识别形状，已轮换 ${rotations} 把`
-              : "429 未识别形状，无可轮换";
+          // 轮尽（或池全标）的收尾行：已试列表 = 跨宿主重试累计的脱敏 key。
+          // pool 全标走 QUOTA 出口（宿主不重试）；其余交宿主重试层（预算内自动重试）。
+          const label = allPoolMarked
+            ? `429 该组全池耗尽（${round} 轮终止）`
+            : quota429 || pool429
+              ? (quotaRotation ? `429 ${round} 轮换无可换` : "429 未轮换（quotaRotation 未开）")
+              : totalAttempts > 1
+                ? `429 未识别形状，已换 ${totalAttempts - 1} 次 key`
+                : "429 未识别形状，无可轮换";
           traceLog(`[dsh-sensenova-suite] ${label} model=${options.model} ` +
-            `已试 ${trail429.map((key) => maskKey(key)).join("/")} 共 ${trail429.length}/${connection.accountCount} 把，交宿主重试层（预算内自动重试）`);
+            `已试 ${trail429.map((key) => maskKey(key)).join("/")} 共 ${trail429.length} 把、${totalAttempts} 次，` +
+            `${allPoolMarked ? "抛 QUOTA（宿主不重试）" : "交宿主重试层（预算内自动重试）"}`);
         }
         release();
         release = undefined;
-        throw httpError(attempt.status, errText, retryAfterMs, dynamicFloorMs, wire);
+        throw httpError(attempt.status, errText, retryAfterMs, dynamicFloorMs, wire, allPoolMarked);
       }
 
       if (response === undefined) {
@@ -1540,6 +1669,13 @@ export class SensenovaAdapter extends LlmAdapter {
       for (const cleanup of connectCleanups) cleanup();
       release?.();
       releaseSlot?.();
+      // 退避档位推进（上游 W3）：整次 stream() 调用（含轮换出的所有 internal
+      // attempt、含 4 轮）只消耗一档，仅在「撞过配额类 429 且最终未成功」时 +1；
+      // 没撞（纯传输错误、非配额失败）则档位不动。成功已在循环内清零
+      // （probeResetBySuccess）。2026-11-02 统一：快慢窗口共用这一套档位。
+      if (probeHitThisCall && !probeResetBySuccess) {
+        this.probeHitCounts.set(options.sessionId, entryProbeHits + 1);
+      }
     }
   }
 }

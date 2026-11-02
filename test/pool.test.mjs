@@ -5,7 +5,9 @@
  *   - classify429Full 七分类（code 8 / 429001 / 429003=rate-soft / insufficient_quota /
  *     Endpoint* / ModelAccount* / 池特征串 / 未知兜底；insufficient_quota 2026-10-31
  *     依上游 freeapi 订正从池特征串移出按 tpm 处理；429003 同日改 rate-soft——
- *     轮换不记 strike）；
+ *     轮换不记 strike）；**桶维（2026-11-02 统一退避）**：踢出判据只看 bucket
+ *     （tpm 计、rpm 不计），作用域族按 code 里的 TPM/RPM 定桶；退避值统一走
+ *     一套梯子（PROBE_BACKOFF_STEPS_MS = 3/5/10/15/30s，30 封顶）；kind 仅日志标签；
  *   - parseRetryAfterMs 秒数与 HTTP 日期两形态；
  *   - KeyOrchestrator：按组亲和（商汤组粘、通用组轮）、(key,组) 池格跳过
  *     与 groupFullyPoolMarked、连续 rate 踢出（阈值 3）、探测到期恢复、
@@ -13,7 +15,7 @@
  *   - normalizeAccounts / normalizeModelGroups 的丢弃与回落。
  */
 import { strict as assert } from "node:assert";
-import { classify429Full, classify429Body, rateKindCountsStrike, parseRetryAfterMs } from "../src/host/rate-classify.ts";
+import { classify429Full, classify429Body, bucketCountsStrike, probeFloorFor, PROBE_BACKOFF_STEPS_MS, parseRetryAfterMs } from "../src/host/rate-classify.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "../src/host/key-orchestrator.ts";
 import { DEFAULT_KEY_POOL_PARAMS } from "../src/host/key-pool.ts";
 import { normalizeAccounts, normalizeModelGroups, CONFIG_DEFAULTS } from "../src/host/host-config.ts";
@@ -25,7 +27,7 @@ const fail = (group, error) => results.push({ name: group, pass: false, detail: 
 // ── 1. classify429Full ──────────────────────────────────────────────────────
 try {
   const rps = classify429Full('{"error":{"code":8,"message":"rps exhausted"}}');
-  check("code 8 → rate-rps", rps.kind === "rate-rps" && rps.retryFloorMs === 15_000, JSON.stringify(rps));
+  check("code 8 → rate-rps（floor=梯子首档 3s）", rps.kind === "rate-rps" && rps.retryFloorMs === 3_000, JSON.stringify(rps));
   const rpsStr = classify429Full('{"error":{"code":"8"}}');
   check("code '8'（字符串）同样 rate-rps", rpsStr.kind === "rate-rps", JSON.stringify(rpsStr));
   const tpm = classify429Full('{"error":{"code":429001,"type":"invalid_request_error"}}');
@@ -49,7 +51,7 @@ try {
   // 计入踢出阈值会把贴线限流的健康 key 踢出池，故轮换不记 strike（adapter/vision
   // 侧按 kind 路由，此处钉分类器形状）。
   const code429003 = classify429Full('{"error":{"code":429003,"type":"rate_limit_error","message":"inference exceeds tpm/rpm limit"}}');
-  check("429003 → rate-soft（15s 下限，轮换不记 strike）", code429003.kind === "rate-soft" && code429003.retryFloorMs === 15_000, JSON.stringify(code429003));
+  check("429003 → rate-soft（rpm 桶，不记 strike）", code429003.kind === "rate-soft" && code429003.bucket === "rpm", JSON.stringify(code429003));
   const code429003Str = classify429Body('{"error":{"code":"429003"}}');
   check("429003 字符串形态同样 rate-soft（quota:true）", code429003Str.quota === true && code429003Str.kind === "rate-soft", JSON.stringify(code429003Str));
   const code8WithTpmMessage = classify429Body('{"error":{"code":8,"message":"inference exceeds tpm/rpm limit"}}');
@@ -68,12 +70,28 @@ try {
   check("insufficient_quota 全链分类 → rate-tpm（不再归 pool）", aliasFull.kind === "rate-tpm" && aliasFull.retryFloorMs === 3_000, JSON.stringify(aliasFull));
   const aliasMsgOnly = classify429Full('{"error":{"code":1213,"message":"insufficient_quota"}}');
   check("insufficient_quota 只出现在 message（code 不认识）→ 不归 pool（unknown 兜底）", aliasMsgOnly.kind === "unknown", JSON.stringify(aliasMsgOnly));
-  // 踢出阈值单一判据（2026-10-31）：只有重形态（窗口分钟级以上）计数；两个速率
-  // 桶形态（code 8 / 429003）14s 级自愈不计数，pool/unknown 另有口径。
-  check("strike 判据：rate-rps 不计（code 8，他拍板扩入）", rateKindCountsStrike("rate-rps") === false);
-  check("strike 判据：rate-soft 不计（429003）", rateKindCountsStrike("rate-soft") === false);
-  check("strike 判据：pool / unknown 不计", rateKindCountsStrike("pool") === false && rateKindCountsStrike("unknown") === false && rateKindCountsStrike(undefined) === false);
-  check("strike 判据：tpm / endpoint / account 计数", rateKindCountsStrike("rate-tpm") === true && rateKindCountsStrike("rate-endpoint") === true && rateKindCountsStrike("rate-account") === true);
+  // 踢出阈值单一判据（2026-11-02 定稿：按桶）：只有 TPM 桶计数；RPM 桶
+  // （code 8 / 429003 / *RPM* 族）14s 级自愈不计数；pool/unknown 另有口径。
+  check("strike 判据：tpm 计数", bucketCountsStrike("tpm") === true);
+  check("strike 判据：rpm 不计", bucketCountsStrike("rpm") === false);
+  check("strike 判据：undefined（pool/unknown）不计", bucketCountsStrike(undefined) === false);
+  // 桶接线：作用域族按 code 里的 TPM/RPM 定桶（2026-11-02）
+  check("EndpointTPMExceeded → bucket=tpm", endpoint.bucket === "tpm", JSON.stringify(endpoint));
+  check("EndpointRPMExceeded → bucket=rpm", endpointRpm.bucket === "rpm", JSON.stringify(endpointRpm));
+  check("ModelAccountRpmRateLimitExceeded → bucket=rpm", account.bucket === "rpm", JSON.stringify(account));
+  check("ModelAccountTpmRateLimitExceeded → bucket=tpm", accountTpm.bucket === "tpm", JSON.stringify(accountTpm));
+  check("code 8 → bucket=rpm", rps.bucket === "rpm", JSON.stringify(rps));
+  check("429001 → bucket=tpm", tpm.bucket === "tpm", JSON.stringify(tpm));
+  check("429003 → bucket=rpm", code429003.bucket === "rpm", JSON.stringify(code429003));
+  check("unknown → bucket=undefined", unknown.bucket === undefined, JSON.stringify(unknown));
+  check("pool → bucket=undefined（走格子，不走 strike）", pool.bucket === undefined, JSON.stringify(pool));
+  // 退避统一（2026-11-02 他拍板）：所有配额类共用一套梯子 3/5/10/15/30s、30 封顶。
+  check("梯子 = 3/5/10/15/30s（30 封顶）", JSON.stringify(PROBE_BACKOFF_STEPS_MS) === "[3000,5000,10000,15000,30000]", JSON.stringify(PROBE_BACKOFF_STEPS_MS));
+  check("probeFloorFor(0) = 3s（入口首档）", probeFloorFor(0) === 3_000);
+  check("probeFloorFor(4) = 30s（末档）", probeFloorFor(4) === 30_000);
+  check("probeFloorFor(99) 停在末档 30s", probeFloorFor(99) === 30_000);
+  check("probeFloorFor(-1) 钳到首档 3s", probeFloorFor(-1) === 3_000);
+  check("分类层静态 floor = 梯子首档（快慢同值）", rps.retryFloorMs === probeFloorFor(0) && tpm.retryFloorMs === probeFloorFor(0) && endpointRpm.retryFloorMs === probeFloorFor(0), `${rps.retryFloorMs}/${tpm.retryFloorMs}/${endpointRpm.retryFloorMs}`);
 } catch (e) { fail("classify429Full", e); }
 
 // ── 2. parseRetryAfterMs ────────────────────────────────────────────────────
@@ -110,6 +128,24 @@ try {
   const g1 = await orch.pickStart({ sessionId: "t1", model: "deepseek-v4-flash" });
   const g2 = await orch.pickStart({ sessionId: "t2", model: "glm-5.2" });
   check("通用组：不同会话轮转推进", g1.key !== g2.key, `${g1.key} vs ${g2.key}`);
+
+  // 3a'. 每轮起点轮换（2026-11-02 他要求「避免总是固定账户优先」）：
+  // excludeStart = 上一轮起点 ⇒ 裸轮转组从它的下一位环回，起点推进一位。
+  // 亲和组忽略该参（亲和 key 恒第一）。
+  const seq = [];
+  let start = (await orch.pickStart({ sessionId: "rot", model: "deepseek-v4-flash" })).key;
+  seq.push(start);
+  for (let i = 0; i < 3; i += 1) {
+    start = (await orch.pickStart({ sessionId: "rot", model: "deepseek-v4-flash", excludeStart: start })).key;
+    seq.push(start);
+  }
+  check("通用组：4 轮起点两两不同（轮换到位）", new Set(seq).size === 4 || new Set(seq).size === keys.length, JSON.stringify(seq));
+  check("通用组：第 2 轮起点 ≠ 第 1 轮起点", seq[1] !== seq[0], JSON.stringify(seq));
+  check("通用组：第 3 轮起点 ≠ 第 2 轮起点", seq[2] !== seq[1], JSON.stringify(seq));
+  check("通用组：第 4 轮起点 ≠ 第 3 轮起点", seq[3] !== seq[2], JSON.stringify(seq));
+  const aff1 = await orch.pickStart({ sessionId: "aff", model: "sensenova-6.8-flash-lite" });
+  const aff2 = await orch.pickStart({ sessionId: "aff", model: "sensenova-6.8-flash-lite", excludeStart: aff1.key });
+  check("亲和组：excludeStart 被忽略（亲和 key 恒第一）", aff1.key === aff2.key, `${aff1.key} vs ${aff2.key}`);
 
   // 3b. 亲和过期（TTL 300s）后换把。
   now += DEFAULT_ORCHESTRATOR_PARAMS.affinityTtlMs + 1;

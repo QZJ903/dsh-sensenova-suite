@@ -123,6 +123,19 @@ export function createAdapterFactory(pool: PoolFacade) {
           throw new LlmError("dsh-sensenova-suite: no usable SenseNova API key (pool empty)", "MISSING_CREDENTIAL");
         }
       },
+      // 4 轮轮询的每轮起点：与首轮同源（池层 pickStart）——商汤组返回亲和 key
+      // （恒第一，2026-11-02 他拍板）、通用组推进游标（起点轮换）。返回 undefined
+      // 表示池里没有可用 key（池空或该组全标），adapter 据此收尾。
+      pickStartKeyForRequest: async (request) => {
+        try {
+          const picked = await orchestrator.pickStart(request);
+          return picked.key;
+        } catch {
+          return undefined;
+        }
+      },
+      // 该组是否全池积分耗尽（4 轮轮询的唯一「不等就终止」判据）。
+      poolFullyMarked: (model) => orchestrator.groupFullyPoolMarked(orchestrator.groupOf(model)),
       // 全局在途上限：排队等待而非报错。
       requestSlot: async (signal?: AbortSignal) => orchestrator.acquireSlot(signal),
       // 轮换：401 → 永久移除并取下一把；rate/pool 类 429 → 记数/记格并取下一把。

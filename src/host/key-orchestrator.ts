@@ -325,19 +325,27 @@ export class KeyOrchestrator {
    * 选起始 key（适配器 stream 的第一跳）。组内策略见 §5.4；亲和命中要求
    * key 在运行态且未被该组 pool 标记。无可用 key 抛 Error（MISSING_CREDENTIAL
    * 语义由适配器的 resolveApiKeyForRequest 调用方翻译）。
+   *
+   * `excludeStart`（2026-11-02，4 轮轮询用）：**裸轮转组**的起点排除——每轮
+   * 起点必须与上一轮不同（避免总是固定账户优先）。实现=从该 key 的下一位环回，
+   * 等价 pickNext(new Set([excludeStart]))。亲和组忽略此参（亲和 key 恒第一）。
    */
-  async pickStart(request: { sessionId?: string | undefined; model: string }): Promise<PickedKey> {
+  async pickStart(request: { sessionId?: string | undefined; model: string; excludeStart?: string }): Promise<PickedKey> {
     await this.ensureSeeded();
     const group = this.groupOf(request.model);
     // 裸轮转组（general）：pickStart 不推进游标（总取运行态首项），轮转语义必须
     // 走 pickNext 的环回推进——这正是「会话间均分」的落点（PLAN §5.4）。
     // 亲和组（sensenova）：pickStart 优先粘性 key，未命中取首项起步。
+    // excludeStart 只作用于裸轮转组：把上一轮起点排除，起点即推进到它的下一位。
     const affinityKey = this.groupUsesAffinity(group)
       ? this.affinityFor(request.sessionId)
       : undefined;
+    const rotateStart = request.excludeStart !== undefined && !this.groupUsesAffinity(group)
+      ? new Set<string>([request.excludeStart])
+      : EMPTY_EXCLUDE;
     let candidate = affinityKey !== undefined || this.groupUsesAffinity(group)
       ? this.pool.pickStart(affinityKey)
-      : this.pool.pickNext(EMPTY_EXCLUDE);
+      : this.pool.pickNext(rotateStart);
     if (candidate !== undefined && this.gridMarked(candidate, group)) {
       const exclude = new Set<string>([candidate]);
       candidate = this.pool.pickNext(exclude) ?? undefined;

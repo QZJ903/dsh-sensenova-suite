@@ -31,7 +31,7 @@ export type ResolveKey = () => Promise<string>;
  * 401 永久移除、成功清零。index.ts 注入；纯函数模块不 import 池。
  */
 export interface VisionFeedback {
-  on429: (key: string, kind: import("../rate-classify.ts").RateLimitKind) => void;
+  on429: (key: string, kind: import("../rate-classify.ts").RateLimitKind, bucket: import("../rate-classify.ts").RateBucket | undefined) => void;
   on401: (key: string) => void;
   onSuccess: (key: string) => void;
 }
@@ -110,7 +110,10 @@ async function callOnce(options: {
     const err = error as { status?: unknown; body?: unknown };
     const status = typeof err.status === "number" ? err.status : undefined;
     const body = typeof err.body === "string" ? err.body : "";
-    if (status === 429) feedback.on429(apiKey, classify429Full(body).kind);
+    if (status === 429) {
+      const classified = classify429Full(body);
+      feedback.on429(apiKey, classified.kind, classified.bucket);
+    }
     else if (status === 401) feedback.on401(apiKey);
     throw error;
   }

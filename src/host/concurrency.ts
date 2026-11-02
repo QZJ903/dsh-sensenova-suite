@@ -7,7 +7,7 @@
  * 仍由宿主重试层退避后原 key 重试，此闸只是从源头抑制并发超限。
  *
  * 队列与在途计数均以 key 为键；key 条目在排空后惰性删除。排队等待受
- * `queueTimeoutMs`（默认 60s，2026-09-04 实测排队挂起需有界，见
+ * `queueTimeoutMs`（默认 90s，2026-09-04 定 60s、2026-11-02 提到 90s 见下，
  * fix-sensenova-429-quota-retry design D4）约束：超时以可重试 TimeoutError
  * reject 且不占额度，交宿主重试层退避后重试。本模块刻意不依赖 cordis，
  * node 测试可直接驱动。
@@ -17,8 +17,16 @@
 
 export type Release = () => void;
 
-/** 排队超时默认值（毫秒）。2026-09-04 实测：与 TPM 60s 窗口对齐（design D4/D6）。 */
-export const DEFAULT_QUEUE_TIMEOUT_MS = 60_000;
+/**
+ * 排队超时默认值（毫秒）。
+ *
+ * 2026-09-04 定 60s（与 TPM 60s 窗口对齐，design D4/D6）；2026-11-02 提到 90s：
+ * 4 轮轮询把「等待」搬进了插件内，一次全 429 的 stream() 全程占全局槽约
+ * 30-50s（16 次 RTT + 10s 抖动等待）。globalConcurrency=2 时两个会话同时
+ * 全 429，第 3 个排队者的等待会逼近 60s；90s 留出余量，避免排队者因别人的
+ * 限流重试而超时失败。
+ */
+export const DEFAULT_QUEUE_TIMEOUT_MS = 90_000;
 
 /** 把配置的并发上限归一化为正整数：非整数、负数或无法解析一律回退 1。 */
 export function normalizeConcurrencyLimit(value: unknown): number {

@@ -114,7 +114,10 @@ async function describeImage(
   } catch (error: unknown) {
     const err = error as { status?: unknown; body?: unknown };
     const status = typeof err.status === "number" ? err.status : undefined;
-    if (status === 429) feedback.on429(apiKey, classify429Full(typeof err.body === "string" ? err.body : "").kind);
+    if (status === 429) {
+      const classified = classify429Full(typeof err.body === "string" ? err.body : "");
+      feedback.on429(apiKey, classified.kind, classified.bucket);
+    }
     else if (status === 401) feedback.on401(apiKey);
     throw error;
   }

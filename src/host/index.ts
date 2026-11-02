@@ -39,7 +39,7 @@ import { createFileProviderStore } from "./provider-store.ts";
 import { profileSegment, profileStateDir } from "./state-store.ts";
 import { createApiKeyStore } from "./api-key-store.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "./key-orchestrator.ts";
-import { rateKindCountsStrike } from "./rate-classify.ts";
+import { bucketCountsStrike } from "./rate-classify.ts";
 import { createFilePoolStore } from "./pool-store.ts";
 import { createImageSwapper, installCapabilityOverride } from "./vision/bridge.ts";
 import { createProviderPublisher } from "./provider-publish.ts";
@@ -595,12 +595,12 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // ── 出图 + 视觉 ────────────────────────────────────────────────────────
   /** 视觉调用结局回池（单份定义，tools 与桥共用——两段手抄会漂）。 */
   const visionFeedback: import("./vision/run.ts").VisionFeedback = {
-    on429: (key, kind) => {
-      // unknown（形状不明）与两个速率桶形态（rate-rps / rate-soft，14s 级自愈）
-      // 都不记 strike，与对话链同一教义（判据单一来源 = rateKindCountsStrike）。
-      // 落空 = 不记格不计数，key 留在轮转里，探测调度照常兜底；重形态才计数踢出。
+    on429: (key, kind, bucket) => {
+      // unknown（形状不明）与 RPM 桶（code 8 / 429003 / *RPM* 族，14s 级自愈）
+      // 都不记 strike，与对话链同一教义（判据单一来源 = bucketCountsStrike）。
+      // 落空 = 不记格不计数，key 留在轮转里，探测调度照常兜底；TPM 桶才计数踢出。
       if (kind === "pool") orchestrator.reportPoolExhausted(key, orchestrator.groupOf(poolRecord.vision?.model ?? settings.visionModel));
-      else if (rateKindCountsStrike(kind)) orchestrator.reportRateLimited(key);
+      else if (bucketCountsStrike(bucket)) orchestrator.reportRateLimited(key);
     },
     on401: (key) => orchestrator.reportAuthRejected(key),
     onSuccess: (key) => orchestrator.reportSuccess(key)

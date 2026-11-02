@@ -6,7 +6,7 @@
 
 - **积分额度**：登录商汤控制台后，面板显示积分池（5 小时 / 周两个滚动窗）、每模型消耗趋势、输入框用量胶囊；token 自动续期。
 - **语言模型接入**（面板「模型接入」开关，默认关）：直连商汤网关，**每模型自选降级链**（模型设置里三个槽位：an > re > chat，不重复、可截短）。默认链全模型统一 responses → anthropic → chat-completions（anthropic 线时好时坏由运行时断尾降级兜底：断尾/400 命中即内存级标记换线，重启清除）；链上全部覆盖不了时 chat 永远兜底。模型清单由 `/v1/models` 探测。
-- **多账号 key 池**：401 永久移除；连续 3 次重形态 429（tpm / 端点族 / 账号族）→ 阻塞态、探测自动救回；两个速率桶形态（code 8 / 429003）轮换但不计数；积分池类 429 按 (key, 积分组) 记格不踢账号；**商汤组模型（sensenova-*）会话粘性省积分，通用组裸轮转均分**；一次请求全池轮询完才判失败。面板「API」页有只读池诊断卡。
+- **多账号 key 池**：401 永久移除；连续 3 次 TPM 桶 429（429001 / `…Endpoint*TPMExceeded` / `ModelAccount*Tpm*`）→ 阻塞态、探测自动救回；RPM 桶 429（code 8 / 429003 / `…Endpoint*RPMExceeded` / `ModelAccount*Rpm*`，14s 级自愈）轮换但不计数；积分池类 429 按 (key, 积分组) 记格不踢账号（全组标满即快速失败）；**一次请求 3 轮 + 抖动等待 + 第 4 轮**；**商汤组模型（sensenova-*）亲和 key 恒第一、其余轮转，通用组裸轮转均分**。面板「API」页有只读池诊断卡。
   - ⚠️ **每把 key 应来自不同账号**。同一账号下的多把 key 共享同一个额度池，限流时换到同账号的另一把没有意义——换 key 只有在跨账号时才真正绕开瓶颈。池本身无法判断哪几把 key 同属一个账号，需自行保证。
 - **出图工具**（默认关，面板「多模态」逐工具开关）：`sn_text2img` 文生图 + `sn_img2img` 图片编辑（1-5 张参考图），失败 30s 冷却，key 走池。
 - **图片转述**（读图桥默认 auto）：纯文本主模型拖图不再被「不支持图片」阻断——视觉链（sensenova-6.8-flash-lite → deepseek-flash → kimi-k3）把事实性观察交给主模型，界面原图不动；主模型真支持视觉时自动让行。另有 `sn_describe_image` / `sn_describe_images` 两个显式视觉工具（随「多模态」的视觉工具开关）。
@@ -30,7 +30,7 @@
 
 ## 429 与重试（速览）
 
-401 → 永久移除；重形态 429（429001 / `RateLimitExceeded.Endpoint*` / `ModelAccount*RateLimitExceeded`）→ 连续 3 次阻塞 + 探测恢复（15/30/60s 退避封顶）、本次换下一把 key；两个速率桶形态（code 8 / 429003，14s 级自愈）→ 只换 key 不计数；未识别形状 → 换 key 但**不记 strike**；积分池类 429（"Allocated quota exceeded"）→ 记 (key, 组) 格子、换 key、全组轮尽快速失败；5xx/超时/网络 → 同 key 交宿主重试层（有限预算）。详细教义与参数表见 [docs/retry-policy.md](docs/retry-policy.md)。
+401 → 永久移除；TPM 桶 429（429001 / `…Endpoint*TPMExceeded` / `ModelAccount*Tpm*`）→ 连续 3 次阻塞 + 探测恢复（15/30/60s 退避封顶）、本次换下一把 key；RPM 桶 429（code 8 / 429003 / `…Endpoint*RPMExceeded` / `ModelAccount*Rpm*`，14s 级自愈）→ 只换 key、不计数；两类退避共用一套梯 **3→5→10→15→30s（30 封顶）**；未识别形状 → 换 key 但**不记 strike**；积分池类 429（"Allocated quota exceeded"）→ 记 (key, 组) 格子、该 key 后续轮次自动跳过，**全组标满抛 QUOTA 快速失败（宿主不重试）**；5xx/超时/网络 → 同 key 交宿主重试层（有限预算）。**轮询结构：3 轮（每轮每把 key 一次）→ 抖动等待 5-10s → 第 4 轮 → 全败即抛**。详细教义与参数表见 [docs/retry-policy.md](docs/retry-policy.md)。
 
 ## 文档
 
