@@ -1,100 +1,97 @@
-# dsh-sensenova-suite — the bundle's own patch layer.
-#
-# Reads the SenseNova Suite quota through the console API and shows it in
-# a config card on the Plugins page (`plugins.bundle.config` slot) — not in the
-# sidebar. Everything below is plain configuration: edit it here (or
-# override the same id in the profile's cordis.patch.yml) and reinstall/reload.
-#
-# The console token is NOT configured here. Open the panel and sign in once:
-# the Host logs in, keeps the account in the DSH credentials, and renews the
-# token on its own from then on. See README.md.
+# dsh-sensenova-suite 配置层。面板入口在插件页的 plugins.bundle.config 槽位
+# （不在侧边栏 sidebar）。控制台令牌不在这里配——打开面板登录一次即可，
+# 之后自动续期。改完重启/重载插件生效；profile 内同名文件可再覆盖同 id。
+# 各键的代码默认值在 src/host/host-config.ts，这里的显式值覆盖它们。
 - insert:
     - id: dsh-sensenova-suite
       name: dsh-sensenova-suite
       config:
-        # Console origin. Override if you use a mirror or proxy.
+
+        # ── 控制台与额度面板 ──────────────────────────────────────────────────
+
+        # 控制台来源；用镜像/代理才需要改。
         consoleBase: https://platform.sensenova.cn
-        # The OpenAI-compatible API base, used only for the optional model
-        # catalog (which models a pool can call). Leave it alone unless the
-        # platform moves the endpoint.
+
+        # OpenAI 兼容 API 根；只用于模型目录探测，平台没搬家就别动。
         apiBase: https://token.sensenova.cn/v1
-        # How many hours of per-model credit consumption to show (max 168 = 7d).
+
+        # 额度趋势显示最近多少小时（上限 168 = 7 天）。
         trendHours: 24
-        # Pseudo multipliers for the trend table: keys are case-insensitive
-        # SUBSTRINGS of a model id (first match in writing order wins), values
-        # are positive numbers. The platform returns raw credits with no
-        # official per-model rate, so these are the operator's own comparison
-        # aid — the panel labels each hit `×N` with a "not official" note, and
-        # rows without a match stay unmultiplied. Set `{}` to disable all.
-        # Invalid entries (empty key / value <= 0 / non-number) are dropped.
-        # Values = 2026-10-31 运营者实测（初版 ×10/×20 是移植源拍脑袋，不准）。
+
+        # 趋势表伪倍率：键是模型 id 的「子串」（大小写不敏感，书写顺序首中），
+        # 不是精确 id。平台返回原始积分、没有官方单价，这是运营者自备的对比
+        # 系数，面板标 ×N 并注明非官方；{} 关掉全部。值 = 2026-10-31 实测。
         trendMultipliers: { "glm-5.2": 15, "kimi-k3": 30, "sensenova": 0.8, "deepseek": 1 }
-        # How long the Host caches each console response, in seconds.
+
+        # 每次控制台请求的结果缓存秒数。
         cacheSeconds: 60
-        # How often the panel asks the Host again, in seconds. The Host states
-        # this to the bundle on every snapshot, so the two cannot disagree about
-        # how fresh the screen is.
+
+        # 面板轮询间隔秒数；宿主每次快照把这个数报给面板，两边不会各说各话。
         pollSeconds: 30
-        # Deadline for one console call, in milliseconds. The login flow has its
-        # own (loginTimeoutMs, below) because it walks several IAM hops.
+
+        # 单次控制台调用超时（毫秒）。登录流程另有总超时（下方 loginTimeoutMs）。
         consoleTimeoutMs: 15000
-        # Background freshness for a REGISTERED provider. The panel polls only
-        # while it is open, but a registered provider is a standing execution
-        # channel: while the EFFECTIVE provider switch is on, the Host drives
-        # one aggregate refresh every N minutes (the same engine and cache the
-        # panel's poll uses, so no extra upstream traffic within a cache
-        # window). 0 disables it and keeps the panel-only shape. Every tick
-        # re-reads the switch, so a Host that never registers a provider runs
-        # no refresh at all. (2026-10 review #1b.)
+
+        # 已注册供应商的后台刷新间隔（分钟），0 = 关：面板不开时额度/目录也保鲜。
+        # 供应商开关每个 tick 重读，关着时 tick 什么都不做。
         providerRefreshMinutes: 15
-        # ── Key 池：多账号轮转 / 按积分组路由 / 全局并发 ──────────
-        # 多账号清单：每项 { id, label, apiKeyRef }；apiKeyRef 是 DSH 凭据
-        # 服务的 ref 名（面板保存的默认 key 始终作为第一把参与轮转，不必
-        # 在此重复）。解析失败的条目静默跳过。
+
+        # ── Key 池：多账号轮转 / 按积分组路由 / 全局并发 ──────────────────────
+
+        # 多账号清单：每项 { id, label, apiKeyRef }；apiKeyRef 是 DSH 凭据服务
+        # 的 ref 名。解析失败的条目静默跳过。面板保存的默认 key 始终作为第一把
+        # 参与轮转，不必在此重复。
         # accounts: []
         #   - id: backup
         #     label: Backup
         #     apiKeyRef: SENSENOVA_API_KEY_2
+
         # 钉选账号 id（手动优先级）；空 = 纯轮转。
         activeAccount: ""
+
         # 全局在途上限（per-key 固定 1）；0 = 跟随 key 数，调小 = 温和模式。
-        # 2026-10-25：默认改为 2。
         globalConcurrency: 2
-        # 模型 → 积分组映射：Flash-Lite 专属池只有 flash-lite 自己（真机控制台
-        # 2026-10-27 确认），其余模型——含商汤出图两模型（u1.5 系走通用池）——
-        # 一律不映射，落 general 裸轮转组。具名组走会话粘性（组名自由），
-        # 组间不回退；组是 key 健康标记 + 会话亲和的粒度，归错组会让专属池的
-        # 限流标记误伤通用池模型（反之亦然）。键为精确模型 id。
+
+        # 模型 → 积分组映射：具名组走会话粘性（组名自由），general 裸轮转，
+        # 组间不回退。键是精确模型 id。Flash-Lite 专属池只有它自己（真机确认）；
+        # u1.5 系走通用池，不映射——归错组会让专属池的限流标记误伤通用池模型
+        # （反之亦然）。
         modelGroups:
           sensenova-6.8-flash-lite: flash-lite
-        # ── 出图 + 视觉 ────────────────────────────────────────────────────────
-        # 工具开关（部署默认；面板「多模态」的开关是主要设置）：opt-in——
-        # agent 工具是 Host 级变更；无 tools 服务的 Host 静默缺席。
-        # key 全部经池解析。参数（模型/尺寸/格式/水印/落盘目录）在面板
-        # 「多模态」设置，存插件状态文件。
+
+        # ── 出图 + 视觉 ──────────────────────────────────────────────────────
+
+        # 工具开关（部署默认；面板「多模态」的开关是主设置）：缺键 = 开，
+        # 显式 false 才算关。
         text2imgEnabled: true
         img2imgEnabled: true
         visionToolsEnabled: true
+
+        # 出图默认模型（lite 质量优先）与单次超时（毫秒；图模很慢，别用对话级超时）。
         text2imgModel: sensenova-u1.5-lite
         img2imgModel: sensenova-u1.5-lite
         imageTimeoutMs: 180000
-        # 视觉转述模型（单模型，用户选择；429 走池教义）。
+
+        # 视觉转述模型（单模型；429 走池教义）、图片传输模式（base64 为遗留兼容）
+        # 与单次转述超时。
         visionModel: sensenova-6.8-flash-lite
         visionImageMode: image_url
         visionTimeoutMs: 120000
+
+        # 视觉转述附加提示词；空 = 用内置。
         visionBridgePrompt: ""
-        # Renew the console token this many seconds before it actually expires,
-        # so a poll never races the expiry boundary. 120 = two minutes.
+
+        # 令牌到期前多少秒提前续期，避免轮询撞上过期边界（120 = 两分钟）。
         tokenSkewSeconds: 120
-        # Extra host names this Host answers as, beyond the loopback defaults
-        # (localhost / 127.0.0.1 / ::1). ADDED to them, never substituted — see
-        # docs/SETUP.md. Uncomment and list to serve the panel from another name.
+
+        # 本宿主额外应答的主机名，在 loopback 默认之外「追加」，不是替换；
+        # 从别的机器名访问面板才需要。
         # allowedHosts: []
-        # The rest of the login flow's endpoints. Everything below is optional:
-        # a key left commented keeps the platform default. Only touch these for
-        # an enterprise mirror or a staging tenant. Any endpoint that is not an
-        # absolute http(s) URL fails the mount with code "config_error" instead
-        # of surfacing later as a confusing network failure.
+
+        # ── 登录流的其余端点：全部可选，留注释即用平台默认 ────────────────────
+
+        # 只有企业镜像/暂存租户才需要动。任何非 http(s) 绝对地址会在挂载时
+        # 直接报 config_error，而不是之后才变成费解的网络错误。
         # iamBase: https://iam.sensecoreapi.cn
         # tokenEndpoint: https://signin.sensecore.cn/oauth2/token
         # jwksEndpoint: https://signin.sensecore.cn/.well-known/jwks.json
@@ -103,52 +100,33 @@
         # scope: openid offline offline_access
         # encKeyId: public:hydra.openid.id-token
         # maxHops: 6
-        # Overall deadline for one sign-in attempt (the multi-hop OIDC walk), in
-        # ms. requestTimeoutMs below is its older spelling and still wins when
-        # only it is set; the console calls use consoleTimeoutMs above.
+
+        # 一次登录尝试（多跳 OIDC）的总超时（毫秒）。requestTimeoutMs 是旧拼法，
+        # 只设它时它赢；控制台调用用上面的 consoleTimeoutMs。
         # loginTimeoutMs: 20000
         # requestTimeoutMs: 20000
-        # ------------------------------------------------------------------
-        # Step three ("one-stop service"): register the SenseNova LLM
-        # provider DIRECTLY, with no hand-written llm-pi-ai row. When true
-        # the Host offers an OpenAI-compatible provider
-        # (`sensenova-suite`, base apiBase above): the panel's API-key
-        # field stores the `sk-` key in the DSH credentials (the process
-        # environment still works as a fallback), the catalog poll builds
-        # the model list, and vision models accept image input
-        # automatically. The cached catalog and the model allow-list live
-        # in this plugin's own state file, never on this row. Off by
-        # default - registering a model source is a Host-wide change.
-        # This value is now the DEPLOYMENT DEFAULT only: the panel's
-        #「模型接入」switch (POST /api/<name>/provider) overrides it live,
-        # with no restart. See docs/PROVIDER-HOT-RELOAD.md.
+
+        # ── 供应商注册 ────────────────────────────────────────────────────────
+
+        # 一站式注册：把 SenseNova LLM 供应商直接注册进 DSH（sk- key 存 DSH
+        # 凭据、目录轮询建模型清单、视觉模型自动收图）。关 = 只做额度面板。
+        # 这是部署默认；面板「接入 API」的开关实时覆盖它，无需重启。
         registerProvider: false
-        # ------------------------------------------------------------------
-        # Per-model OUTPUT CEILING overrides, keyed by EXACT model id (no
-        # substring matching — unlike `trendMultipliers` above this becomes a
-        # request parameter, so a loose key would silently retune models you
-        # never named). Values are positive whole numbers of tokens.
-        #
-        # Why this exists at all: the catalog is FETCHED, not authored, and it
-        # can understate a model. Probed 2026-10-02: `deepseek-v4-flash`
-        # accepts 131072 while the catalog states 65536. Editing the stored
-        # catalog does not stick — the next poll overwrites it — so a
-        # correction has to live here.
-        #
-        # Precedence: this map > the catalog's `max_output_length` >
-        # undeclared (the harness then applies its own `defaultMaxTokens ??
-        # 32768`, so declaring nothing is NOT "no ceiling"). Defaults pin the
-        # DOCUMENTED ceilings where the fetched catalogue understates a model
-        # (sensenova-docs-full.md, 2026-10-26): deepseek-flash max_tokens
-        # [1, 393216]，kimi-k3 max_completion_tokens 默认 128K（保守侧——文档的
-        # Responses 每模型表给 kimi-k3 的真范围是 [1, 1048576]，这里取默认值
-        # 当天花板）。目录探测比文档滞后（探测返回 65536），以文档为准。
-        # BOTH sides resolve from this one map: the registered adapter's
-        # resolveModel (defaultMaxTokens on the wire, via
-        # llm-models.maxTokensForId) and the panel's「最大输出」badge — the
-        # number you read is the number the request carries.
-        # Applies to the directly-registered provider only.
-        # 覆盖示例：maxTokensOverrides: { "deepseek-v4-flash": 131072 }
+
+        # ── 每模型数值覆盖：键为精确模型 id（不是子串！）──────────────────────
+
+        # 最大输出天花板。优先级：本表 > 目录申报 > 未申报（宿主 32768 兜底）。
+        # 目录会低报（探测比文档滞后），改存储不 stick（下轮刷新冲掉），所以
+        # 修正只能住在这里。徽章显示的数 = 请求实际带的数。值 = 文档口径
+        # （sensenova-docs-full.md）：deepseek-flash [1, 393216]；kimi-k3 默认
+        # 128K（文档 Responses 表真上限 1M，这里取保守值）。
         maxTokensOverrides:
           deepseek-flash: 393216
           kimi-k3: 131072
+
+        # 上下文窗口。优先级：本表 > 目录 context_length > 131072 兜底。
+        # 动机：目录低报新模型——sensenova-6.8-flash 探测 262144（256K），
+        # 官方文档 1M（运营者口径；docs dump 尚未收录该新模型）。会进请求侧
+        # 窗口算术，键配松了会误伤没点名的模型。
+        contextWindowOverrides:
+          sensenova-6.8-flash: 1048576

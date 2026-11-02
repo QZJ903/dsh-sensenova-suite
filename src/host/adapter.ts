@@ -40,7 +40,7 @@ import { shouldRotateUnclassified } from './key-health.ts';
 import { retryableCodes, ANTHROPIC_TRUNCATED_CODE, QUOTA_CODES } from './llm-retry.ts';
 import { MODELS_TIMEOUT_MS, CATALOG_FAILURE_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
-import { KNOWN_UNROUTABLE_MODELS, CONTEXT_WINDOW_FIELDS, MAX_OUTPUT_FIELDS, FALLBACK_CONTEXT_WINDOW, maxTokensForId } from './llm-models.ts';
+import { KNOWN_UNROUTABLE_MODELS, CONTEXT_WINDOW_FIELDS, MAX_OUTPUT_FIELDS, maxTokensForId, contextWindowForId } from './llm-models.ts';
 import { IMAGE_INPUT_MODALITIES, inputModalitiesFor } from './modality.ts';
 import { traceLog } from './trace-log.ts';
 import { maskKey } from './util.ts';
@@ -191,6 +191,14 @@ export interface SensenovaAdapterDeps {
    * 请求携带的上限。缺省 undefined = 目录申报值（未申报则不申报）。
    */
   maxTokensOverrides?: () => Record<string, number> | null | undefined;
+  /**
+   * 每模型上下文窗口覆盖（dsh-sensenova-suite 扩展点，可选）：settings 行
+   * `contextWindowOverrides`（{ modelId → tokens }）。在 resolveModel 经
+   * llm-models.contextWindowForId 以「override > 目录申报值 > 131072 兜底」
+   * 现算 context.contextWindow——与面板「上下文」徽章同一判据同一份。目录会
+   * 低报新模型（sensenova-6.8-flash 探测 262144，官方文档 1M）。
+   */
+  contextWindowOverrides?: () => Record<string, number> | null | undefined;
   fetchImpl?: typeof fetch;
   /**
    * 按请求解析 key（dsh-sensenova-suite 扩展点，可选）：与 resolveApiKey 不同，
@@ -1203,8 +1211,9 @@ export class SensenovaAdapter extends LlmAdapter {
       model,
       this.deps.thinkingOverrides?.(),
     );
-    // SenseNova 目录若无上下文字段，用 131072 作为合理默认（面板 badge 引同一常量）。
-    const contextWindow = entry?.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
+    // 「上下文」窗口 = override（按模型 id）> 目录申报值 > 131072 兜底——判据
+    // 与面板同一份（llm-models.contextWindowForId），badge 与请求侧算术同源。
+    const contextWindow = contextWindowForId(model, entry?.contextWindow, this.deps.contextWindowOverrides?.());
     // 「最大输出」天花板 = override（按模型 id）> 目录申报值——判据与面板同一份
     // （llm-models.maxTokensForId）：面板「最大输出」读到的数字即这里申报的
     // defaultMaxTokens（D1 承诺恢复：the number you read is the number the

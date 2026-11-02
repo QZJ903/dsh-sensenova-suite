@@ -100,6 +100,11 @@ function harness({ stateOverrides = {}, published = [], publishResult = { ok: tr
         resolve: async () => ({ value: apiKey }),
         state: async () => ({ hasApiKey: apiKey !== "", keySource: apiKey !== "" ? "memory" : null, ephemeral: false })
       },
+      // The catalog line's key, injected exactly as the wiring does at runtime
+      // (pool-first with the primary key as fallback — the aggregator never
+      // touches the stores for it). Empty = no key anywhere → `catalogError`,
+      // the contract the H group pins.
+      resolveCatalogApiKey: async () => apiKey,
       publisher: {
         state,
         publish: async (entries, enabledIds, unavailableModelIds) => {
@@ -711,6 +716,68 @@ function harness({ stateOverrides = {}, published = [], publishResult = { ok: tr
   check("M2 the failure still rides the llm block (registered=false)",
     body.llm.providerRegistered === false && body.llm.providerError !== undefined,
     JSON.stringify({ registered: body.llm.providerRegistered, err: body.llm.providerError }));
+}
+
+// === H. the catalog leg: key resolution and error surfacing (2026-11-03) ====
+// The old leg resolved ONLY the primary key and swallowed every failure with
+// `.catch(() => null)` — after the sk-→pool migration left the primary ref
+// empty, the panel roster froze on a week-old catalog with ZERO indication.
+// The contract now: the caller injects the pool-first resolver; an empty
+// answer and a failed fetch are both REPORTED (`catalogError`), and a fetch
+// that lands still drives the store/publish chain exactly as before.
+{
+  const { params, replaceCalls } = harness({ apiKey: "sk-test" });
+  const net = stubFetch({
+    "pool-usage": HEALTHY_POOL,
+    "credit-usage-trend": TREND_OK,
+    "/models": { data: [{ id: "brand-new-model", name: "Brand New", max_output_length: 65536 }] }
+  });
+  let body;
+  try {
+    body = await buildSnapshotBody(params);
+  } finally {
+    net.restore();
+  }
+  check("H1 a resolved key fetches the catalog and reports no catalogError",
+    (body.catalogError === null || body.catalogError === undefined) && body.catalogAvailable === true,
+    JSON.stringify({ err: body.catalogError, avail: body.catalogAvailable }));
+  check("H2 the fetched entries reach the body and the store",
+    JSON.stringify(body.catalogModels) === JSON.stringify(["brand-new-model"]) && replaceCalls.length === 1,
+    JSON.stringify({ models: body.catalogModels, writes: replaceCalls.length }));
+}
+{
+  const { params, replaceCalls } = harness({ apiKey: "" });
+  const net = stubFetch({ "pool-usage": HEALTHY_POOL, "credit-usage-trend": TREND_OK });
+  let body;
+  try {
+    body = await buildSnapshotBody(params);
+  } finally {
+    net.restore();
+  }
+  check("H3 an empty resolver answer is REPORTED as catalog_unavailable",
+    body.catalogError?.code === "catalog_unavailable" &&
+      typeof body.catalogError?.message === "string" && body.catalogError.message !== "",
+    JSON.stringify(body.catalogError));
+  check("H4 no key means no fetch and no store write",
+    body.catalogAvailable === false && replaceCalls.length === 0,
+    JSON.stringify({ avail: body.catalogAvailable, writes: replaceCalls.length }));
+}
+{
+  const { params } = harness({ apiKey: "sk-test" });
+  const net = stubFetch({
+    "pool-usage": HEALTHY_POOL,
+    "credit-usage-trend": TREND_OK,
+    "/models": () => ({ ok: false, status: 500, json: async () => ({}) })
+  });
+  let body;
+  try {
+    body = await buildSnapshotBody(params);
+  } finally {
+    net.restore();
+  }
+  check("H5 a failed catalog fetch is reported with the shared taxonomy",
+    body.catalogError?.code === "console_error" && /HTTP 500/.test(String(body.catalogError?.message)),
+    JSON.stringify(body.catalogError));
 }
 
 // --- report ----------------------------------------------------------------

@@ -129,6 +129,10 @@ export function failureCode(error: unknown): string {
   return isAuthFailure(error) ? CODE.AUTH_ERROR : CODE.CONSOLE_ERROR;
 }
 
+/** 目录腿「无 key 可用」的上屏文案（catalog_unavailable）。指向面板真实的写入口：
+ * 主 key 在「API Key」卡片保存，池 key 由池管理面/账号配置供。 */
+const CATALOG_NO_KEY_MESSAGE = "无可用 key——池为空或全不可用，主 key 也未配置；请先在「API Key」卡片保存一把 Key";
+
 /**
  * Fetch the three console sources in parallel and aggregate them into the
  * snapshot body the route writes.
@@ -146,6 +150,10 @@ export function failureCode(error: unknown): string {
  * @param {Map} context.inflight - the single-flight map (shared across polls).
  * @param {object} context.tokenStore - the `createTokenStore` instance.
  * @param {object} context.apiKeyStore - the `createApiKeyStore` instance.
+ * @param {() => Promise<string>} context.resolveCatalogApiKey - the catalog
+ *   line's key resolver（池优先、主 key 回落，wiring 缝）。空答案 = 无 key 可用，
+ *   上屏 `catalogError` 而非静默跳过（2026-11-03：旧实现只认主 key 且吞错，
+ *   面板清单冻结七天零提示）。
  * @param {object} context.publisher - the `createProviderPublisher` instance.
  * @param {object} context.catalogStore - the `createFileCatalogStore` instance.
  * @param {() => Promise<boolean|null>} context.panelSwitch - the panel-saved
@@ -158,6 +166,7 @@ export async function buildSnapshotBody({
   inflight,
   tokenStore,
   apiKeyStore,
+  resolveCatalogApiKey,
   publisher,
   catalogStore,
   panelSwitch,
@@ -172,6 +181,8 @@ export async function buildSnapshotBody({
   inflight: Map<string, Promise<unknown>>;
   tokenStore: { getToken(): Promise<string>; invalidate(token?: string): void; state(): Promise<unknown> };
   apiKeyStore: { resolve(): Promise<{ value: string }>; state(): Promise<unknown> };
+  /** 目录线 key（必传）：池优先、主 key 回落；空 = 无 key 可用（上屏不跳过）。 */
+  resolveCatalogApiKey: () => Promise<string>;
   publisher: {
     state: any;
     entries?: unknown[];
@@ -208,7 +219,6 @@ export async function buildSnapshotBody({
   onQuotaPools?: (pools: { pools?: unknown }) => void;
 }): Promise<SnapshotData> {
   const providerState = publisher.state;
-  const resolveApiKey = async () => (await apiKeyStore.resolve()).value;
   // 池诊断 + 模型降级链覆盖：一次取用（pool 块与 llm 块共源，不会各说各话）。
   let poolDiag: import("../shared/wire.ts").PoolDiagData | null = null;
   let modelProtocols: Record<string, string[]> = {};
@@ -235,7 +245,7 @@ export async function buildSnapshotBody({
   const granularity = settings.trendHours <= 72
     ? "TOKEN_PLAN_CREDIT_TREND_GRANULARITY_HOUR"
     : "TOKEN_PLAN_CREDIT_TREND_GRANULARITY_DAY";
-  const [poolResult, trendResult, catalog] = await Promise.all([
+  const [poolResult, trendResult, catalogLeg] = await Promise.all([
     // The two console sources are SOFT, not fatal: a signed-out or unreachable
     // console must not blank the whole snapshot. The quota section says why it
     // is empty (`quotaError`), while the llm block and the model catalog —
@@ -251,15 +261,34 @@ export async function buildSnapshotBody({
       inflight,
       tokenStore
     )),
-    // Optional: a missing API key degrades the model lists, not the quota.
-    // The catalog read rides the shared coalesced cache with the cache's own
-    // maximum age (`MAX_CACHE_AGE_MS`) as its request TTL — a catalog poll can
-    // never be served stale beyond the window the cache itself allows.
+    // Optional: a missing API key degrades the model lists, not the quota —
+    // but it is REPORTED now (`catalogError`), not skipped: the old
+    // `.catch(() => null)` let a frozen roster sit behind zero indication for
+    // a week (2026-11-03). The catalog read rides the shared coalesced cache
+    // with the cache's own maximum age (`MAX_CACHE_AGE_MS`) as its request
+    // TTL — a catalog poll can never be served stale beyond the window the
+    // cache itself allows.
     (async () => {
-      const apiKey = await resolveApiKey();
-      return apiKey === "" ? null : fetchModelCatalog(settings, MAX_CACHE_AGE_MS, cache, inflight, apiKey).catch(() => null);
+      let apiKey = "";
+      try {
+        apiKey = await resolveCatalogApiKey();
+      } catch {
+        // 解析器抛错按「无 key」处理：目录腿绝不炸整单（Promise.all 一烂全烂）。
+        apiKey = "";
+      }
+      if (apiKey === "") {
+        return { catalog: null, error: { code: CODE.CATALOG_UNAVAILABLE, message: CATALOG_NO_KEY_MESSAGE } };
+      }
+      try {
+        return { catalog: await fetchModelCatalog(settings, MAX_CACHE_AGE_MS, cache, inflight, apiKey), error: null };
+      } catch (error) {
+        // 拉取失败同样上屏：code 走 failureCode 同一分类，message 原样透传。
+        return { catalog: null, error: { code: failureCode(error), message: errMsg(error) } };
+      }
     })()
   ]);
+  const catalog = catalogLeg.catalog;
+  const catalogError = catalogLeg.error;
   const pools = parsePools(poolResult.value);
   // 额度驱动的池格写点（2026-10-31 建）：只在轮询成功时喂——失败绝不写格，
   // 与下方 unavailableModelIds 的 null 纪律同源。归属判定与落格决策在调用方
@@ -509,7 +538,7 @@ export async function buildSnapshotBody({
     // the operator's pseudo `×N` under the SAME matcher the trend rows use —
     // the badge and the consumption chart quote one computed fact, and an
     // unmatched model simply gets no badge (never a guessed 1).
-    models: rosterWithAvailability(offered, pools, settings.maxTokensOverrides, thinkingOverrides).map((row) => {
+    models: rosterWithAvailability(offered, pools, settings.maxTokensOverrides, thinkingOverrides, settings.contextWindowOverrides).map((row) => {
       const multiplier = matchMultiplier(row.id, settings.trendMultipliers);
       return multiplier === undefined ? row : { ...row, multiplier };
     }),
@@ -579,6 +608,8 @@ export async function buildSnapshotBody({
     pools,
     trend,
     quotaError,
+    // 目录腿的失败上屏（无 key 可用 / 拉取失败）；成功=无字段，面板零成本。
+    ...(catalogError !== null ? { catalogError } : {}),
     shapeWarnings
   };
 }

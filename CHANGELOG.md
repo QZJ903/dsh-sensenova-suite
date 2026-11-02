@@ -1,5 +1,19 @@
 # 更新日志（Changelog）
 
+## 0.1.46（2026-11-03）
+
+- **面板目录腿修源（池优先 key + 失败上屏）**：
+  - **根因（真机实锤）**：sk- 框迁池后凭据库里 `SENSENOVA_API_KEY` ref 已不存在（只剩 `dsh_pool_key_1..4`），旧目录腿只认主 key 且 `.catch(() => null)` 静默——catalog.json 自 10-27 起七天零写入（mtime 实锤），面板清单冻结在旧目录，平台上新模型（sensenova-6.8-flash）在 DSH `/model`（走池 key）可见而面板永不出现。
+  - **解析改池优先**：新增 wiring 缝 `resolveCatalogApiKey`（池 pickStart 通用组挑活 key 优先、主 key 仅回落；不推进游标、不占并发槽），两个调用方（snapshot 路由 + 后台刷新 tick）同源；死 wiring 字段 `resolveApiKey` 删除。
+  - **失败上屏（堵静默缺口）**：无 key 可用 → `catalogError`（新码 `catalog_unavailable` + 指向「API Key」卡片的文案）；拉取失败 → failureCode 共享分类 + 原始 message 透传；成功 = 无字段。wire 契约 `SnapshotData.catalogError`，面板「语言模型」卡红字行（zh/en）。
+- **contextWindowOverrides（上下文窗口覆盖，与 maxTokensOverrides 全链同构）**：
+  - **动机**：目录低报新模型——sensenova-6.8-flash 探测 262144（256K），官方文档 1M（运营者口径，docs dump 未收录该新模型）。
+  - **判据**：`contextWindowForId`（override > 目录申报 > 131072 兜底），`overrideFor` 与 `maxTokensForId` 抽共用验证核、`sanitizePositiveIntMap` 同理（duplication-gate 抓到两处自克隆后按其裁决抽取）；读取点两处同源：面板徽章（rosterWithAvailability 第 5 参）+ 适配器 resolveModel（context.contextWindow）——徽章显示的 = 请求用的（D1 同款承诺）。
+  - **配置**：CONFIG_DEFAULTS 单行默认 `{ "sensenova-6.8-flash": 1048576 }`；provider-publish 每 publish 现读（改 yml 无需重启，下轮目录轮询/开关翻转生效）。
+- **cordis.patch.yml 全文中文重写**：注释从 130 行英文长段收到约 55 行中文短块（分节头 + 注释块前空行）；值/键/顺序/active 态逐字不变（纯注释重写，行为零变化）；`plugins.bundle.config` / `sidebar` 槽位词保留（docs.test 受检面）；rosterHint 文案 zh/en 增「最大输出与上下文长度可在 cordis.patch.yml 调整」。
+- **测试补钉**：snapshot-aggregate H1–H5（有 key 拉取落盘 / 无 key 上屏且不拉不写 / 500 走共享分类）+ render-dom C2a/C2b（目录失败红行渲染/不渲染）+ config 7b 组 8 钉（窗口 sanitizer 同规）+ provider context 覆盖 4 钉。
+- **验证**：typecheck 两配置 0 错；config 152 / provider 260 / contract 92 / pool 100 / panel 78 / provider-refresh 17 / snapshot-aggregate 44 / duplication 14 全绿；wiring·routes 结构性 SKIP（@deepseek-ai junction 缺席）。
+
 ## 0.1.45（2026-11-03）
 
 - **U8 审计修复轮（HTTP 路由面与快照聚合，台账全终态）**：

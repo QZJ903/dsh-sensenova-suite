@@ -22,6 +22,7 @@ import { isolateHostEnv, isolateStateDir } from "./peer-roots.mjs";
 import {
   FALLBACK_CONTEXT_WINDOW,
   contextWindowOf,
+  contextWindowForId,
   isChatModel,
   thinkingLevelMapFor,
   filterByEnabled,
@@ -114,6 +115,21 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("junk falls back", contextWindowOf({ context_window: "lots" }) === FALLBACK_CONTEXT_WINDOW);
     check("missing falls back to a positive window (pi-ai does arithmetic on it)",
       contextWindowOf({ id: "x" }) === 131072);
+    // The override tier (2026-11-03): the catalogue can UNDERSTATE a window
+    // (sensenova-6.8-flash probes 262144, official docs say 1M) — the operator
+    // map wins over the declared figure, is id-exact, and is re-validated here
+    // the same way the sanitizer does it.
+    check("a window override beats the declared figure",
+      contextWindowOf({ id: "sensenova-6.8-flash", context_length: 262144 }, { "sensenova-6.8-flash": 1048576 }) === 1048576);
+    check("a window override for another id is ignored",
+      contextWindowOf({ id: "sensenova-6.8-flash", context_length: 262144 }, { "other-model": 1048576 }) === 262144);
+    check("an invalid window override (0 / fractional) is ignored",
+      contextWindowOf({ id: "m-x", context_window: 0 }, { "m-x": 0 }) === FALLBACK_CONTEXT_WINDOW &&
+        contextWindowOf({ id: "m-x", context_window: 100.5 }, { "m-x": 100.5 }) === 100);
+    check("no catalog figure + no override lands on the fallback",
+      contextWindowForId("m-x", undefined, null) === FALLBACK_CONTEXT_WINDOW &&
+        contextWindowForId("m-x", 262144, null) === 262144 &&
+        contextWindowForId("m-x", 262144, { "m-x": 1048576 }) === 1048576);
   } catch (error) {
     fail("context window handling", error);
   }

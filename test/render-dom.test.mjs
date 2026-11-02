@@ -437,6 +437,30 @@ function typeInto(input, value) {
   check("unmounting the picker empties the container", picker.host.childNodes.length === 0);
 }
 
+// === C2. ProviderForm surfaces a catalog-leg failure (2026-11-03) ===========
+// The line is the fix for the silent skip: with no key anywhere the roster
+// used to freeze on a stale catalog with zero indication. Rendered with the
+// REAL en dictionary so the shipped prefix template is exercised; absence
+// without an error is pinned just as hard (the line must not nag).
+{
+  const en = panel.dictionaries.en;
+  const ttEn = (key) => (typeof en[key] === "string" ? en[key] : key);
+  const base = { llm: { models: [], enabledModelIds: [] }, tt: ttEn };
+  const withErr = mount(React.createElement(panel.components.ProviderForm, {
+    ...base,
+    catalogError: { code: "catalog_unavailable", message: "no key anywhere" }
+  }));
+  check("C2a a catalog failure renders the prefixed line",
+    withErr.host.textContent.includes("Model catalogue not fetched: no key anywhere"),
+    withErr.host.textContent.slice(0, 200));
+  withErr.unmount();
+  const clean = mount(React.createElement(panel.components.ProviderForm, base));
+  check("C2b no catalog failure renders no line",
+    !clean.host.textContent.includes("Model catalogue not fetched"),
+    clean.host.textContent.slice(0, 200));
+  clean.unmount();
+}
+
 // === D. PanelPage: the polling lifecycle on jsdom's REAL timers ============
 // render.test.mjs drives the shared loop through a controllable fake
 // document/timer world (its H group); this mounts the REAL page and lets

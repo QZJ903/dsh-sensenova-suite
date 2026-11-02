@@ -67,9 +67,9 @@ export interface ProviderRefresher {
  *   re-checked, a non-positive value is a no-op, not a bug report).
  * @returns {ProviderRefresher|null} the handle, or null when nothing armed.
  */
-export function armProviderRefresher(wiring: Pick<Wiring, "settings" | "cache" | "inflight" | "tokenStore" | "apiKeyStore" | "catalogStore" | "providerStore" | "publisher" | "logger" | "providerRefresh" | "onQuotaPools">, minutes: number): ProviderRefresher | null {
+export function armProviderRefresher(wiring: Pick<Wiring, "settings" | "cache" | "inflight" | "tokenStore" | "apiKeyStore" | "resolveCatalogApiKey" | "catalogStore" | "providerStore" | "publisher" | "logger" | "providerRefresh" | "onQuotaPools">, minutes: number): ProviderRefresher | null {
   if (!Number.isFinite(minutes) || minutes <= 0) return null;
-  const { settings, cache, inflight, tokenStore, apiKeyStore, publisher, catalogStore, providerStore } = wiring;
+  const { settings, cache, inflight, tokenStore, apiKeyStore, resolveCatalogApiKey, publisher, catalogStore, providerStore } = wiring;
   const everyMs = Math.min(24 * 60, Math.max(1, Math.floor(minutes))) * 60_000;
   let closed = false;
   let ticking = false;
@@ -102,6 +102,7 @@ export function armProviderRefresher(wiring: Pick<Wiring, "settings" | "cache" |
         inflight,
         tokenStore,
         apiKeyStore,
+        resolveCatalogApiKey,
         publisher,
         catalogStore,
         panelSwitch: () => providerStore.enabled().catch(() => null),

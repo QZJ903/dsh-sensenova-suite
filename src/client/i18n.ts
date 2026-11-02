@@ -165,10 +165,11 @@ export const zh = {
   "llm.switchBusy": "切换中…",
   "llm.switchError": "切换失败：{error}",
   "llm.roster": "推送到 DSH 的模型",
-  "llm.rosterHint": "勾选 / 选择只改本地草稿：需要按「保存」才会推到 DSH；「撤销」回到上次保存值。目录新增的模型默认不推送。",
+  "llm.rosterHint": "勾选 / 选择只改本地草稿：需要按「保存」才会推到 DSH；「撤销」回到上次保存值。目录新增的模型默认不推送。模型「最大输出」与「上下文长度」可在插件根目录的 cordis.patch.yml（maxTokensOverrides / contextWindowOverrides）调整。",
   // 指向卡片名而非「上方/下方」：本卡片与 API Key 卡片的先后已经换过一次，
   // 方向词指错过一次就不该再写方向词。
   "llm.rosterEmpty": "还没有可推送的模型——先在「API Key」卡片保存一次 Key 再回来。",
+  "llm.catalogError": "模型目录未拉取：{message}",
   "llm.rosterSearchPlaceholder": "搜索模型名或 ID",
   "llm.rosterCount": "已勾选 {selected} / 共 {total}",
   "llm.rosterAll": "全部勾选",
@@ -355,8 +356,9 @@ export const en: typeof zh = {
   "llm.switchBusy": "Switching…",
   "llm.switchError": "Switch failed: {error}",
   "llm.roster": "Models pushed to DSH",
-  "llm.rosterHint": "Ticking or picking edits a local draft only: nothing reaches DSH until you hit Save; Discard returns to the last saved values. Models the catalogue gains later are not pushed by default.",
+  "llm.rosterHint": "Ticking or picking edits a local draft only: nothing reaches DSH until you hit Save; Discard returns to the last saved values. Models the catalogue gains later are not pushed by default. A model's max output and context window are tunable via maxTokensOverrides / contextWindowOverrides in the plugin root's cordis.patch.yml.",
   "llm.rosterEmpty": "No models to push yet — save a key in the API key card first.",
+  "llm.catalogError": "Model catalogue not fetched: {message}",
   "llm.rosterSearchPlaceholder": "Search a model name or id",
   "llm.rosterCount": "{selected} ticked / {total} total",
   "llm.rosterAll": "Tick all",

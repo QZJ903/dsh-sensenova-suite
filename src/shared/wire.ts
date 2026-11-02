@@ -227,5 +227,7 @@ export interface SnapshotData {
   pools?: PoolsData | null;
   trend?: TrendData | null;
   quotaError?: QuotaErrorData | null;
+  /** 模型目录腿的失败上屏（无 key 可用 / 拉取失败）；成功 = 无字段。 */
+  catalogError?: QuotaErrorData | null;
   shapeWarnings?: ShapeWarningData[];
 }

@@ -234,7 +234,7 @@ export function PanelPage({ onClose, tt, localeSubscribe }: {
       h(
         SectionCard,
         { title: tt("llm.providerTitle"), open: openSections.provider, onToggle: () => toggleSection("provider"), tt },
-        h(ProviderForm, { llm: data?.llm ?? null, pool: data?.pool ?? null, onDone: () => void load(), tt })
+        h(ProviderForm, { llm: data?.llm ?? null, pool: data?.pool ?? null, catalogError: data?.catalogError ?? null, onDone: () => void load(), tt })
       ),
       h(
         SectionCard,

@@ -11,9 +11,10 @@
  */
 import { POOL_PATH, SENSENOVA_SIGNUP_URL } from "./const.ts";
 import { postJson, postJsonOrThrow } from "./http.ts";
+import { format } from "./format.ts";
 import { clientModal, h, useCallback, useState } from "./runtime.ts";
 import type { Tt } from "./runtime.ts";
-import type { LlmData, PoolDiagData } from "./wire.ts";
+import type { LlmData, PoolDiagData, QuotaErrorData } from "./wire.ts";
 import { ProviderRegStatus, ProviderStatus, ProviderSwitch } from "./provider-controls.ts";
 import { ModelPicker } from "./model-picker.ts";
 import { S } from "./styles.ts";
@@ -140,9 +141,10 @@ export function ApiKeyForm({ llm, pool, onDone, tt }: {
  * panel grew one SectionCard per concern: key, provider+push are
  * three different functions and no longer share a card.
  */
-export function ProviderForm({ llm, pool, onDone, tt }: {
+export function ProviderForm({ llm, pool, catalogError, onDone, tt }: {
   llm?: LlmData | null;
   pool?: PoolDiagData | null;
+  catalogError?: QuotaErrorData | null;
   onDone?: () => void;
   tt: Tt;
 }): unknown {
@@ -154,6 +156,11 @@ export function ProviderForm({ llm, pool, onDone, tt }: {
     // closes the card. At the top it competed with the title and
     // duplicated the roster's own counts out of reading order.
     h(ProviderSwitch, { llm, onDone, tt }),
+    // 目录腿失败上屏（2026-11-03）：旧实现无 key/拉取失败一律静默，清单冻结
+    // 七天零提示。红字 = 下面的清单是旧目录，别当最新用。
+    catalogError !== null && catalogError !== undefined && typeof catalogError.message === "string" && catalogError.message !== ""
+      ? h("div", { style: S.formError, role: "status" }, format(tt("llm.catalogError"), { message: catalogError.message }))
+      : null,
     h(ModelPicker, { llm, pool, onDone, tt }),
     h(ProviderRegStatus, { llm, tt })
   );

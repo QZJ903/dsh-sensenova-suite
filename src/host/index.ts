@@ -137,7 +137,6 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   const apiKeyStore = createApiKeyStore({
     credentials: () => ctx.get("credentials") ?? null
   });
-  const resolveApiKey = async () => (await apiKeyStore.resolve()).value;
   /** @type {Map<string, import("./console-client.ts").CacheEntry>} */
   const cache = new Map();
   /** One in-flight console fetch per URL, so concurrent polls share a call. */
@@ -302,6 +301,21 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     },
     logger: ctx.logger,
   });
+  // 面板目录线的 key：池优先（与适配器同源 pickStart，通用组无亲和——pickStart
+  // 只「挑一把能用的」，不推进游标、不占并发槽），主 key 仅回落。2026-11-03 修复：
+  // sk- 框迁池后主 key ref 常空，旧实现（已删的死 wiring 字段 resolveApiKey）
+  // 只认主 key——目录腿静默跳过，catalog.json 七天零更新（面板清单冻结在旧目录，
+  // 平台上新模型永不见）。pickStart 抛错（池空/全标满/凭据服务未就绪）不算失败，
+  // 回落主 key；两边都空由聚合层上屏 catalog_unavailable，不再无声。
+  const resolveCatalogApiKey = async (): Promise<string> => {
+    try {
+      const picked = await orchestrator.pickStart({ model: "" });
+      if (typeof picked?.key === "string" && picked.key !== "") return picked.key;
+    } catch {
+      // 池侧不可用不是目录线的终点：回落主 key（api-key-store 自带 env 兜底）。
+    }
+    return (await apiKeyStore.resolve().catch(() => ({ value: "" }))).value;
+  };
   // 字面量动态 import 必须保持字面量：rolldown 构建期据此把 "./llm-adapter.ts"
   // 改写为产物 "./llm-adapter.js"（llm-adapter 是独立 entry）；改成变量路径会让
   // 产物带着 .ts 说明符在宿主里找不到模块（2026-10-24 注册失败事故）。
@@ -538,7 +552,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     providerState,
     publishProvider,
     releaseProvider,
-    resolveApiKey,
+    resolveCatalogApiKey,
     poolStore,
     poolRefresh: refreshPoolRecord,
     poolSnapshot: async () => {

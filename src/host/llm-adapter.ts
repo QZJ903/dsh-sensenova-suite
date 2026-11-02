@@ -65,6 +65,7 @@ export function createAdapterFactory(pool: PoolFacade) {
     enabledIds,
     unavailableModelIds,
     maxTokensOverrides,
+    contextWindowOverrides,
   }: {
     entries?: unknown;
     enabledIds?: unknown;
@@ -79,6 +80,15 @@ export function createAdapterFactory(pool: PoolFacade) {
      * disagree. Absent/empty = the catalogue is authoritative.
      */
     maxTokensOverrides?: Record<string, number>;
+    /**
+     * `{ "<model id>": tokens }` — the per-model context-window override
+     * (settings row `contextWindowOverrides`), the twin of the map above.
+     * resolveModel consults it via `llm-models.contextWindowForId` with the
+     * same precedence the panel roster quotes, so the displayed 「上下文」 and
+     * the request-side window arithmetic cannot disagree. Absent/empty = the
+     * catalogue is authoritative.
+     */
+    contextWindowOverrides?: Record<string, number>;
   }): Promise<{ adapter: unknown; providerIds: string[] }> {
     const apiBase = typeof baseUrl === "string" && baseUrl !== "" ? baseUrl : "https://token.sensenova.cn/v1";
     const enabled = Array.isArray(enabledIds) ? enabledIds.filter((id): id is string => typeof id === "string") : [];
@@ -185,6 +195,10 @@ export function createAdapterFactory(pool: PoolFacade) {
       // 滞后目录）：resolveModel 经 maxTokensForId 以「override > 目录值」现算
       // defaultMaxTokens——与面板「最大输出」同一判据，读到的数字即请求上限。
       maxTokensOverrides: () => maxTokensOverrides ?? null,
+      // 每模型上下文窗口覆盖（settings 行 contextWindowOverrides，目录低报新
+      // 模型时以文档为准）：resolveModel 经 contextWindowForId 同序现算
+      // context.contextWindow——与面板「上下文」徽章同一判据。
+      contextWindowOverrides: () => contextWindowOverrides ?? null,
     });
     // accountCount 的初值只在构造期用一次（上面的 IIFE 每请求重读）。
     void accountCount;

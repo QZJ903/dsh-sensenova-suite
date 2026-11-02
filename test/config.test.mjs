@@ -15,7 +15,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { resolveSettings, CONFIG_DEFAULTS, resolveAuthOverrides, credentialKey, hostName, isAdmitted, name } from "../src/host/index.ts";
-import { resolveTrendMultipliers, resolveMaxTokensOverrides } from "../src/host/host-config.ts";
+import { resolveTrendMultipliers, resolveMaxTokensOverrides, resolveContextWindowOverrides } from "../src/host/host-config.ts";
 import { results, check, finish } from "./harness.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -58,6 +58,8 @@ const patch = readFileSync(join(here, "..", "cordis.patch.yml"), "utf8");
     settings.modelGroups["sensenova-6.8-flash-lite"] === "flash-lite", JSON.stringify(settings.modelGroups));
   check("maxTokensOverrides default",
     JSON.stringify(settings.maxTokensOverrides) === JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides), JSON.stringify(settings.maxTokensOverrides));
+  check("contextWindowOverrides default",
+    JSON.stringify(settings.contextWindowOverrides) === JSON.stringify(CONFIG_DEFAULTS.contextWindowOverrides), JSON.stringify(settings.contextWindowOverrides));
   check("accounts default empty", Array.isArray(settings.accounts) && settings.accounts.length === 0, JSON.stringify(settings.accounts));
   check("no config error on an empty config (1b)", configError === null, String(configError));
 }
@@ -381,6 +383,37 @@ check("patch tokenSkewSeconds matches code default", Number(activeValue("tokenSk
   check("the shipped default pins the DOCUMENTED ceilings (deepseek-flash, kimi-k3)",
     JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides) === JSON.stringify({ "deepseek-flash": 393216, "kimi-k3": 131072 }),
     JSON.stringify(CONFIG_DEFAULTS.maxTokensOverrides));
+}
+
+// --- 7b. contextWindowOverrides: the twin sanitizer, same rules ------------
+// `contextWindowOverrides` mirrors `maxTokensOverrides` shape for shape (exact
+// ids, positive integers, junk dropped) — its values feed REQUEST-side window
+// arithmetic (`contextWindowForId`), so a loose key would silently retune
+// models the operator never named. Same pins, same reason.
+{
+  const kept = resolveContextWindowOverrides({ "sensenova-6.8-flash": 1048576 });
+  check("a well-formed window override survives",
+    JSON.stringify(kept) === JSON.stringify({ "sensenova-6.8-flash": 1048576 }), JSON.stringify(kept));
+
+  const dropped = resolveContextWindowOverrides({ "": 5, zero: 0, negative: -2, nan: NaN, inf: Infinity, frac: 1.5, text: "10", good: 262144 });
+  check("non-positive / fractional / non-numeric windows are dropped",
+    JSON.stringify(dropped) === JSON.stringify({ good: 262144 }), JSON.stringify(dropped));
+
+  check("an explicit {} means the catalogue stays authoritative",
+    Object.keys(resolveContextWindowOverrides({})).length === 0, JSON.stringify(resolveContextWindowOverrides({})));
+  check("absent falls back to the shipped default",
+    JSON.stringify(resolveContextWindowOverrides(undefined)) === JSON.stringify(CONFIG_DEFAULTS.contextWindowOverrides), "");
+  check("a non-object falls back to the shipped default",
+    JSON.stringify(resolveContextWindowOverrides("sensenova-6.8-flash=1048576")) === JSON.stringify(CONFIG_DEFAULTS.contextWindowOverrides), "");
+  check("an array falls back to the shipped default",
+    JSON.stringify(resolveContextWindowOverrides([1048576])) === JSON.stringify(CONFIG_DEFAULTS.contextWindowOverrides), "");
+
+  const viaSettings = resolveSettings({ contextWindowOverrides: { "sensenova-6.8-flash": 1048576, bad: 0 } }).settings.contextWindowOverrides;
+  check("resolveSettings routes the window map through the sanitizer",
+    JSON.stringify(viaSettings) === JSON.stringify({ "sensenova-6.8-flash": 1048576 }), JSON.stringify(viaSettings));
+  check("the shipped default pins the DOCUMENTED window (sensenova-6.8-flash probes 256K, docs say 1M)",
+    JSON.stringify(CONFIG_DEFAULTS.contextWindowOverrides) === JSON.stringify({ "sensenova-6.8-flash": 1048576 }),
+    JSON.stringify(CONFIG_DEFAULTS.contextWindowOverrides));
 }
 
 // --- 8. numeric field clamping boundaries ----------------------------

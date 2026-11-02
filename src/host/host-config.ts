@@ -118,6 +118,19 @@ export const CONFIG_DEFAULTS = Object.freeze({
   // 单行值：docs.test 按行解析 CONFIG_DEFAULTS，多行对象会让它 JSON.parse 失败。
   maxTokensOverrides: { "deepseek-flash": 393216, "kimi-k3": 131072 },
   /**
+   * Per-model CONTEXT WINDOW overrides ({ modelId → tokens }), the same shape
+   * and precedence as `maxTokensOverrides` above: override > the catalogue's
+   * declared figure > FALLBACK_CONTEXT_WINDOW. Read by BOTH the panel roster
+   * (llm-models.contextWindowOf → the 「上下文」 badge) and the registered
+   * adapter (resolveModel → context.contextWindow) — the displayed window and
+   * the request-side arithmetic cannot disagree. Motivated 2026-11-03: the
+   * catalogue understates new models — sensenova-6.8-flash probes 262144
+   * (256K) while the official documentation states 1M（运营者口径；docs dump
+   * 尚未收录该新模型）. Single-line value: docs.test parses CONFIG_DEFAULTS
+   * line by line.
+   */
+  contextWindowOverrides: { "sensenova-6.8-flash": 1048576 },
+  /**
    * Background freshness for the registered provider (2026-10 review #1b).
    * The panel polls only while it is open, but a registered provider is a
    * STANDING execution channel — its catalog/quota state used to decay until
@@ -278,8 +291,19 @@ export function resolveGlobalConcurrency(raw: unknown): number {
  * @returns {Record<string, number>} the sanitized map.
  */
 export function resolveMaxTokensOverrides(raw: unknown): Record<string, number> {
-  const source = raw === undefined || raw === null ? CONFIG_DEFAULTS.maxTokensOverrides : raw;
-  if (source === null || typeof source !== "object" || Array.isArray(source)) return { ...CONFIG_DEFAULTS.maxTokensOverrides };
+  return sanitizePositiveIntMap(raw, CONFIG_DEFAULTS.maxTokensOverrides);
+}
+
+/**
+ * The shared walker behind BOTH override sanitizers (`maxTokensOverrides` and
+ * `contextWindowOverrides`): exact string keys, positive-integer values, junk
+ * dropped; a malformed map falls back to the shipped default instead of
+ * throwing — one bad row must not take the panel down. Inlined twice used to
+ * be a duplication-gate finding; this is the extraction it asked for.
+ */
+function sanitizePositiveIntMap(raw: unknown, fallback: Record<string, number>): Record<string, number> {
+  const source = raw === undefined || raw === null ? fallback : raw;
+  if (source === null || typeof source !== "object" || Array.isArray(source)) return { ...fallback };
   const out: Record<string, number> = {};
   for (const [key, value] of Object.entries(source)) {
     if (typeof key === "string" && key !== "" && typeof value === "number" && Number.isInteger(value) && value > 0) {
@@ -287,6 +311,18 @@ export function resolveMaxTokensOverrides(raw: unknown): Record<string, number> 
     }
   }
   return out;
+}
+
+/**
+ * Sanitize the `contextWindowOverrides` config row — the same rules as
+ * {@link resolveMaxTokensOverrides}: exact string keys, positive integers,
+ * junk dropped. Re-validated at the read point (`contextWindowForId`), so
+ * this is a fast path, not the only gate.
+ * @param {unknown} raw - the raw `contextWindowOverrides` config value.
+ * @returns {Record<string, number>} the sanitized map.
+ */
+export function resolveContextWindowOverrides(raw: unknown): Record<string, number> {
+  return sanitizePositiveIntMap(raw, CONFIG_DEFAULTS.contextWindowOverrides);
 }
 
 /** The resolved settings shape `resolveSettings` produces and consumers read. */
@@ -308,6 +344,7 @@ export interface ResolvedSettings {
    * roster from the same function — one order, two readers.
    */
   maxTokensOverrides: Record<string, number>;
+  contextWindowOverrides: Record<string, number>;
   /** Background refresher cadence while the provider registration is ON (0 = off). */
   providerRefreshMinutes: number;
   /** 多账号池配置（原始条目，凭据解析在 index.ts）。 */
@@ -459,6 +496,8 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
         // well-formed map. `maxTokensFor` re-validates anyway, because it is
         // exported — two checks, one of them the contract.
         maxTokensOverrides: resolveMaxTokensOverrides(source.maxTokensOverrides),
+        // 同构的上下文窗口覆盖（sanitize 一次，contextWindowForId 读取点再验一次）。
+        contextWindowOverrides: resolveContextWindowOverrides(source.contextWindowOverrides),
         // NOT `clampInt`: `num` reads 0 as "unset", but 0 here is the LOADED
         // answer ("the background refresher is off"), so an explicit number —
         // zero included — always wins over the default. A set value floors and
@@ -505,6 +544,7 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
         auth: { consoleOrigin: safeConsoleBase },
         registerProvider: false,
         maxTokensOverrides: CONFIG_DEFAULTS.maxTokensOverrides,
+        contextWindowOverrides: CONFIG_DEFAULTS.contextWindowOverrides,
         providerRefreshMinutes: CONFIG_DEFAULTS.providerRefreshMinutes,
         accounts: [],
         activeAccount: "",

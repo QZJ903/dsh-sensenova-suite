@@ -206,20 +206,49 @@ export const CONTEXT_WINDOW_FIELDS: readonly string[] = ["context_length", "cont
 export const MAX_OUTPUT_FIELDS: readonly string[] = ["max_output_length", "max_tokens", "max_output_tokens", "max_completion_tokens", "maxTokens", "maxOutputTokens", "maxCompletionTokens"];
 
 /**
+ * The override>catalogue order on bare ids for the CONTEXT WINDOW — the
+ * adapter-side twin of {@link maxTokensForId}. The registered adapter holds an
+ * already-parsed `contextWindow` figure (not the platform's field spellings),
+ * so it resolves through HERE; the panel's `contextWindowOf` delegates to it
+ * too — one order, two readers, no drift between the 「上下文」 badge and the
+ * request-side window arithmetic.
+ * @param {string} id - the model id the override map is keyed by.
+ * @param {number|undefined} catalogFigure - the catalogue's declared window
+ *   (already parsed; `undefined` = the entry declares none).
+ * @param {object} [overrides] - `{ "<model id>": tokens }`; re-validated here,
+ *   not trusted (`Number.isInteger` excludes NaN/Infinity/fractions, `> 0`
+ *   keeps the map positive-only).
+ * @returns {number} the effective window — never below the
+ *   {@link FALLBACK_CONTEXT_WINDOW} floor when nothing declares one.
+ */
+export function contextWindowForId(id: string, catalogFigure: number | undefined, overrides?: Record<string, number> | null): number {
+  const override = overrideFor(id, overrides);
+  if (override !== undefined) return override;
+  return catalogFigure !== undefined && catalogFigure > 0 ? catalogFigure : FALLBACK_CONTEXT_WINDOW;
+}
+
+/**
  * Read a positive context window off the catalog entry's known spellings.
  *
  * The spelling list is {@link CONTEXT_WINDOW_FIELDS} — shared with the
  * adapter's parser, same order. A field the platform adds later needs no
  * parser change — only its name appended to that one list.
+ * Precedence: **operator override > the declared figure > the fallback** —
+ * the same order `maxTokensForId` states for the output ceiling, because the
+ * catalogue can UNDERSTATE a window too (2026-11-03: sensenova-6.8-flash
+ * probes 262144 while the official documentation states 1M).
  * @param {object} entry - one normalized catalog entry.
- * @returns {number} the declared window, or the fallback.
+ * @param {object} [overrides] - `{ "<model id>": tokens }` (the settings row
+ *   `contextWindowOverrides`); re-validated in {@link contextWindowForId}.
+ * @returns {number} the effective window.
  */
-export function contextWindowOf(entry: CatalogEntry): number {
+export function contextWindowOf(entry: CatalogEntry, overrides?: Record<string, number> | null): number {
+  let declared = 0;
   for (const key of CONTEXT_WINDOW_FIELDS) {
     const value = Math.floor(num(entry?.[key], 0));
-    if (value > 0) return value;
+    if (value > 0) { declared = value; break; }
   }
-  return FALLBACK_CONTEXT_WINDOW;
+  return contextWindowForId(str(entry?.id, ""), declared > 0 ? declared : undefined, overrides);
 }
 
 /**
@@ -282,6 +311,21 @@ export function maxTokensFor(entry: CatalogEntry, overrides?: Record<string, num
 }
 
 /**
+ * The validated override for one id, or undefined — the shared core of
+ * {@link maxTokensForId} and {@link contextWindowForId} (inlining it twice was
+ * a duplication-gate finding; this is the extraction it asked for). Re-validates
+ * untrusted config: `Number.isInteger` excludes NaN/Infinity/fractions, `> 0`
+ * keeps both maps positive-only.
+ */
+function overrideFor(id: string, overrides?: Record<string, number> | null): number | undefined {
+  if (id !== "" && overrides !== null && overrides !== undefined && typeof overrides === "object") {
+    const raw = (overrides as Record<string, unknown>)[id];
+    if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return raw;
+  }
+  return undefined;
+}
+
+/**
  * The override>catalogue order on bare ids — the ONE resolver both the wire
  * path and the panel projection call.
  *
@@ -295,16 +339,13 @@ export function maxTokensFor(entry: CatalogEntry, overrides?: Record<string, num
  * @param {number|undefined} catalogFigure - the catalogue's own figure
  *   (already parsed; `undefined` = the entry declares none).
  * @param {object} [overrides] - `{ "<model id>": ceiling }`; re-validated
- *   here, not trusted (`Number.isInteger` excludes NaN/Infinity/fractions and
- *   `> 0` keeps "0 means undeclared" single-valued).
+ *   here, not trusted.
  * @returns {number|undefined} the effective ceiling, or `undefined` when
  *   nothing declares one.
  */
 export function maxTokensForId(id: string, catalogFigure: number | undefined, overrides?: Record<string, number> | null): number | undefined {
-  if (id !== "" && overrides !== null && overrides !== undefined && typeof overrides === "object") {
-    const raw = (overrides as Record<string, unknown>)[id];
-    if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return raw;
-  }
+  const override = overrideFor(id, overrides);
+  if (override !== undefined) return override;
   return catalogFigure !== undefined && catalogFigure > 0 ? catalogFigure : undefined;
 }
 
@@ -423,9 +464,13 @@ export const HIDE_ALL_MODELS = "__hide_all__";
  *   a descriptor build gets. Positionally third and optional, so a caller written
  *   before the field existed keeps compiling; omitting it makes every row quote
  *   the catalogue figure, which is what a deployment with no overrides wants.
+ * @param {object} [thinkingOverrides] - the pool.json `thinking` partition.
+ * @param {object} [contextWindowOverrides] - `{ "<model id>": tokens }`, the
+ *   settings row the adapter's resolveModel reads too (contextWindowForId) —
+ *   the badge and the request-side window stay one fact.
  * @returns {{id: string, name: string, vision: boolean, imageGen: boolean, available: boolean, quotaExhausted: boolean, contextWindow: number, maxOutputLength: number, thinkingLevels: string[]}[]}
  */
-export function rosterWithAvailability(entries: unknown, pools: { pools?: unknown }, maxTokensOverrides?: Record<string, number> | null, thinkingOverrides?: Record<string, string[]> | null) {
+export function rosterWithAvailability(entries: unknown, pools: { pools?: unknown }, maxTokensOverrides?: Record<string, number> | null, thinkingOverrides?: Record<string, string[]> | null, contextWindowOverrides?: Record<string, number> | null) {
   const blocked = new Set(exhaustedModelIds(pools));
   const position = new Map();
   const out: { id: string; name: string; vision: boolean; imageGen: boolean; available: boolean; quotaExhausted: boolean; contextWindow: number; maxOutputLength: number; thinkingLevels: string[] }[] = [];
@@ -443,10 +488,10 @@ export function rosterWithAvailability(entries: unknown, pools: { pools?: unknow
       imageGen: isImageGenModel(entry) === true,
       available: !blocked.has(id),
       quotaExhausted: blocked.has(id),
-      // The window the descriptor itself will use: a declared `context_length`
-      // when the catalog has one, else the same 128k fallback pi-ai gets —
-      // so the badge never contradicts the effective behavior.
-      contextWindow: contextWindowOf(entry),
+      // The window the descriptor itself will use: override > declared
+      // `context_length` when the catalog has one, else the same 128k fallback
+      // pi-ai gets — so the badge never contradicts the effective behavior.
+      contextWindow: contextWindowOf(entry, contextWindowOverrides),
       // The EFFECTIVE output ceiling the descriptor will carry — the operator
       // override when one names this id, else the platform's figure (0 =
       // unknown). {@link maxTokensFor} is the one order, so the badge cannot

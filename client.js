@@ -128,8 +128,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.switchBusy": "切换中…",
 			"llm.switchError": "切换失败：{error}",
 			"llm.roster": "推送到 DSH 的模型",
-			"llm.rosterHint": "勾选 / 选择只改本地草稿：需要按「保存」才会推到 DSH；「撤销」回到上次保存值。目录新增的模型默认不推送。",
+			"llm.rosterHint": "勾选 / 选择只改本地草稿：需要按「保存」才会推到 DSH；「撤销」回到上次保存值。目录新增的模型默认不推送。模型「最大输出」与「上下文长度」可在插件根目录的 cordis.patch.yml（maxTokensOverrides / contextWindowOverrides）调整。",
 			"llm.rosterEmpty": "还没有可推送的模型——先在「API Key」卡片保存一次 Key 再回来。",
+			"llm.catalogError": "模型目录未拉取：{message}",
 			"llm.rosterSearchPlaceholder": "搜索模型名或 ID",
 			"llm.rosterCount": "已勾选 {selected} / 共 {total}",
 			"llm.rosterAll": "全部勾选",
@@ -294,8 +295,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.switchBusy": "Switching…",
 			"llm.switchError": "Switch failed: {error}",
 			"llm.roster": "Models pushed to DSH",
-			"llm.rosterHint": "Ticking or picking edits a local draft only: nothing reaches DSH until you hit Save; Discard returns to the last saved values. Models the catalogue gains later are not pushed by default.",
+			"llm.rosterHint": "Ticking or picking edits a local draft only: nothing reaches DSH until you hit Save; Discard returns to the last saved values. Models the catalogue gains later are not pushed by default. A model's max output and context window are tunable via maxTokensOverrides / contextWindowOverrides in the plugin root's cordis.patch.yml.",
 			"llm.rosterEmpty": "No models to push yet — save a key in the API key card first.",
+			"llm.catalogError": "Model catalogue not fetched: {message}",
 			"llm.rosterSearchPlaceholder": "Search a model name or id",
 			"llm.rosterCount": "{selected} ticked / {total} total",
 			"llm.rosterAll": "Tick all",
@@ -2541,12 +2543,15 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* panel grew one SectionCard per concern: key, provider+push are
 	* three different functions and no longer share a card.
 	*/
-	function ProviderForm({ llm, pool, onDone, tt }) {
+	function ProviderForm({ llm, pool, catalogError, onDone, tt }) {
 		return h("div", null, h(ProviderSwitch, {
 			llm,
 			onDone,
 			tt
-		}), h(ModelPicker, {
+		}), catalogError !== null && catalogError !== void 0 && typeof catalogError.message === "string" && catalogError.message !== "" ? h("div", {
+			style: S.formError,
+			role: "status"
+		}, format(tt("llm.catalogError"), { message: catalogError.message })) : null, h(ModelPicker, {
 			llm,
 			pool,
 			onDone,
@@ -2816,6 +2821,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	var init_api_key_form = __esmMin((() => {
 		init_const();
 		init_http();
+		init_format();
 		init_runtime();
 		init_provider_controls();
 		init_model_picker();
@@ -3659,6 +3665,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		}, h(ProviderForm, {
 			llm: data?.llm ?? null,
 			pool: data?.pool ?? null,
+			catalogError: data?.catalogError ?? null,
 			onDone: () => void load(),
 			tt
 		})), h(SectionCard, {

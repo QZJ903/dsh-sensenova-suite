@@ -267,7 +267,10 @@ export function createProviderPublisher(deps: ProviderPublisherDeps = {}) {
         // the knob look dead until the Host was reloaded. The adapter carries
         // the map into resolveModel (`maxTokensForId`), so the ceiling reaches
         // the wire — not just the roster (U6 ledger D1's promise restored).
-        maxTokensOverrides: effectiveSettings.maxTokensOverrides
+        maxTokensOverrides: effectiveSettings.maxTokensOverrides,
+        // 同构的上下文窗口覆盖（`contextWindowForId`）：目录低报新模型的窗口时
+        // 以文档为准——同一「每 publish 现读」语义，徽章与请求侧同源。
+        contextWindowOverrides: effectiveSettings.contextWindowOverrides
       });
       // The same reason, stated: an adapter is registered Host-wide, so a
       // factory that returns anything else must fail here rather than publish

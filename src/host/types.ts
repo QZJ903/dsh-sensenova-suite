@@ -148,8 +148,8 @@ export interface Wiring {
   publishProvider: (entries: unknown[], enabledIds: string[], unavailableModelIds?: string[]) => Promise<import("./provider-publish.ts").PublishResult>;
   /** Release the registered provider pair (adapter + directory). */
   releaseProvider: () => void;
-  /** Resolve the live `sk-` key per request. */
-  resolveApiKey: () => Promise<string>;
+  /** 面板目录线的 key：池优先（与适配器同源 pickStart，通用组），主 key 仅回落。 */
+  resolveCatalogApiKey: () => Promise<string>;
   /** Key 池诊断快照（snapshot 路由只读块；测试可省略）。 */
   poolSnapshot?: () => unknown;
   /** 每模型可用思考档位（pool.json `thinking` 分区；snapshot 路由/发布链读取）。 */

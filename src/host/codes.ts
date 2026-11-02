@@ -69,6 +69,9 @@ export const CODE = Object.freeze({
   AUTH_ERROR: "auth_error",
   /** The console call itself failed (usually transient; the next poll clears it). */
   CONSOLE_ERROR: "console_error",
+  /** The model-catalog read has no key to read with: the pool resolved nothing
+   * AND no primary key is configured. Structural — waiting does not fix it. */
+  CATALOG_UNAVAILABLE: "catalog_unavailable",
   /** The plugin row is misconfigured (the panel-facing spelling of {@link CODE.CONFIG}). */
   CONFIG_ERROR: "config_error"
 });
