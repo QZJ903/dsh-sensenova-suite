@@ -1,5 +1,17 @@
 # 更新日志（Changelog）
 
+## 0.1.45（2026-11-03）
+
+- **U8 审计修复轮（HTTP 路由面与快照聚合，台账全终态）**：
+  - **account 补整体兜底（六路由唯一缺口，D1）**：handler 包同族 catch → `clearCoalescedFetch` + `reportAuthFailure`（与 switch 失败分支逐句同构）——此前 remove 分支与三处 `state()` 裸 await，任一抛错直接冲出 handler，宿主兜底是裸 400 空体（asar 取证 dsh-host-webserver）；且 remove 中途失败（身份可能已换人）会漏清 coalesced 缓存。
+  - **畸形 action 封闭白名单（顺带2 案 a）**：未知 action / switch·remove 缺 id 拒 400——此前会双双跳过掉进登录兜底，以 MISSING_CREDENTIALS 冒充「登录失败」（语义错位；形状本身安全，saveAccount 首行校验在一切写动作之前）。
+  - **api-key answer 条件回显 providerError（顺带3）**：与 models/provider 同口径——forget-and-republish 发布失败在本路由自己脸上可见，不只在下一轮快照。
+  - **rename 备注 traceLog 整行删除（S1 拍板「本来就没用」）**：排障钉连注释带死 import 删——备注原文直落诊断日志是凭据入日志的相邻面。
+  - **注释对齐现实三处（D2 案 b / S3 案 a / routes load-bearing）**：`MAX_ENABLED_MODEL_IDS=500` 写明 DESIGN INTENT（JSON id 数组 ~25B/id，~150 个先撞 4096 字节家族上限，行为零变化）；models JSDoc「缺省时协议保存被拒」→「静默跳过（生产恒注入，仅测试替身可达）」；routes.ts「registration ORDER is load-bearing」改为事实句（六路由 path 互不相交、off 无互相依赖）。
+  - **测试补钉当轮清账（T1/T2/T3）**：pool-route 24→33（globalConcurrency 负数钳 0 路由+store 两层 / 小数取整 / 0 合法保存值 / 非有限数两可见面自愈 null——原始字节体绕开 JSON.stringify(Infinity) 桩内变形，首跑抓到错误期望=钉会红自证；readJsonBody 恰等 4096 通过且落盘 / 超 1 字节 400 / 空体 / 数组各专属文案）；account-route 6→10（remove 抛错 200 ok:false + code 透传 + 缓存清场判别钉；未知 action 400；switch 无 id 400 且 saves=0）。
+  - **自结定论（无码）**：非有限数 globalConcurrency 三层防线销号（消费端并发闸 `normalizeConcurrencyLimit` 非整数一律回退 1）；宿主 webserver handler 抛错契约 asar 实锤（未写出=裸 400 空体 / 已写出=`res.destroy()`）；面板只读 `llm.modelProtocols`（pool 块 raw 副本 wire 上无消费者）；`wireProtocol` 生产两端恒 auto。
+  - **验证**：typecheck 0 错；account-route 10 / pool-route 33 / contract / snapshot-aggregate / duplication 全绿；routes 套件本机结构性 SKIP（@deepseek-ai junction 缺席，U6 O3 同因）。
+
 ## 0.1.44（2026-11-03）
 
 - **U4 审计修复轮（键池与配额状态机，问题清单零挂账终态）**：

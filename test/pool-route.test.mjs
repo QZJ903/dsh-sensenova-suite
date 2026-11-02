@@ -7,6 +7,9 @@
  * 起因（2026-10-29）：「单 key 删除要删两次」定案为同值孪生条目（add 不查重、
  * delete 后池不重解析）。add 查重与 delete 全链（凭据同清、deletedIds、
  * refreshKeys 触发）在此钉成回归。
+ * 起因（2026-11-03 U8 审计测试缺失 T2/T3）：globalConcurrency 此前全零钉
+ * （负数/小数/0/非有限数），readJsonBody 边界（恰等于上限/超 1 字节/空体/
+ * 非 object）两套件均无钉——本批补齐，全部钉现状行为。
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -49,7 +52,10 @@ try {
     phaseOf: () => "running",
     refresh: async () => {},
     refreshKeys: async () => { admin.refreshKeysCalls += 1; },
-    effectiveConcurrency: async () => 2,
+    effectiveConcurrency: async () => {
+      const r = await store.read();
+      return r.globalConcurrency ?? 2; // 2 = stub 的「配置 ?? key 数」替身值
+    },
     apply: async () => {},
     addKeySecret: async (id, apiKey) => {
       admin.secrets.push({ id, apiKey });
@@ -85,6 +91,21 @@ try {
       writeHead: (code) => { out += `status=${code} `; },
       end: (p) => { out += String(p); }
     };
+    await def.handler(request, response);
+    const status = Number(/status=(\d+)/.exec(out)?.[1] ?? 0);
+    const jsonStart = out.indexOf("{");
+    return { status, body: jsonStart >= 0 ? JSON.parse(out.slice(jsonStart)) : null };
+  };
+
+  /** 驱动一次原始字节 POST（U8 T3：边界体不走 JSON.stringify，防 Infinity/形态被桩改写）。 */
+  const postRaw = async (buf) => {
+    const request = {
+      method: "POST",
+      headers: { host: "127.0.0.1:19387", origin: "http://127.0.0.1:19387" },
+      async *[Symbol.asyncIterator]() { if (buf.length > 0) yield buf; }
+    };
+    let out = "";
+    const response = { writeHead: (c) => { out += `status=${c} `; }, end: (p) => { out += String(p); } };
     await def.handler(request, response);
     const status = Number(/status=(\d+)/.exec(out)?.[1] ?? 0);
     const jsonStart = out.indexOf("{");
@@ -217,6 +238,70 @@ try {
   check("delete default 也触发 refreshKeys",
     admin.refreshKeysCalls > refreshBeforeDelete + 1,
     `${refreshBeforeDelete} -> ${admin.refreshKeysCalls}`);
+  // 11. globalConcurrency 钳制（U8 测试缺失 T2，此前全零钉）：负数钳 0、小数
+  //     向下取整、0 是合法保存值（跟随语义，不得读作缺席）。路由与 store 两层
+  //     同形钳（Math.max(0, Math.floor)）在此各钉一层。
+  {
+    await post({ globalConcurrency: -5 });
+    let rec = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
+    check("globalConcurrency 负数钳 0（路由层）",
+      rec.globalConcurrency === 0 && (await admin.effectiveConcurrency()) === 0,
+      JSON.stringify(rec.globalConcurrency));
+    await store.setGlobalConcurrency(-3);
+    rec = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
+    check("globalConcurrency 负数钳 0（store 层直调）", rec.globalConcurrency === 0,
+      JSON.stringify(rec.globalConcurrency));
+    await post({ globalConcurrency: 2.7 });
+    await store.setGlobalConcurrency(1.9);
+    rec = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
+    check("globalConcurrency 小数向下取整（路由 2.7→2 后 store 1.9→1）",
+      rec.globalConcurrency === 1 && (await admin.effectiveConcurrency()) === 1,
+      JSON.stringify(rec.globalConcurrency));
+    await post({ globalConcurrency: 0 });
+    rec = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
+    check("globalConcurrency 0 是合法保存值（跟随语义）",
+      rec.globalConcurrency === 0 && (await admin.effectiveConcurrency()) === 0,
+      JSON.stringify(rec.globalConcurrency));
+    // 非有限数（JSON 1e999 → Infinity，U8 S2 定论）：穿透两层 Math 钳，但两处
+    // 可见面都自愈——磁盘文件序列化为 null、响应体 JSON.stringify 同样为 null
+    // （进程内读缓存确实持 Infinity ≤1s，那由消费端并发闸
+    // normalizeConcurrencyLimit→1 兜底，不在本路由契约面）。须走原始字节体：
+    // JSON.stringify(Infinity) 在桩内就变 null，永远到不了路由。
+    const huge = await postRaw(Buffer.from('{"globalConcurrency": 1e999}', "utf8"));
+    rec = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
+    check("globalConcurrency 非有限数：落盘与响应两可见面均自愈 null",
+      huge.status === 200 && huge.body?.ok === true && rec.globalConcurrency === null
+        && huge.body?.globalConcurrency === null,
+      `${JSON.stringify(rec.globalConcurrency)} resp=${JSON.stringify(huge.body?.globalConcurrency)}`);
+  }
+
+  // 12. readJsonBody 边界（U8 测试缺失 T3，两套件此前均零钉）：恰等于 4096
+  //     字节通过、超 1 字节拒、空体与非 object 各有专属文案。
+  {
+    const renameBodyOfBytes = (total) => {
+      const head = '{"action":"rename","id":"key-2","name":"';
+      const tail = '"}';
+      return Buffer.from(head + "a".repeat(total - Buffer.byteLength(head) - tail.length) + tail, "utf8");
+    };
+    const atLimit = await postRaw(renameBodyOfBytes(4096));
+    const rec = JSON.parse(readFileSync(join(process.env.DSH_HOME, "state", "dsh-sensenova-suite", "pool.json"), "utf8"));
+    check("body 恰等于 4096 字节上限：通过且落盘",
+      atLimit.status === 200 && atLimit.body?.ok === true
+        && rec.keys.find((k) => k.id === "key-2")?.name.length === 4096 - Buffer.byteLength('{"action":"rename","id":"key-2","name":""}'),
+      `${atLimit.status} ${JSON.stringify(atLimit.body)}`);
+    const overLimit = await postRaw(renameBodyOfBytes(4097));
+    check("body 超 1 字节：400 request body is too large",
+      overLimit.status === 400 && String(overLimit.body?.error).includes("too large"),
+      `${overLimit.status} ${JSON.stringify(overLimit.body)}`);
+    const empty = await postRaw(Buffer.alloc(0));
+    check("空 body：400 a JSON body is required",
+      empty.status === 400 && String(empty.body?.error).includes("a JSON body is required"),
+      `${empty.status} ${JSON.stringify(empty.body)}`);
+    const array = await postRaw(Buffer.from("[]", "utf8"));
+    check("数组 body：400 the body must be a JSON object",
+      array.status === 400 && String(array.body?.error).includes("must be a JSON object"),
+      `${array.status} ${JSON.stringify(array.body)}`);
+  }
 } catch (e) { fail("pool-route", e); }
 
 let failed = 0;

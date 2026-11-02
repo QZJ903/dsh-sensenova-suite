@@ -11,6 +11,10 @@
  *      code/detail/retryAfterMs；
  *   3. GET → state 透传、无密码无令牌原文；
  *   4. 登录失败 → detail 与 retryAfterMs 上屏（reportAuthFailure 契约）。
+ *   5. remove 失败 → 同款报告面 + 缓存清场（2026-11-03 U8-D1 修复轮：此前
+ *      remove 分支无兜底，抛错冲出 handler 被宿主兜成裸 400 空体；T1）。
+ *   6. 畸形 action 拒 400 → 封闭白名单（U8-顺带2 案 a）：未知 action / switch
+ *      无 id 不再掉进登录兜底冒充 MISSING_CREDENTIALS 登录失败。
  *
  * harness 与 pool-route.test.mjs 同形：webServer 桩捕获路由定义、请求用
  * async-iterator 喂 body、响应 writeHead/end 拼接断言。
@@ -22,8 +26,8 @@ const fail = (group, error) => results.push({ name: group, pass: false, detail: 
 const { registerAccountRoute } = await import("../src/host/routes/account.ts");
 const { CODE } = await import("../src/host/codes.ts");
 
-/** 桩 tokenStore：可脚本化 switchAccount 抛错；state/saves/removes 留痕。 */
-function buildStoreStub({ switchErr = null } = {}) {
+/** 桩 tokenStore：可脚本化 switchAccount/removeAccount 抛错；state/saves/removes 留痕。 */
+function buildStoreStub({ switchErr = null, removeErr = null } = {}) {
   const calls = { switches: [], saves: [], removes: [] };
   return {
     calls,
@@ -32,15 +36,15 @@ function buildStoreStub({ switchErr = null } = {}) {
     },
     async saveAccount(acc, opts) { calls.saves.push({ username: acc?.username, activate: opts?.activate }); },
     async switchAccount(id) { calls.switches.push(id); if (switchErr) throw switchErr; },
-    async removeAccount(id) { calls.removes.push(id); }
+    async removeAccount(id) { calls.removes.push(id); if (removeErr) throw removeErr; }
   };
 }
 
 /** 桩 wiring：真 Map 当 cache/inflight——clearCoalescedFetch 的效果用 size 观测。 */
-function buildWiring({ switchErr } = {}) {
+function buildWiring({ switchErr, removeErr } = {}) {
   const cache = new Map([["console:quota", { v: 1 }], ["console:catalog", { v: 2 }]]);
   const inflight = new Map([["console:quota", Promise.resolve(1)]]);
-  const tokenStore = buildStoreStub({ switchErr });
+  const tokenStore = buildStoreStub({ switchErr, removeErr });
   let def;
   const ctx = { webServer: { register: (d) => { def = d; return () => {}; } } };
   registerAccountRoute(ctx, {
@@ -138,6 +142,38 @@ try {
     check("GET：不回显密码与令牌原文",
       !/"password"/.test(serialized) && !/at-|eyJ/.test(serialized.replace(/"configured"/, "")),
       serialized.slice(0, 120));
+  }
+  // 5. remove 失败：与 switch 失败同款报告面 + 缓存清场（U8-D1 修复轮钉）。
+  //    修复前：remove 分支裸 await，抛错冲出 handler，宿主兜成裸 400 空体、
+  //    缓存不清（身份可能已换人而旧号缓存越界存活 ≤cacheSeconds）。
+  {
+    const err = new Error("vault write failed");
+    err.code = CODE.AUTH_ERROR;
+    const w = buildWiring({ removeErr: err });
+    const res = await post(w.def, { action: "remove", id: "b" });
+    check("remove 失败：200 ok:false + code 透传（不再是宿主裸 400 空体）",
+      res.status === 200 && res.body?.ok === false && res.body?.code === CODE.AUTH_ERROR,
+      `${res.status} ${JSON.stringify(res.body)}`);
+    check("remove 失败：coalesced 缓存清场（身份可能已换人，与 switch 失败同纪律）",
+      w.cache.size === 0 && w.inflight.size === 0,
+      `cache=${w.cache.size} inflight=${w.inflight.size}`);
+  }
+
+  // 6. 畸形 action 拒 400（U8-顺带2 案 a）：白名单挡在登录兜底之前——
+  //    saves 留痕为 0 证明没有掉进 saveAccount 冒充登录失败。
+  {
+    const w = buildWiring();
+    const unknown = await post(w.def, { action: "explode", id: "b" });
+    check("未知 action 拒 400（pool 同款纪律）",
+      unknown.status === 400 && unknown.body?.ok === false
+        && /action must be switch \| remove/.test(String(unknown.body?.error)),
+      `${unknown.status} ${JSON.stringify(unknown.body)}`);
+    const noId = await post(w.def, { action: "switch" });
+    check("switch 无 id 拒 400（不再冒充登录失败，saves=0）",
+      noId.status === 400 && noId.body?.ok === false
+        && /id: string/.test(String(noId.body?.error))
+        && w.tokenStore.calls.saves.length === 0,
+      `${noId.status} saves=${w.tokenStore.calls.saves.length} ${JSON.stringify(noId.body)}`);
   }
 } catch (e) { fail("account-route", e); }
 

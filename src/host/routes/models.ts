@@ -28,7 +28,8 @@ interface ProtocolStore {
 /**
  * Register the models route. Wiring subset: `settings`, `catalogStore`,
  * `providerStore`, `providerState`, `publishProvider`, and optionally
- * `poolStore`（协议覆盖的落盘处；缺省时协议保存被拒）.
+ * `poolStore`（协议覆盖的落盘处；缺省时协议覆盖被静默跳过——生产恒注入，
+ * 此面仅测试替身可达；U8-S3 注释对齐代码）.
  */
 export function registerModelsRoute(ctx: any, wiring: Pick<Wiring, "settings" | "catalogStore" | "providerStore" | "providerState" | "publishProvider"> & { poolStore?: ProtocolStore; poolRefresh?: () => Promise<void> }) {
   const { settings, catalogStore, providerStore, providerState, publishProvider } = wiring;

@@ -202,6 +202,8 @@ export async function buildSnapshotBody({
    * 额度驱动的池格写点回调（2026-10-31 建）：pool-usage 轮询**成功**时以解析出
    * 的 pools 调用一次（失败不调，绝不拿坏数据写格）。参数回调而非导入——聚合层
    * 保持纯函数（同 onShapeDrift），key 归属与落格决策在调用方（index.ts）。
+   * 注意传入的是活对象：本函数随后会替换 pools.pools 的数组引用（callable/locked
+   * 拆分）——同步读取看到拆分前数据；条目对象本身不被改动，延迟读取也安全。
    */
   onQuotaPools?: (pools: { pools?: unknown }) => void;
 }): Promise<SnapshotData> {

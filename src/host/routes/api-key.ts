@@ -39,11 +39,14 @@ export function registerApiKeyRoute(ctx: any, wiring: Pick<Wiring, "settings" | 
       const method = request.method === undefined ? "GET" : request.method;
       // The secret-free state is all the form ever gets: present or not, and
       // whether it came from the credentials service or the environment.
+      // providerError rides along conditionally — the same shape the models
+      // and provider answers use — so a failed forget-and-republish publish
+      // is visible on THIS route's own answer, not only on the next snapshot.
       const answer = async (extra = {}) =>
         writeJson(
           response,
           200,
-          { ok: true, ...(await optional(apiKeyStore.state(), { hasApiKey: false, keySource: null, ephemeral: false })), ...extra },
+          { ok: true, ...(await optional(apiKeyStore.state(), { hasApiKey: false, keySource: null, ephemeral: false })), ...(providerState.error !== null ? { providerError: providerState.error } : {}), ...extra },
           { "cache-control": "no-store" }
         );
       if (method === "GET") {

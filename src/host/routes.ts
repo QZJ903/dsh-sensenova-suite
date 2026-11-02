@@ -23,8 +23,9 @@
  *                             keys, global concurrency, per-group protocol
  *                             partition — the panel's read-only pool card).
  *
- * The registration ORDER is load-bearing: the returned `off()` callbacks run
- * in this order on teardown. Public API and export surface are unchanged.
+ * The returned `off()` callbacks are handed to `teardown` in this order; the
+ * six routes are path-disjoint exact matches, so no unregister depends on
+ * another. Public API and export surface are unchanged.
  *
  * 2026-10 收编裁定：出图与第二上游路由随功能移除。
  *

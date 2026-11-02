@@ -28,10 +28,22 @@ export function writeJson(res: any, status: number, body: unknown, headers: Reco
   res.end(payload);
 }
 
-/** Ceiling on a submitted account, so a hostile page cannot stream a body. */
+/**
+ * Ceiling on a submitted account, so a hostile page cannot stream a body.
+ * Also the FAMILY DEFAULT byte limit: every POST route reads through
+ * readJsonBodyOr400 with this unless it passes its own limit (U8-D2 注：
+ * models 的条数上限就是被它先拦的——见下）.
+ */
 export const MAX_ACCOUNT_BODY_BYTES = 4096;
 
-/** Ceiling on the curated allow-list: a catalogue this large is a posting accident. */
+/**
+ * Ceiling on the curated allow-list: a catalogue this large is a posting
+ * accident. DESIGN INTENT, not the binding limit (U8-D2 2026-11-03 案 b 拍板：
+ * 注释对齐现实，行为不动): the 4096-byte family body limit above rejects
+ * first — an id in a JSON array runs ~25 bytes, so ~150 ids hit "request
+ * body is too large" before this check is ever reached. The binding cap is
+ * byte-shaped, not count-shaped.
+ */
 export const MAX_ENABLED_MODEL_IDS = 500;
 
 /**
@@ -135,7 +147,7 @@ export async function readJsonBodyOr400(request: any, response: any, limit = MAX
 /**
  * Wrap a route handler with the trust fence every route opens with.
  *
- * The seven handlers each repeated the identical `isAdmitted` block; this folds
+ * The route handlers each repeated the identical `isAdmitted` block; this folds
  * it into one seam so a forgotten fence is impossible and the 403 wording
  * stays in {@link refuseOrigin}. A handler wrapped here must NOT repeat the
  * fence — doing so is only a second, dead guard.
