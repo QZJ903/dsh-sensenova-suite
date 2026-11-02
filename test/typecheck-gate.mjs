@@ -23,9 +23,9 @@
  * `test` chain and ci.yml" — is gone: both entry points now invoke the runner.
  *
  * TWO configs run: tsconfig.json (everything, strict flags at project level)
- * and tsconfig.strict-null.json (the per-file strictNullChecks allowlist from
- * docs/IMPROVEMENTS.md §8 — a file graduates by moving from the main config's
- * exclude to an include line here). A green gate means BOTH are clean.
+ * and tsconfig.strict-null.json (the per-file strictNullChecks allowlist; a
+ * file graduated by moving from the main config's exclude to an include line
+ * here). A green gate means BOTH are clean.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";

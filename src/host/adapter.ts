@@ -35,7 +35,7 @@ import type {
   StreamChunk,
   TokenUsage,
 } from '@deepseek-ai/dsh-llm';
-import { parseRetryAfterMs, classify429Body, classify429Full, bucketCountsStrike, probeFloorFor } from './rate-classify.ts';
+import { parseRetryAfterMs, classify429Body, classify429Full, bucketCountsStrike, probeFloorFor, PROVIDER_RETRY_AFTER_CAP_MS } from './rate-classify.ts';
 import { shouldRotateUnclassified } from './key-health.ts';
 import { retryableCodes, ANTHROPIC_TRUNCATED_CODE, QUOTA_CODES } from './llm-retry.ts';
 import { MODELS_TIMEOUT_MS, CATALOG_FAILURE_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
@@ -51,22 +51,20 @@ import { maskKey } from './util.ts';
  * 128k/131072），本文件经 import 使用。
  */
 /**
- * 提交给 provider 重试层的延迟上限（毫秒）：本地退避与非配额 429 的
- * Retry-After 均受此约束，同时作为重试策略退避单次上限。
- * fix-sensenova-429-quota-retry（2026-09-04 实测）：原 3000ms 与配额窗口量级
- * 不符——TPM 为 60 秒窗口，提升到 60000ms（spec 允许区间 60–120s 的下沿）。
- */
-const PROVIDER_RETRY_AFTER_CAP_MS = 60_000;
-/** 配额类 429 退避指导（providerRetryAfterMs）的绝对上限（毫秒）：与
+ * 配额类 429 退避指导（providerRetryAfterMs）的绝对上限（毫秒）：与
  * PROVIDER_RETRY_AFTER_CAP_MS（即重试策略单次延迟上限）一致。宿主 dsh-llm-retry
  * （normal 模式）在 providerRetryAfterMs 超过单次延迟上限时会直接放弃重试，封顶
- * 对齐后保证任何采用值都会被宿主按指导延迟重试；不影响 TPM 分级档（3–30s）与
- * code 8 固定档（15s）的正常取值。 */
+ * 对齐后保证任何采用值都会被宿主按指导延迟重试；不影响统一退避梯（3–30s）
+ * 各档的正常取值。 */
 const QUOTA_RETRY_AFTER_CEILING_MS = 60_000;
 /** 轮间抖动等待窗口（毫秒）：3 轮全 429 之后、第 4 轮之前等一次，每请求独立算。
  * 目的是避免多个并发请求同时结束等待、造成第二波请求洪峰（2026-11-02 他拍板）。 */
 const JITTER_WAIT_MIN_MS = 5_000;
 const JITTER_WAIT_MAX_MS = 10_000;
+/** quotaStickyKeys 的容量上限（U4 审计顺带②）：条目=会话→粘住的 key，此前只增
+ * 不删无上界。超上限删最早插入者（Map 迭代序=插入序，与 key-orchestrator 亲和表
+ * 同款取舍——严格 LRU 需读时重排，不值得）。512 与亲和表 affinityMax 同量级。 */
+const QUOTA_STICKY_KEYS_MAX = 512;
 
 /** 可中断 sleep（毫秒）：signal abort 时立即醒来。轮间等待用。 */
 function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -1011,6 +1009,9 @@ export class SensenovaAdapter extends LlmAdapter {
    * 与 spec「同一会话后续请求继续使用新 key」对齐。条目仅存内存，随适配器
    * 生命周期结束。
    */
+  /** 会话→quota 轮换粘住的 key（design D5）。生命周期：轮换时 set、**成功时 delete**
+   * （拐杖只为扛过 429 期；成功后下一请求回池层选 key，商汤组由亲和表保持粘性——
+   * 2026-11-03 U4 顺带②B 拍板）、有界 QUOTA_STICKY_KEYS_MAX。 */
   private readonly quotaStickyKeys = new Map<string | undefined, string>();
   /**
    * 配额类 429 连续命中计数（per-session，分级退避用）：每次 stream() 调用至多 +1
@@ -1440,6 +1441,7 @@ export class SensenovaAdapter extends LlmAdapter {
           }
           this.probeHitCounts.delete(options.sessionId);
           this.session429Trail.delete(options.sessionId);
+          this.quotaStickyKeys.delete(options.sessionId); // 粘性使命完成（U4 顺带②B）：下一请求回池层选 key。
           probeResetBySuccess = true;
           this.deps.reportOutcome?.(apiKey, 'success');
           break; // 额度随 response 保留，由外层 finally 在流结束后释放
@@ -1548,6 +1550,11 @@ export class SensenovaAdapter extends LlmAdapter {
             totalAttempts += 1;
             traceLog(`[dsh-sensenova-suite] 429 换 key model=${options.model} ${maskKey(previousKey)} → ${maskKey(next)}（轮 ${round}/${FINAL_ROUND}，本轮已试 ${tried.size} 把，累计 ${totalAttempts} 次）`);
             if (quotaRotate) {
+              // 有界（U4 审计顺带②）：超上限先删最早插入的条目再写。
+              if (!this.quotaStickyKeys.has(options.sessionId) && this.quotaStickyKeys.size >= QUOTA_STICKY_KEYS_MAX) {
+                const oldest = this.quotaStickyKeys.keys().next().value;
+                if (oldest !== undefined) this.quotaStickyKeys.delete(oldest);
+              }
               this.quotaStickyKeys.set(options.sessionId, next); // 粘住新 key
               // 不在此清 probeHitCounts：计数是 per-session（不区分 key），且按入口
               // 快照语义整轮只推进一档，循环内 delete 会被 finally 的 set 覆盖——

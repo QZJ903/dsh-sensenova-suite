@@ -71,7 +71,7 @@ export const zh = {
   // read 「Flash-Lite 专属池 · 专属池 · 本模型无专属池，按通用池计」, contradicting
   // itself inside one line. The pool's declared type is already said by
   // `pool.dedicated` / `pool.default` beside the name; this part is about the
-  // selection, and `docs/ROADMAP.md` §6.3 already ruled the fallback is "not a
+  // selection, and the fallback is deliberately worded as "not a
   // confirmed attribution, the sentence describes the selection".
   "composer.poolFallback": "本模型未列入任何池，此处按平台顺序取第一个池",
   // The roster's "something appeared" marker. It rides BESIDE the balance

@@ -790,35 +790,6 @@ try {
         restoredSnap.body?.llm?.modelCount === 2 && restoredSnap.body?.llm?.visionCount === 1,
       JSON.stringify({ saved: restored.body?.ok, m: restoredSnap.body?.llm?.modelCount, v: restoredSnap.body?.llm?.visionCount }));
 
-    // -- /draw: the draw-tool switch, the third pure-local writer ----------
-    const drawGet = await call(`${NS}/draw`);
-    check("the /draw route reports the config default",
-      drawGet.status === 200 && drawGet.body?.drawEnabled === false && drawGet.body?.drawSource === "config",
-      JSON.stringify(drawGet.body ?? {}).slice(0, 200));
-
-    const badModel = await post(`${NS}/draw`, { drawModelId: "   " });
-    check("a blank draw model preference is refused",
-      badModel.status === 400 && badModel.body?.ok === false, `${badModel.status}`);
-
-    const withModel = await post(`${NS}/draw`, { drawModelId: "SenseNova-Draw" });
-    check("a saved model preference wins over the config default",
-      withModel.body?.ok === true && withModel.body?.drawModelId === "SenseNova-Draw" &&
-        withModel.body?.drawModelSource === "panel",
-      JSON.stringify(withModel.body ?? {}).slice(0, 220));
-
-    const drawOn = await post(`${NS}/draw`, { enabled: true });
-    check("the draw switch is saved as a panel value",
-      drawOn.body?.ok === true && drawOn.body?.drawEnabled === true && drawOn.body?.drawSource === "panel",
-      JSON.stringify(drawOn.body ?? {}).slice(0, 220));
-
-    const forget = await post(`${NS}/draw`, { forget: true });
-    check("a forget returns the SWITCH to the config default",
-      forget.body?.ok === true && forget.body?.drawEnabled === false && forget.body?.drawSource === "config",
-      JSON.stringify(forget.body ?? {}).slice(0, 260));
-    check("a forget preserves the model preference (saveModel null is the reset)",
-      forget.body?.drawModelId === "SenseNova-Draw" && forget.body?.drawModelSource === "panel",
-      JSON.stringify({ m: forget.body?.drawModelId, s: forget.body?.drawModelSource }));
-
     // -- the fence, on the mutation paths ----------------------------------
     const evilProvider = await readJson(await rawFetch(`http://127.0.0.1:${PORT}${NS}/provider`, {
       method: "POST",

@@ -244,7 +244,7 @@ export const NO_LOGIN_CODES = Object.freeze(new Set([
  * different questions. `CODE.CONSOLE_ERROR` is what the plugin reports; "额度
  * 那一栏一直是空的" is what someone actually types into a search box, an issue
  * tracker, or an agent's first turn. Documentation was reachable only through
- * TOPIC ("何时查 ROADMAP"), so a report phrased as a symptom had to be turned
+ * a topic index, so a report phrased as a symptom had to be turned
  * into a topic by a human who already knew the answer — precisely the people
  * who do not need the doc. `docs/TROUBLESHOOTING.md` is indexed by these ids,
  * and `doctor --json` reports them (`symptoms`), so the lookup runs in both

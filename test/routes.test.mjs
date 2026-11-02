@@ -475,7 +475,7 @@ async function withNetwork(stub, body) {
       String(snapshot.payload.quotaError?.code));
     check("the response carries auth state", snapshot.payload.auth !== undefined);
     check("it is marked ephemeral", snapshot.payload.auth?.ephemeral === true, JSON.stringify(snapshot.payload.auth));
-    check("the API tab block still arrives (key/provider/draw are console-independent)",
+    check("the API tab block still arrives (key/provider are console-independent)",
       snapshot.payload.llm !== undefined);
 
     const decision = panelDecision(snapshot.payload);
@@ -771,24 +771,6 @@ async function withNetwork(stub, body) {
       JSON.stringify(llm.models));
     check("the provider stays unregistered with the switch off",
       llm.registerProvider === false && llm.providerRegistered === false, JSON.stringify(llm));
-    // 0.4.2: the llm block now also carries the draw-tool switch's effective
-    // value and source. Without a saved panel value they are the config
-    // defaults.
-    check("the llm block carries the draw switch state",
-      llm.drawEnabled === false && llm.drawSource === "config",
-      JSON.stringify({ drawEnabled: llm.drawEnabled, drawSource: llm.drawSource }));
-    // 0.4.2+: the draw block is emitted whenever the catalog is present — an
-    // AUTO pick (no configured drawModelId) still addresses the catalog's
-    // first image model, so `drawModel` + the candidate set are deployment
-    // facts, not operator preferences. Only `drawPreferredModel` is
-    // preference-shaped and absent here.
-    check("auto-pick still reports drawModel + candidates when the catalog exists",
-      llm.drawModel === "sensenova-u1.5-lite" &&
-      llm.drawCandidateCount === 1 &&
-      JSON.stringify(llm.drawCandidateIds) === JSON.stringify(["sensenova-u1.5-lite"]),
-      JSON.stringify({ drawModel: llm.drawModel, candidates: llm.drawCandidateIds }));
-    check("auto-pick carries no operator preference",
-      !("drawPreferredModel" in llm), JSON.stringify(llm.drawPreferredModel));
     check("the llm block never carries the key",
       !JSON.stringify(llm).includes("sk-test-key-for-routing-only"));
   }).catch((error) => fail("M: vision publish without settings service", error));
@@ -1266,7 +1248,7 @@ async function withNetwork(stub, body) {
           enableSwitch.payload.registerProvider === true, JSON.stringify(enableSwitch.payload));
 
       // Q2. The picker's own read: the snapshot hands the roster to it.
-      // Rows carry the per-model availability markers (ROADMAP §2.2): the
+      // Rows carry the per-model availability markers: the
       // panel shows every chat model, greyed with the reason when its pool
       // is exhausted, so `available`/`quotaExhausted` travel even when true.
       // `contextWindow` rides too: the catalog stub declares no context

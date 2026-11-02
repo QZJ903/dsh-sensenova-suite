@@ -44,7 +44,7 @@ const GENERIC_FACTS: ModelFacts = {
 
 /** 静态档案表（deepseek-v4-pro 已下线，不收录）。
  * 行号锚点：6.8 参数表 :543-560；v4-flash :1288-1320；deepseek-flash :1665-1673；
- * glm-5.2 :2022 起；kimi-k3 :2403-2451；Responses §3.2（升级计划 docs/sensenova-upgrade-plan.md:111-114）。 */
+ * glm-5.2 :2022 起；kimi-k3 :2403-2451；Responses §3.2。 */
 const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['sensenova-6.8-flash-lite', {
     id: 'sensenova-6.8-flash-lite',

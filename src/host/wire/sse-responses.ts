@@ -1,5 +1,4 @@
-/** Responses SSE → 宿主 StreamChunk 翻译（make-responses-default-wire-protocol 3.x；
- * docs/sensenova-upgrade-plan.md §6.6）。
+/** Responses SSE → 宿主 StreamChunk 翻译（make-responses-default-wire-protocol 3.x）。
  *
  * 事件映射：output_item.added → block-start（output_index 即 block index；
  * item.type reasoning/message/function_call → 推理/文本/工具块）；

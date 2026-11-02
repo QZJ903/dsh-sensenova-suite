@@ -34,11 +34,8 @@
 
 ## 文档
 
-- [SETUP.md](docs/SETUP.md) —— 配置项逐键说明（含池与出图/视觉全部键）
-- [TESTING.md](docs/TESTING.md) —— 测试套件名册
-- [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) —— 症状 → 排查
-- [retry-policy.md](docs/retry-policy.md) —— 429 分类与退避教义
-- [PROVIDER-HOT-RELOAD.md](docs/PROVIDER-HOT-RELOAD.md) —— 模型接入热更新
+- [retry-policy.md](docs/retry-policy.md) —— 429 分类与退避教义（本仓自有）
+- **上游参考件**：[docs/upstream/](docs/upstream/README.md) 是 token-plan v0.8.3 的逐字原文，描述的是**上游插件**、非本仓现状——[SETUP](docs/upstream/SETUP.md) / [TESTING](docs/upstream/TESTING.md) / [TROUBLESHOOTING](docs/upstream/TROUBLESHOOTING.md) / [PROVIDER-HOT-RELOAD](docs/upstream/PROVIDER-HOT-RELOAD.md) 等均在其内
 
 ## 兼容性
 

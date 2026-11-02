@@ -122,7 +122,7 @@ export interface HeldThrottle {
 /**
  * The five mutable fields the four blocks share (see the module doc above).
  *
- * Declared rather than inferred (docs/IMPROVEMENTS.md §8): under
+ * Declared rather than inferred: under
  * strictNullChecks a bare object literal pins each field to its INITIALIZER's
  * type, so `cached: null` became the type `null` and `rejected: new Set()`
  * became `Set<never>` — every reader downstream then saw `never`. The runtime

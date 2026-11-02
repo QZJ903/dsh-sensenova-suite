@@ -11,14 +11,13 @@ tmp/
 # Box-Agent 运行时任务状态：本机自动写入，绝不进版本库
 .box-agent/
 .box-agent-scratch/
-.zcode/
 .agnes/
 
 # 依赖与构建（link 安装下通常没有实体目录，保险起见）
 node_modules/
 
-# 无锁文件是设计决定（ci.yml：peer 包解析不到任何 registry，缓存键故意用
-# package.json）；本机 `npm install` 生成的锁是副产物，绝不误卷入提交。
+# 无锁文件是设计决定（peer 包解析不到任何 registry，缓存键故意用
+# package.json；本仓无 CI）；本机 `npm install` 生成的锁是副产物，绝不误卷入提交。
 package-lock.json
 dist/
 build/
@@ -33,7 +32,7 @@ build/
 # 走 pnpm git-dep，pnpm 11 在没有 allowBuilds 批准时**不会**替它跑 prepack /
 # prepare——若 lib/ 不入库，用户打 GitHub 仓库地址装出来的插件就没有宿主入口
 # （lib/index.js），卡片直接失效。策略：改 src/ 后跑 `npm run build` 并把 lib/
-# 与 client.js 与源码一起提交（CI 的 build-freshness job 有新鲜度门禁：重建后
+# 与 client.js 与源码一起提交（产物新鲜度由 test/build-gate.mjs 门禁：重建后
 # `git diff --exit-code -- lib client.js` 必须为空，否则即「源码动了却没重生成产物」）；
 # 发到 registry 的那一份仍由 prepack 现场重建，两条路径都不靠手工。
 # 注意：不要把 lib/、client.js 加回忽略（下面两行已删除）。

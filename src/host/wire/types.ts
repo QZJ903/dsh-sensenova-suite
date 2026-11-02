@@ -1,4 +1,4 @@
-/** 模型能力档案（add-model-facts；docs/sensenova-upgrade-plan.md §6.2）。
+/** 模型能力档案（add-model-facts）。
  *
  * 数据源：官方文档静态事实（/tmp/sn_docs_zh.md）+ /v1/models 目录实测值。
  * 优先级：目录实测值 > 静态档案（见 wire/facts.ts 的 factsFor）。

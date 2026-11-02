@@ -238,5 +238,9 @@ export function parseRetryAfterMs(value: string | null | undefined, now: number 
   return delta > 0 ? delta : undefined;
 }
 
-/** 提交给 provider 重试层的延迟上限（毫秒）；池类下限与此一致（provider 实测定值）。 */
+/** 提交给 provider 重试层的延迟上限（毫秒）：本地退避与非配额 429 的 Retry-After 均受
+ * 此约束，同时作为重试策略退避单次上限；池类下限与此一致（provider 实测定值）。
+ * fix-sensenova-429-quota-retry（2026-09-04 实测）：原 3000ms 与配额窗口量级不符——
+ * TPM 为 60 秒窗口，提升到 60000ms（spec 允许区间 60–120s 的下沿）。
+ * 唯一定义点（2026-11-03 U4 审计 D2：adapter 本地副本已删，消费方统一经 import 引用）。 */
 export const PROVIDER_RETRY_AFTER_CAP_MS = 60_000;

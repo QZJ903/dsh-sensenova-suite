@@ -81,7 +81,6 @@
         visionModel: sensenova-6.8-flash-lite
         visionImageMode: image_url
         visionTimeoutMs: 120000
-        visionBridgeMode: auto
         visionBridgePrompt: ""
         # Renew the console token this many seconds before it actually expires,
         # so a poll never races the expiry boundary. 120 = two minutes.
@@ -152,22 +151,3 @@
         maxTokensOverrides:
           deepseek-flash: 393216
           kimi-k3: 131072
-        # ------------------------------------------------------------------
-        # the Host exposes a tools service, the agent gains a
-        # `sensenova_draw_image` tool that POSTs to
-        # `{apiBase}/images/generations` with the panel-saved
-        # `SENSENOVA_API_KEY`. Draw models are identified from the catalog's
-        # own `output_modalities` (never a name regex), the key is resolved
-        # per call, and a failed draw starts a 30s cooldown. Off by default -
-        # an agent tool is a Host-wide change; a Host without the tools
-        # service simply never sees it.
-        #      (e.g. sensenova-u1-fast).
-        #      clamped into [5000, 1800000] (30 min is the ceiling).
-        # ------------------------------------------------------------------
-        # Host exposes a `ctx.web` service, the Raccoon hosted `web_search` MCP
-        # server is registered as a search provider, so DSH's own `web_search`
-        # tool searches through it with the panel-signed-in Raccoon credential.
-        # The plugin takes the search selection over (remembering whatever it
-        # displaced) so a second provider does not raise WEB_PROVIDER_AMBIGUOUS.
-        # Off by default - a search provider is a Host-wide change.
-        # ------------------------------------------------------------------

@@ -40,7 +40,7 @@ import { profileSegment, profileStateDir } from "./state-store.ts";
 import { createApiKeyStore } from "./api-key-store.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "./key-orchestrator.ts";
 import { bucketCountsStrike } from "./rate-classify.ts";
-import { createFilePoolStore } from "./pool-store.ts";
+import { createFilePoolStore, emptyPoolRecord } from "./pool-store.ts";
 import { createImageSwapper, installCapabilityOverride } from "./vision/bridge.ts";
 import { createProviderPublisher } from "./provider-publish.ts";
 import { registerRoutes } from "./routes.ts";
@@ -114,8 +114,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // Annotated `ReturnType<typeof createAuth> | null` rather than `any`:
   // under strictNullChecks a `null` initializer would pin the type to `null`
   // and make the `createAuth(...)` assignment below — plus every later `auth`
-  // read — a type error, which is what an `any` annotation was working around
-  // (docs/IMPROVEMENTS.md §8). Naming the shape costs nothing at the call site
+  // read — a type error, which is what an `any` annotation was working around.
+  // Naming the shape costs nothing at the call site
   // and now lets the compiler check the two places `auth` is consumed.
   let auth: ReturnType<typeof createAuth> | null = null;
   if (configError === null) {
@@ -240,7 +240,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // params 需要同步读，所以本地持一份记录：本路由的每次写后刷新 + 探测时钟兜底刷新
   // （外部进程直改状态文件的可见性延迟 ≤ 一个探测周期，可接受）。
   const poolStore = createFilePoolStore({ profile, logger: ctx.logger });
-  let poolRecord: import("./pool-store.ts").PoolStoreRecord = { version: 1, disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {}, keys: [], toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}, thinking: {} };
+  let poolRecord: import("./pool-store.ts").PoolStoreRecord = emptyPoolRecord();
   let reregisterImageTools: (() => Promise<void>) | undefined;
   // 发布签名引用（publisher 在下方才创建，TDZ 规避同 reregisterImageTools 模式）。
   let publishSignature: { signature: string } | undefined;
@@ -367,7 +367,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // initializer: a default initializer types the parameter from it, so without
   // the annotation it read as `never[]` and `publisher.publish` (which takes a
   // `string[]`) was unreachable — and the wrapper's OWN type in `Wiring`
-  // declared the parameter as `string[]` (docs/IMPROVEMENTS.md §8).
+  // declared the parameter as `string[]`.
   const publishProvider = (entries: unknown, enabledIds: unknown, unavailableModelIds: string[] = []) =>
     publisher.publish(entries, enabledIds, unavailableModelIds);
   const releaseProvider = () => publisher.release();
@@ -543,10 +543,11 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     poolRefresh: refreshPoolRecord,
     poolSnapshot: async () => {
       const keys = await poolKeyRows();
+      const snap = orchestrator.snapshot(); // 一次取用：poolGrid 与 inflight 同帧（U4 顺带⑤）
       return {
         keys,
-        poolGrid: orchestrator.snapshot().poolGrid,
-        inflight: orchestrator.snapshot().inflight,
+        poolGrid: snap.poolGrid,
+        inflight: snap.inflight,
         modelProtocols: poolRecord.modelProtocols,
         globalConcurrency: effectiveConcurrency(),
         // 多模态面板设置（已保存值；面板以此渲染控件初值）。

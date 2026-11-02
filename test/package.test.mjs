@@ -291,12 +291,13 @@ check("no hand-written .js source sits at the package root", stray.length === 0,
 
   // The allowed commit types live in TWO homes: the linter's own TYPES list
   // (which now drives both of its regexes AND the hint it prints) and the
-  // sentence in docs/CONTRIBUTING.md §1 that documents the rule to humans. A
+  // sentence in docs/upstream/CONTRIBUTING.md §1 that documents the rule to humans. A
   // doc cannot import a constant, so pin the two against each other — the same
-  // treatment the duplication threshold below gets.
+  // treatment the duplication threshold below gets. （本仓 CONTRIBUTING 现为
+  // token-plan 原文参考件；该句与旧 suite 版逐字相同，钉子照常成立。）
   try {
     const lintSrc = readFileSync(join(root, "test", "commit-lint.mjs"), "utf8");
-    const contributing = readFileSync(join(root, "docs", "CONTRIBUTING.md"), "utf8");
+    const contributing = readFileSync(join(root, "docs", "upstream", "CONTRIBUTING.md"), "utf8");
     const codeTypes = (lintSrc.match(/const TYPES = \[([^\]]*)\]/)?.[1] ?? "")
       .match(/"([a-z]+)"/g)?.map((s) => s.slice(1, -1)) ?? [];
     const docTypes = (contributing.match(/必须有 `type:` 前缀（([^）]*)）/)?.[1] ?? "")

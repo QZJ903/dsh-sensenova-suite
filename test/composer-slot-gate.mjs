@@ -1,5 +1,5 @@
 /**
- * composer 用量胶囊的 peer 契约门禁（ROADMAP §6.3「落地前确认②」）。
+ * composer 用量胶囊的 peer 契约门禁。
  *
  * ## 断什么
  *
@@ -299,7 +299,7 @@ console.log(JSON.stringify(results, null, 2));
 const failed = results.filter((r) => !r.pass);
 if (failed.length > 0) {
   console.error(`\n${failed.length}/${results.length} check(s) FAILED`);
-  console.error("composer 用量胶囊的 peer 契约已漂移：按 ROADMAP §6.3 换座席或放弃该功能。");
+  console.error("composer 用量胶囊的 peer 契约已漂移：换座席或放弃该功能。");
   process.exit(1);
 }
 console.log(`\nall ${results.length} checks passed (${scopes.length} DSH client copy/copies)`);

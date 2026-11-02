@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * Gate for the build (docs/ARCHITECTURE.md / ROADMAP §6.2).
+ * Gate for the build (docs/upstream/ARCHITECTURE.md).
  *
  * `src/` holds ALL sources (host + client); `lib/` and the root `client.js`
  * are GENERATED artifacts, now VERSIONED (committed alongside src/ — see

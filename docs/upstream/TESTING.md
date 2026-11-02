@@ -1,0 +1,128 @@
+# 测试体系（Testing）
+
+本插件以**离线单元测试**为主：网络层全部打桩，密码用临时生成的密钥加密，绝不发往商汤。目标是守住三条关键路径——登录/续期、令牌存储、路由与面板决策。
+
+---
+
+## 1. 运行
+
+```powershell
+npm test       # 跑完整门禁（项数与编排的唯一事实源是 test/suites.mjs，`npm run test:list` 只列不跑）。runner 会跑完每一个再汇总，**任何一项失败都不会吞掉后面的**——这正是 PITFALLS §30 根因 2 的修法
+npm run test:list  # 只列名册不执行
+
+# 按域裁剪（AGENTS.md 要求按域跑，别连着全量；子串匹配，不是 glob）
+node test/run-all.mjs --only=parsers      # 只跑 parsers
+node test/run-all.mjs --only=raccoon     # 四个 raccoon 套件
+node test/run-all.mjs --skip=gate        # 跳过含 "gate" 的 4 项：duplication/typecheck/build 三个构建型 + e2e-gate（子串匹配）
+npm run commit:lint  # 提交信息底线（零依赖）：检查 HEAD 一条提交；CI 检查 origin/main..HEAD 内的新提交（见下方 commit 红线）
+npm run test:e2e    # 只跑端到端：真 Host + 假平台，需 dsh CLI 在 PATH
+npm run test:live   # 仅 live-jwks.test.mjs，需联网，验证 JWKS 文档可达
+npm run test:live:contract # 仅 live-contract.mjs，需联网 + SENSENOVA_API_KEY，重放商汤推理契约
+npm run test:live:raccoon # 仅 live-raccoon.mjs，需联网，第二上游（小浣熊）网关契约；无凭据跑 L1 路由存在性，带 RACCOON_ACCESS_TOKEN 跑 L2 读取契约
+npm run test:errorfix    # 仅 error-fix.test.mjs（429 自愈的 404/429 分诊面；名册内，npm test 已覆盖，直跑是便利入口）
+npm run test:peer-contract # 仅 peer-contract.test.mjs（peer 可达时追加真跑、缺席自 SKIP；名册内，同上）
+```
+
+测试**无需 `npm install`**：`@deepseek-ai/dsh-credentials` 等是 Host 里的 peer 依赖，由 `test/peer-roots.mjs` 就地解析（`$DSH_HOME` → 插件 `node_modules` → 默认安装位置 `~/.dsh/dsh-asar-unpacked` → 打包安装目录 → 工作区内的 `@deepseek-ai/dsh` 元包 → **npm 全局 CLI 的运行时树**，最后两项是为「没装 Host 的机器」准备的，CI 正属此类）。找不到时会列出每个候选根**各自失败的原因**，而不是只报搜索路径；确认缺的是环境而非代码后，套件经 [`test/env-skip.mjs`](../test/env-skip.mjs) **loud skip** 退出 0——汇总里单列成 `SKIPPED` 而不是混进 passed，并写明这轮因此没验证什么。想看被豁免前的那个红用 `DSH_TEST_STRICT_SKIP=1 npm test`（CI 恒为此模式）。**判断 peer 到底可不可用，要用 `test/peer-roots.mjs` 的 `loadPeer` 去试，不能用裸 `import('@deepseek-ai/…')` 去试**：插件自己的 `node_modules` 里本来就没有这些包，裸 import 必然失败，而 peer 往往在全局 CLI 的运行时树里可用——此时套件是**真跑**，不是 SKIP。`config.test.mjs` 不依赖任何 peer，干净检出即可跑。
+
+> **CI 侧的前车之鉴（2026-10-01，见 [AGENTS.md](../AGENTS.md)「验证」段）**：`npm install --legacy-peer-deps` 会**跳过** peer，所以干净 runner 上这些套件既没有 peer 也没有运行时——硬门禁一度**连续一整天每次都红在第二个套件**（`store.test.mjs`），当时的 `set -e` 链还把它后面的套件一起吞掉（当时记作「后面 17 个套件」）。**根因 2 与根因 3 已于 2026-10-05 一并修掉**：套件名册收进 `test/suites.mjs`，`npm test` 与 `ci.yml` 的 offline job 调同一个 `node test/run-all.mjs`——跑完全部再汇总退出码，于是「门禁红」不再可能是「门禁没在验证」。peer 侧仍需 `ci.yml` 先装 CLI，`peer-roots.mjs` 据此解析。因此：**CI 里这类报错是回归，不是环境问题**；而「干净检出上跑不了」只对本机成立。
+
+---
+
+## 2. 各测试文件职责
+
+| 文件 | 守什么 |
+|---|---|
+| `test/auth.test.mjs` | JWE 封包（RSA-OAEP + A256GCM）round-trip、PKCE（S256 向量）、登录分类（错密码 / 锁号 / 限频 / 验证码）、拒绝消息取平台原话、**登录 trace 成功与失败都要上报**、**错误码 taxonomy 一致性** |
+| `test/store.test.mjs` | 令牌存储与续期、并发轮询只触发一次刷新、401 拒绝记忆、节流状态跨进程、env 账号识别、内存态 ephemeral、**真实凭据服务解析器校验写入记录**（非 `grant` kind 即红） |
+| `test/store-baseline.test.mjs` | **token-store 全行为冻结基线**：17 个场景、48 帧，把凭据服务调用序列（read/modify/delete/resolve/set/unset）、节流存储读写、grant/ref 落盘、错误码与完整 `state()` 逐帧冻结在 `test/baselines/token-store-behavior.json`；拆分/改动 token-store 前后必须零漂移（见 §5） |
+| `test/routes.test.mjs` | 把面板的判断逻辑**原样跑在真实接口响应上**，专门守住「无凭据服务时表单仍可达」这条路径；同源校验、body 上限、跨域拒绝、**一个请求只答一次**；第三步的 api-key 路由（credentials/memory/env 三来源、不回显、forget 不动环境变量）、快照 `llm` 块与 provider 注册/签名去抖/无 llm 降级（假 adapter 工厂经 apply 第三参注入，不碰真 peer） |
+| `test/credential-guard.test.mjs` | **凭据不许从 `str()` 里读**：以 AST 扫遍 `src/host/**/*.ts`（`routes/`、`token-store/` 都在范围内），凡 `str()` 的**第一实参**链路上出现凭据字段名即红——判据是语义的（名字**以 `SECRET_KEY` 的任一别名结尾**，再补一个 `credential`），不是形状枚举。这道围栏取代原来的 F5c（`test/panel.test.mjs` 里那段十形状正则）：F5c 在这两个目录自己的地盘上仍是绿的，而当时还有 8 处读取走 `str()`——锚点要求 `= str(`，所以四条对象字面量写法（`refreshToken: str(...)`）整类看不见；`routes/` 根本没被 `readdir`；`catalogToken`、`source.accessToken`、`payload.refreshToken` 不在枚举里；还有一条躲在模板字符串 `${str(...)}` 里。词表从 `util.ts` 的 `SECRET_KEY` **导出后直接读取**（脱敏规则 5/6/7 也改成读同一个常量，此前三个手抄字面量已经漂过一次），脱敏名单加一个名字即同时加宽这道围栏；`PASSWORD_REF`（env 引用名）、`credentials`（容器）、`office_identity`、`nickname`、`scope`、`message` 一类近邻必须保持绿。用例还钉住「围栏能咬」（14 条历史形状全红 / 9 条近邻全绿 / 非 util 的同名 `str` 不算）与「走查真的走到了树里」（文件数、调用数下限 + `routes/`、`token-store/` 必须在扫描集内）。 |
+| `test/redaction-closure.test.mjs` | **脱敏面必须收口**：规则只有一份（`util.ts` 的 `redactSecrets`），路由的错误文本只有一条出口（`routes/http.ts` 的 `redactedError`）。两条围栏都是**形状围栏**而不是行为围栏——手抄的脱敏与共享的收口**输出逐字节相同**（2026-10-21 的审查正是因此分不出两者），所以只有「另一份抄本不在那里」才是可断言的。围栏钉住四件事：① 规则集仍认**裸 JWT**（没有键名的令牌，2026-10-21 补上的那条；删掉它不改变任何别的用例的输出，没有这道围栏那次修复就是可静默回退的）；② 具名凭据仍被脱敏、**普通散文不被误伤**（"the token is expired" 原样保留，防过度脱敏）；③ 每个有 `catch` 的路由模块都必须走 `redactedError`；④ 没有路由模块手搓 `redactSecrets(error instanceof Error …)` 这样的抄本。判据前先剥注释——修复自己的说明文字点着这些表达式，能被注释满足的围栏什么也守不住。变异验证：删掉 JWT 规则、把手抄抄本放回 `routes/models.ts` → 对应用例转红。 |
+| `test/panel.test.mjs` | 面板「显示什么」的决策，**从 `client-surface.js` 物化出的真实 `panel` 测试面取决策函数**（见 `panel-decision.js`），而不是手写副本——逻辑一变测试自动跟；**中英文字典键集一致**；控制台故障不伪装成登录表单；**每个字典键都有消费者**（字面量可达的范围，`entry.label` 曾两边各留一份却零调用）；**卡片名只有一个来源**（`locale/<lang>.json` 的 `meta.title`；卡内不再复述插件名，字典里已无 `panel.title`，渲染面钉住它的缺席——两个名字曾在同一屏隔 32px 并存）；**轮询节奏来自 Host 而非字面量，且两个 tab 共用同一个循环**（这条锚点随循环抽到 `use-polling-interval.ts` 一同迁移，退避不得低于一分钟） |
+| `test/render.test.mjs` | 面板「数字怎么上屏」的渲染，`panel-render.js` 从 `client-surface.js` 物化出的真实 `panel` 测试面取组件、以记录型 `h` 在 Node 求值：`used/limit` 写反、剩余量丢失、进度条色阶错档、除零 NaN 都会红；**卡内不复述插件名**——`PanelPage` 首帧的渲染文本里不得出现 `panel.title`（名字只由外壳打印，见 PITFALLS §43）；同一个循环驱动 `ModelRoster` 与 `RaccoonRoster`（行骨架共用 `model-row.ts`，见 PITFALLS §34）；小浣熊 tab 的**各个帧**由无 hook 的 `RaccoonCard` 挂载后逐帧钉住——余额折行、网关拆解、两个凭据时钟、过期告警、两种未注册措辞（PITFALLS §35）；**H 组用会真跑 effect 的微型 React + 可控 `document`/定时器驱动共用轮询循环 `use-polling-interval.ts`**——可见即轮询、隐藏即停（含"挂载时已隐藏"）、错误退避不低于一分钟且不加速慢节奏、**退役的 `enabled` 开关已删**（任何挂载都会轮询，传 `{enabled:false}` 也不能静音、照常按 cadence 排程）、0 ms 被钳到 1 ms |
+| `test/render-dom.test.mjs` | **产物的真实渲染档**：把根 `client.js`（产物，非源码）eval 进 jsdom 窗口、经 `__ModuleLoader__` 注册缝捕获，用 devDeps 的**真 React 19** 物化工厂并以 `react-dom/client` 挂载——额度卡的算术走真 DOM 映射（`aria-valuenow` 属性、`style.width` 内联样式都在屏幕上才对）；`AccountForm` 的 hook 往返第一次由真渲染器实测：受控输入、显/隐密码切换、空字段本地拒绝（不发请求）、登录成功后**密码即刻离开组件状态**（红线 1 在产物级取证）；`ModelPicker` 的草稿/保存状态机用**真 en 字典**渲染——数字是 `format` 插值出来的（identity `tt` 看不见），钉住「草稿≠Host 才出未保存」「saved 声明等 poll 回声」「Host 拒绝保留编辑与告警」「撤销回到 Host 值」，并走通**全勾 → 空列表极端**的 DOM 往返（面板与 Host 把同一条线读成同一个意思）；`PanelPage` 的轮询生命周期跑在 **jsdom 真定时器**上——首帧 loading 门（`loadedOnce` 落定前不摆登录表单）、Host 声明的 1s 节奏真的驱动 interval（30s 默认做不到这么密的计数增长）、卸载后无孤儿轮询。刻意不抄 qoder 的 bundle 文本抓取——产物本身就暴露同一 `panel` 面；devDeps 缺席时醒目 SKIP（CI offline job 装了 devDeps，真跑）。**改 `src/client/` 后必须先 `npm run build`**：本档 eval 的是产物，不 build 就还在测你改之前的那一版（PITFALLS §41） |
+| `test/parsers.test.mjs` | **控制台响应解析层**（纯函数、无网络）：字符串数值与 epoch 归一（§11）、`reset_at="0"` 不得读成 1970、`checkShape` 双向漂移检测（§12 `shapeWarnings` 的来源）、trend 对 points **求和**而非取首个 |
+| `test/snapshot-aggregate.test.mjs` | **`buildSnapshotBody` 的三态契约**（peer-free，纯函数 + 桩 fetch）：「没有模型被限尽」与「这次轮询失败了」过去都塌成同一个空列表（`parsePools(null)` → `{pools:[]}`），下游因此把一次读失败显示成"额度充足"。这里钉住三态可分，并覆盖聚合器对 token/模型/池各来源的归一 |
+| `test/provider-rollback-guard.test.mjs` | **provider 发布的负向回滚护栏**（peer-free）：`publish-core.ts#swapRegistration` 的失败分支（PITFALLS §19）——旧 pair 已释放后新注册抛错，必须把上一个 pair 放回去，否则一次坏发布会拖垮正在服务的模型。`test/provider.test.mjs` 只驱动 happy path 与 `disposed` 门，这条失败分支只有本套件覆盖 |
+| `test/switch-precedence.test.mjs` | **开关取值优先级的唯一方言**（peer-free）：`switch-precedence.ts` 统一「面板已存值 vs 配置默认值」的裁定。此前这条规则在三处被手抄成两种近似方言（布尔开关 / 字符串偏好）外加来源标签，第四处复制无从发现；同时钉住「无默认值方言」被**故意不服务**（小浣熊开关回落到 `off`，其读法归它自己的 store） |
+| `test/provider.test.mjs` | **第三步纯逻辑层（无 peer、干净检出可跑）**：`llm-models` descriptor 映射（vision 自动识别、`supportsDeveloperRole:false`、声明目录权威 maxTokens 值（有则声明、缺则回落不声明）、contextWindow fallback、去重、允许清单空=不过滤）、`catalog-store`（版本号拒绝、损坏即忽略、原子往返、只读目录降级内存）、`provider-store`（开关归一、面板值持久与重挂载读取、版本号拒绝、非布尔即未设置、forget 回退配置默认）、`api-key-store`（credentials→memory→env 优先级、save/forget、forget 不动环境变量、凭据服务故障穿透） |
+| `test/provider-refresh.test.mjs` | **后台 provider 刷新器的门槛算术**（peer-free，假定时器 + 桩 fetch）：钉的是「**什么时候**跑、一次 tick 允许碰什么」，引擎本身归 `snapshot-aggregate.test.mjs`。`providerRefreshMinutes = 0`（或 arm 时 publisher 已 dispose）**什么都不排**——插件保持纯面板形态；tick 时生效开关为 OFF 则**一次上游读都不做**（OFF 是 opt-in 默认值，必须每个 tick 都尊重、不是只在 arm 时看一眼）；开关 ON 才驱动真聚合（额度翻转 → `publisher.publish` + `catalogStore.setUnavailable`）。刻意不冻墙钟：这里没有时间形状断言 |
+| `test/config.test.mjs` | **配置单一事实源钉子**：`CONFIG_DEFAULTS` 与 `cordis.patch.yml` 不得静默漂移；不依赖 peer，干净检出即可跑 |
+| `test/package.test.mjs` | **打包清单 + 门禁名册双钉子**：从 `main`/`exports` 走静态 import 闭包，可达模块必须在 `files` 里（曾漏 5 个 → tarball 加载即崩）；反向钉住"`files` 里却无人引用"的死重；**钉住「磁盘上的 `*.test.mjs` ↔ `npm test` 链 ↔ CI 离线 job」三处一致**（retry/draw 曾各自绿着躺在磁盘上、两个门禁都不跑它们，就是这个钉子要防的漂移）；`live-jwks.test.mjs` 是唯一显式豁免（联网档，默认不得进链）；不依赖 peer，干净检出即可跑 |
+| `test/docs.test.mjs` | **文档一致性钉子**：内部链接全部可解析、同一张表格不出现在 ≥2 个文件（防多源事实）、根 `README.md` 行数上限、`DSH-PLUGIN.md` 教学快照与 `package.json` 同步、**`API.md` 快照示例与契约键集一致**、**文档复述的配置默认值 / 缓存 TTL / 路由 body 上限必须等于源码常量**（数值副本看守——SETUP.md 的配置表此前自称被 `config.test.mjs` 钉住，实际全仓没有测试读它）、**代码/测试里引用的 `ADR-NNN` 必须在 `docs/ADR.md` 存在**（第 12 项只校验账本条目的形状，从不校验存在性——ADR-006 曾被引用 27 处而不在账本，全绿放过）；不依赖 peer，干净检出即可跑 |
+| `test/contract.test.mjs` | **商汤推理契约回归（离线档）**：`test/baselines/sensenova-contract.json`（冻结 2026-09-29 实测：9 目录模型的 thinking 形态 / reasoning_effort 支持面 / 采样参数 / context_length / 模态 / 404-403 标记）驱动 `llm-models.ts` 的 `toPiDescriptor` / `isChatModel` / `buildDescriptors` / `exhaustedModelIds` / `thinkingLevelMapFor` 与 `parsers.ts` 的归一、`llm-retry.ts` 的 429/quota 分类；红 = 代码偏离冻结契约，修法走 `SENSENOVA-API.md` §7 + 基线刷新 |
+| `test/retry.test.mjs` | **429 自愈逻辑层（peer-free）**：`buildRetryPolicyConfig` 形状（排除 QUOTA/ACCOUNT_QUOTA、保留 RATE_LIMIT）、`exhaustedModelIds`、`buildDescriptors` 排除借尽模型、`rosterWithAvailability` 标记；peer 可达时追加断言 `resolveRetryPolicy` 的解析结果；不依赖 peer 的部分干净检出可跑 |
+| `test/draw.test.mjs` | **出图模块（peer-free，如 `provider.test.mjs`）**：端点拼接（`apiBase` 各种写法归一）、结构化识别 image-output 模型（看字段、绝不用名字正则）、挑选优先级、wire body 钳制、响应解析、失败分诊（429 配额 vs 限频）、`drawOnce` 对假 fetch（成功/分类失败/超时）、失败冷却门、`defineDrawTool` 用直通 `defineTool` + 假 store 端到端 |
+| `test/error-fix.test.mjs` | **429 分诊纠正（peer-free）**：`llm-error-fix.ts` 的 `reclassifyFinish` 把误判的 QUOTA 纠正回 RATE_LIMIT；真配额耗尽与已限频原样放行；`isQuotaExceededError` 命中面验证；**`reclassifyReason` 的 8 条判据路径逐一钉住**（路径先定、布尔后派生——判定分支从此既可 grep 也可单测，不再只活在一个裸布尔的实现里） |
+| `test/peer-contract.test.mjs` | **peer 契约护栏（peer 可达时）**：钉死「peer 判 QUOTA + 含限频信号 → 本插件 `reclassifyFinish` 纠正回 RATE_LIMIT」的端到端行为契约；`extractStructuredType` 必须仍能从 peer 拼好的 message 回捞结构化 type；peer 缺席则 SKIP |
+| `test/doctor.test.mjs` | **CLI 诊断（peer-free）**：`doctor.ts` 对状态文件只读扫描——provider / draw / catalog 开关与生效值、profile 分段目录、零凭据读取 |
+| `test/raccoon.test.mjs` | **第二上游（peer-free）**：小浣熊协议层（扫码信封解析、refresh 轮换、余额/目录读取）、两个 store、描述符映射、publisher 状态机、QR 编码器、开关 store |
+| `test/raccoon-status.test.mjs` | **小浣熊面板读模型（peer-free）**：`raccoon-status.ts` 的 `readRaccoonStatus` 直接以假 store/假缓存驱动——终态事件在**首个 await 之前**读取（T3 修复的排序）、`?debug=1` 脚手架只在显式 opt-in 时出现且代理密码/遮蔽凭据只以指纹出网、缓存键按**凭据指纹**且余额 60 s/目录 300 s（真 `coalesced-fetch` 对桩 fetch 验一次窗口一次调用）、roster 的 live/empty/unreadable 三态、过期凭据的原地续期与过期事实、可选 switch/store 缺席时降级不崩 |
+| `test/raccoon-search.test.mjs` | **小浣熊内置联网搜索（peer-free，见 [ROADMAP.md](./ROADMAP.md) §6.1.7）**：MCP over HTTP 传输（streamable，`initialize` → `tools/call`、`Mcp-Session-Id` 回传、SSE 解析 + 三种错误信封）与 `RaccoonSearchProvider` 挂 `ctx.web` 的注册形状、`searchProviderId` 接管语义 |
+| `test/raccoon-web.test.mjs` | **小浣熊搜索的接管与恢复（peer-free）**：`webSearchEnabled` 开关接管 `searchProviderId`（防 `WEB_PROVIDER_AMBIGUOUS`）、teardown 恢复被顶掉的后端 |
+| `test/state-segmentation.test.mjs` | **PITFALLS §23 分段形状门禁（peer-free，只读源码）**：catalog / provider / draw / raccoon-switch 四个开关态必须走 `profileStateDir(name, profile)`、`profileStateDir(name, null)` 必须回退共享目录、throttle 与凭据 store（api-key / raccoon）**故意不分段**；`index.ts` 把 `profile` 只传给那四个、`createFileThrottleStore()` 不得带 profile；别名「统一它们」即红 |
+| `test/silent-catch.test.mjs` | **源码卫生：没有可执行语句的 `catch` 必须自带说明（peer-free，只读源码）**：`src/` 全部 `.ts` 先掩码注释**与字符串**再做花括号配对，逐个 try/catch 断言「体内无语句」的都带注释——注释正是「有意为之」与「没人想过」的分界（现有全部站点都写了，所以落地即绿，它守的是下一个）。`draw.test.mjs` §12 只用手抄的 2 个 `degrade("…")` 标记守着出过 bug 的那两条路径，本套件是同一缺陷类的普查。字符串感知是必须的：源码里满是 `"https://…"`，那个 `//` 会开出行注释、把它**之后**的真实代码一起掩掉。三条下限（扫到的文件数 / try/catch 数 / 无语句 catch 数）保证掩码器一旦坏掉是**红**、而不是更安静地通过。**有意划在范围外**：`.catch(() => {})` 承诺处理器（数十处，绝大多数是 `rm`/`deleteRecord` 的尽力而为）——要求它们全体写说明是负担而不是覆盖 |
+| `test/host-range.test.mjs` | **宿主 peer 版本宇宙对齐门禁**（peer-free，零安装，只读 golden 与 manifest）：把 10 条 `@deepseek-ai/dsh-*` peer 范围拿去全量已发布宇宙跑一遍，冻结结果进 `test/host-range.golden.json`；每次对拍，红了点名哪个新版本被新放行或新拒绝，不靠手改决定 ABI 边界 |
+| `test/market-entry.test.mjs` | **投稿副本的市场侧门禁**（peer-free，零网络，需 `js-yaml`）：`awesome-dsh-plugin-submission/eghrhegpe__dsh-connect-sensenova-token-plan.yml` 用市场同款解析器（js-yaml）读出来，再拿「市场条目规则」的镜像逐条对拍——未知键、url 不是 github.com/owner/repo、name 与 url 不同仓、category 不在那 22 个允许值里、description.en 缺失或为空单行、带了站点不渲染的 locale、tarball 不合规，任一命中即红（这些是**审核期拒稿**，在本仓全绿的时候照样会发生）；另与 `contributing.md` 的 category 取值表交叉核对（两边漂移即红），并把镜像**自锁**一遍：每条判据都必须真能抓到坏形态，否则镜像与真相一起烂掉还满绿。**它守稿子能不能被市场收下，不守插件行为** |
+| `test/wiring.test.mjs` | **真实 Cordis 容器**里的装配：`inject` 解析、服务注册、路由挂载与卸载、配置错误；第三步的可选 `ctx.get("llm")` 注册对（`registerAdapter` + `registerConfigurableProviders`，id `sensenova-token-plan`）、opt-in 关闭不注册、fiber dispose 释放注册对与三条路由 |
+| `test/live-jwks.test.mjs` | （仅 `test:live`）真实拉取 JWKS 文档，确认封包公钥可达 |
+| `test/live-contract.mjs` | （仅 `test:live:contract`）重放 `test/baselines/sensenova-contract.json` 对商汤推理端点：`/v1/models` 目录核对 + 少量 `reasoning_effort:"none"` 探针（限流友好，每格 1 请求不重试）；红 = 平台方言漂移，**不是回归**，修法走 `SENSENOVA-API.md` §7 注释层 |
+| `test/live-raccoon.mjs` | （仅 `test:live:raccoon`）重放 `test/baselines/raccoon-contract.json` 对第二上游网关（`xiaohuanxiong.com`）。**两档**：L1 无需凭据，只探路由存在性（存在的路径答结构化 `401`/`400` 信封，不存在的答纯文本 `404 page not found`），并跑两条**对照组**证明该判据仍成立；L2 需 `RACCOON_ACCESS_TOKEN`，守两条真用过的事实——目录里 6 个可见 `sn-*` 未整体消失、余额主字段仍是 `available_points`（这是 0.4.6「余额读成假 0」的回归钉子）。**红线**：`desktop/v1/login/points/grant` 永不带凭据（一次性登录奖励，请求即领走不可逆，ROADMAP §6.1.4 / PITFALLS §28），脚本对自己的源码做静态自证；真实 refresh 需二级 opt-in（`RACCOON_LIVE_ALLOW_REFRESH=1`），因为它轮换时会烧掉这对 token |
+| `test/duplication-gate.mjs` | **门禁：重复度**——`ARCHITECTURE.md` §5.5「两条上游保持隔离」的机械半边。PITFALLS §343 记着它防的失效：raccoon 的 publish/adapter 曾是 Token Plan 侧的逐字拷贝（47%/63%），之后唯一把它们分开的是两句互相指向、写着「保持同步」的注释——**注释不会让 CI 红，这条会**。jscpd 在 70-token 阈值扫 `src/`，每个克隆都必须命中一条显式、带行数上限的 `WHITELIST`；**匹配不到任何克隆的白名单条目会红**（文件改名或克隆真被消除后，那条准入必须退役，不能静默留着顺带放宽总量上限） |
+| `test/typecheck-gate.mjs` | **门禁：TypeScript 严格面**——tsconfig 的 8 个严格开关只有在有人每次 push 都跑时才值钱。对本项目的两个 config 各跑一次 `node <path>/bin/tsc`（**不是** `.cmd` 垫片、不是 npx、不是 PATH 上的全局 tsc：本地 pin 才是这条门禁为真的原因，早先它解析到一个不受控的全局版本）。`typescript` 不在本仓 `node_modules` 时 loud SKIP；**配好的 config 文件缺失是硬失败**——那防的是「毕业轨道」被人静默删掉而无人发现 |
+| `test/build-gate.mjs` | **门禁：产物**——`src/` 是全部源码，`lib/` 与根 `client.js` 是**入库的**生成物（GitHub 直装源不跑 prepack，不入库就装到一个没有宿主入口的包）。先 `npm run build` 必须成功，再比对它前后的产物字节（干净检出上 `before === null`，天然一致），并走查 host bundle 的 import 闭包没有悬空分块；`tsdown` 缺席则 loud SKIP |
+| `test/e2e-gate.mjs` | **门禁：端到端**——在 `npm test` 里拉起真 `dsh web` 进程（比离线套件慢，且要 CLI 与一棵完整 runtime 树）。这条不能省：本插件最危险的历史 bug（嵌套 `auth:` 块被静默忽略，面板**把真登录 POST 到真平台**）只有 e2e 抓得住，而把它留在门禁外等于那一整类无人守。CLI/runtime 齐 → 真跑并**透传退出码**；缺 → loud SKIP（CI 的 offline job 装了 CLI，那里它是硬门禁） |
+| `test/composer-slot-gate.mjs` | **门禁：composer 胶囊的 peer 契约**（ROADMAP §6.3）——§6.3 已裁定对话框用量走 `conversation.input.right` 座席 + `useProjection("modelSelection")` 判 provider 归属；字节级验证只证明过本机一个 DSH 版本，而 peer 范围是 `>=0.1.5 <0.3`，上游某版一旦移除该槽位或把 projection 改成非严格注入，胶囊就**静默落不了地**。本节钉的就是这条契约在本机可解析的**每个** DSH client 副本上都不漂移（只锚函数名与结构，不碰会随 runtime 重生成而漂的行号） |
+
+不碰真实账号的保证：网络层打桩，密码用临时密钥加密，不发往商汤；`routes.test.mjs` 用真实响应形状但全 stub。
+
+---
+
+## 3. `panel-decision.js` / `client-surface.js` 为何特殊
+
+面板的渲染决策与渲染组件**不是手写副本、也不再是从源码抠字符串**：`client-surface.js` 把 **client 源码入口 `src/client/index.ts`** 作为模块加载（Node 直接 import `.ts`、原生剥类型；装一个捕获型 `window.__ModuleLoader__`，给工厂喂一个记录型 React 替身），拿到工厂物化出的 `panel` 测试面（`interpretSnapshot` / `viewOf` / 字典 / 错误码表 / 样式令牌 / 组件），`panel-decision.js` 与 `panel-render.js` 再从这个真实对象上取用。若 client 侧的结构变了，检查跟着变——测的是浏览器真正跑的那段**源码**，不是打包产物。
+
+> 机制有两代：早期一版是手写 `panelDecision` 副本（会漂移，且漏了节流字段）；再一版是从 `client.js` 打包产物用平衡括号抠函数体、`new Function` 求值（锚点绑死源码排版）。现版改为直载 client 源码模块，两者都取代了。
+
+---
+
+## 4. 已知缺口
+
+> 本文曾记载「`wiring.test.mjs` 缺失、`panel.test.mjs` 有失败用例」。两条都已不成立：`wiring.test.mjs` 现在 24 项全过，`panel.test.mjs` 41 项全过。后来记载的「同源校验挡不住 DNS rebinding」「密码会被静默 trim」也已收口：前者由 `isAdmitted` 的 Host 白名单（`index.ts`，`routes.test.mjs` D2 守住「Origin 与 Host 一致的陷阱」），后者由 `token-store.ts` 的 `verbatim()`（密码按原样进 JWE，store.test.mjs 断言「密文不含明文、且密码不写入凭据服务」）。「渲染层没有被测到」同样不再成立：`test/render.test.mjs` 通过 `panel-render.js` 检查上屏数字，`used/limit` 写反的演练实测 5 项变红。文档比代码先过期也是一类缺陷，所以这里只保留仍然真实的缺口：
+
+- **`AccountForm` 与 `ModelPicker` 的渲染缺口已由 `test/render-dom.test.mjs` 闭合（2026-10-15）。** 它们建立在 `useState`/`useEffect` 之上，React 替身只会无脑返回初值——测的会是那个假件，所以当年「宁可留着缺口也不假装覆盖」。现在产物 `client.js` 在 jsdom 里由真 React 挂载：表单侧受控输入往返、显/隐密码切换、空字段拒绝、登录成功后密码从组件状态清除；勾选器侧草稿≠Host 才出「未保存」、「已保存」声明等 poll 回声落定、Host 拒绝落为告警且草稿原样保留、撤销回到 Host 值，还有「全勾 → 空列表极端」在 DOM 上走通往返。两块的**发送语义**与「勾选 → 允许清单」的推导仍由 `store`/`routes`/`provider`（5.6c）套件在 Host 侧钉住——那是纯逻辑的单一真源，渲染档不与之竞争；不依赖 hook 的勾选行 `ModelRoster` 照旧归 `test/render.test.mjs` G4 组。
+- **小浣熊 tab 的帧已不再属于这个缺口。** 它原先与 `AccountForm` 同类：渲染树由内部 `useState` 决定，替身只返回初值，套件永远只看得到登出帧。抽 `RaccoonCard`（`state` 走 props）之后，余额折行、网关拆解、两个凭据时钟、过期凭据的 alert、两种未注册措辞、注册失败在开关关闭时仍可见，全部由 `test/render.test.mjs` 直接挂载断言（见 PITFALLS §35）。真正还留着的缺口只有 `RaccoonTab` 自身的轮询生命周期（额度 tab 的 `PanelPage` 生命周期已由 `test/render-dom.test.mjs` 在 jsdom 真定时器上实测；`RaccoonTab` 共用同一条 `use-polling-interval.ts`，但真渲染档还没挂它这个 tab）——这条由 `test/raccoon.test.mjs`（Host 侧路由与 walk 生命周期）在单元层覆盖。2026-10-02 起 e2e 也打 `/raccoon` 了，但只走**无凭据 GET**：无凭据时 `readRaccoonStatus` 跳过全部网关读取，所以这条 GET 是纯本地状态、不需要假网关，它据此验路由真的注册上、`?debug=1` 脚手架只在显式 opt-in 时出现、以及 AGENTS.md 事实 3 那条隔离不变量（读第二个上游，Token Plan 主注册纹丝不动）。**凭据 / QR 登录 / 真实网关读取那条仍未进 e2e**——`RACCOON_API_BASE` 在 `raccoon.ts` 里是硬编码常量，要让假网关拦它就得给它加配置旋钮（动第二个上游那条线），隔离不变量其余部分目前仍由 `raccoon.test.mjs` + `state-segmentation.test.mjs` 离线守着。
+- **联网档（`test:live` / `test:live:contract` / `test:live:raccoon`）默认一律不跑。** `test:live` 只拉公开 JWKS、不带凭据、不发登录请求；另两个分别对真实商汤推理端点与真实小浣熊网关发请求（后者在无凭据时只做路由存在性探测，不携带任何凭据、无副作用）。默认不打它们，一是避免「测试会因与插件无关的外部原因失败」，二是守住那条界线：验证不该默认等于对真实服务发请求。
+- **本机的 `SENSENOVA_*` 环境变量被测试隔离。** `index.ts` 在挂载时从 `process.env` 读 API key，一台真配了它的机器会走进套件从未打桩的分支（真去拉模型目录，并把一个非控制台 token 混进断言）。只在一台干净机器上绿、在作者机器上红的套件不叫离线，叫「通常离线」——`test/peer-roots.mjs` 的 `isolateHostEnv()` 负责这件事。
+- **`credentialKey` 形状有双保险。** 它是 `index.ts` 一处照抄 `@deepseek-ai/dsh-credentials` 格式（`"scope/id"`）的 shim，为让测试不解析 peer 就能跑。`config.test.mjs` 在**任何机器**（含干净检出）钉死其字面形状，`store.test.mjs` 在 peer 可解析的机器上再断言与真实实现**逐值相等**——格式一变，无论是插件这侧手抖还是 peer 包升级改了分隔符，都会红，而不是等到运行时面板读不到自己的 grant。
+- **`isAdmitted` 的 IPv6 裸写形态（已修，钉在 `test/config.test.mjs`）。** 旧 `hostName()` 对裸 `::1:19387` 走 `split(":")[0]` 得空串，白名单里的 `::1` 永远命中不了——裸 IPv6 客户端被误拒。修法：`hostName` 按「最后一对冒号后若全为数字且倒数第二段也为数字（裸 IPv6 末组 + 端口）」剥端口；`::1`、`2001:db8::1` 等无端口字面量原样保留。`config.test.mjs` 有 14 条 `hostName` 用例 + 8 条 `isAdmitted` 白名单用例钉住全部形态。
+- **视觉模型识别的信源字段已确认（2026-09 拉真实响应）。** 商汤 `GET /v1/models` 在**每个**条目上都带 `input_modalities`（字符串数组，如 `["text","image"]`）与 `output_modalities`。`identifyVisionModel` 已按字段判定（`"image"` ∈ `input_modalities`），名字规律（`vl`/`vision`）仅作平台某天不下发模态字段时的兜底，且已删掉 `flash-lite`（实测 `sensenova-6.8-flash-lite` 靠字段判为可看图、而 `sensenova-u1.5-lite` 是出图不是看图，纯名字会误判）。`test/parsers.test.mjs` 第 6 组钉住：字段优先、text-only 不算、出图不算（只看 input）、字段压过相悖的名字、无字段时按名字、无 id 仍出行。
+- **视觉第二步（opt-in 写入本插件 settings row）钉在 `test/routes.test.mjs` M 组。** `writeImageModelIds: true` 且无 settings 服务的 Host 上，poll 照常成功、`visionModels` 照常进 snapshot（写入是旁路，失败不拖垮应答）；`ctx.get("settings")` 缺席时 `visionPublish.current` 保持 null，poll 不炸。写入本身的正确性（写了真的落进 row、revision 计数）依赖 settings 服务在运行——由 DSH 侧的 `settings.update` 契约保证，本套件不重复验。
+- **路由测试用的是假 `response`，不是真实的 `http.ServerResponse`。** 它会计数写入次数（这是抓住「保存账号答了两次」的原因），但不会复现真实对象的 `ERR_HTTP_HEADERS_SENT`、`setHeader` 顺序与流语义。
+- **e2e 在 2026-10-02 从 44 项补到 86 项，2026-10-03 实测 91 项（数字是时点快照，以套件输出为准），但三条仍未覆盖，其中两条是主动不做的。** 补的三块：三条开关路由（`/provider` `/models` `/draw`，23 项，验「开关关掉真的从真 llm 服务撤下 provider」「curation 真的收窄 offer 而 roster 仍完整」「`forget` 只清开关、保留模型偏好」「栅栏一致——带合法 cookie + 伪造 Origin 也翻不了」）、429 节流（10 项，见上条）、`/raccoon` 无凭据 GET（9 项，见上条）。两条**主动不做**，理由是代价大于收益，不是没意识到：
+
+  1. **`registerProvider: false` 的出厂默认降级没进 e2e。** `buildHome` 硬编码 `registerProvider: true`（见其注释：off 就测到降级但静默跳过功能）。行为降级**已经**被测过——面板关开关那条 `POST /provider {enabled:false}` 已验 `providerRegistered → false`（模块缺席、面板照用）；剩下的差别只有 `llm.registerSource` 的 `config` vs `panel` 标签，而 `routes.test.mjs` P1 已钉死 `registerProvider === false && registerSource === "config"`。为这个标签 boot 第二个 Host（第二个 home + 约 +10s，还要处理两个 Host 共享 `$DSH_HOME` 的状态冲突）不值。
+  2. **小浣熊的凭据 / QR 登录 / 真实网关读取没进 e2e。** `RACCOON_API_BASE` 硬编码在 `raccoon.ts`，要让假网关拦它就得给它加配置旋钮——那是改第二个上游那条线，AGENTS.md 事实 3 要求它对主注册影响恒为零，这个代价要先评估再动。无凭据 GET 以外的隔离不变量目前由 `raccoon.test.mjs` + `state-segmentation.test.mjs` 离线守着。
+
+- **端到端已进 `npm test` 门禁，但依赖 dsh CLI。** `test/e2e.mjs` 拉起**真 Host 进程**（`dsh web`）+ 一个 127.0.0.1 上的**假商汤平台**（`test/fake-platform.mjs`，自带独立 `$DSH_HOME`、零真实凭据、全部端点重定向到本机），断言登录/池用量/节流分类等端到端行为，并校验假平台真的收到了流量。节流那条尤其要单独说：假平台的 `e2e-throttle` 账号回一个带 `Retry-After: 120` 的**真 429 信封**，套件据此断言平台自述窗口真的进 `retryAfterMs`、平台原话进 `detail`；随后借 `forget: true` 清掉 console 缓存逼出一轮 miss——那轮 poll 被**本地闸门**拦下、假平台 IAM 计数纹丝不动。缓存命中会直接跳过 `getToken`，闸门根本不触发，所以必须先清缓存；而刻意重交会把节流一并清掉，只剩 `forget` 是「只清缓存、不动节流」的那条路。它曾长期被排除在默认跑之外——而「嵌套 `auth:` 块打到真平台锁号」这类最危险的 bug 只有它能抓。现在 `npm test` 末尾接 `test/e2e-gate.mjs`：探到 dsh CLI 就实跑（失败即红），探不到就打醒目 SKIP 并退出 0。缺 CLI 不是回归，但一次绿跑若跳过了端到端，装配路径就没被真正验过——`.github/workflows/ci.yml` 从 **2026-10-02** 起把它列为独立**硬门禁**（e2e job 与本地一样跑 `e2e-gate.mjs`，去掉了 `continue-on-error`），不再被离线绿灯掩盖。**它自己也开着 `registerProvider: true` 并断言 provider 真的注册上了**（含目录/vision/去密状态），所以第三步那套 Host 侧装配不会被「离线全绿」掩盖；同时它把 `SENSENOVA_API_KEY`/`SENSENOVA_USERNAME`/`SENSENOVA_PASSWORD` 从子进程环境里删掉——否则开发机的 Key 会被凭据服务当成只读环境值传进 Host，目录不再降级、面板保存被拒，测试只在作者机器上红（PITFALLS §17）。
+
+- **本机 2026-09-29 已知环境故障（非插件缺陷，勿当回归）**：隔离 Home 启动真 Host 时全部 154 个 `@deepseek-ai/*` 宿主插件 `failed to import`（required 插件 `webserver` 缺席 → 面板插件等不到 `webServer` 服务 → `dsh web` 启动失败）。根因在 **Host 运行时的宿主插件包解析链**（`C:\Users\Zhujieling11\AppData\Roaming\npm\dsh.ps1` 对应的 dsh 运行时与其 `dsh-asar-unpacked` 运行态），不在本插件代码——`DSH_HOME` 指向真实 `~/.dsh` 时 `dsh web` 正常启动（127.0.0.1:3080），且 17 个离线套件全绿。此故障下 `test/e2e-gate.mjs` 会在 `npm test` 里红；修复 DSH 运行时后自然恢复，离线门禁已独立守住全部行为语义。**（2026-09-30 状态：已恢复，本机 e2e 门禁全绿。）**
+
+---
+
+## 5. 行为冻结基线（`store-baseline.test.mjs`）
+
+`token-store.ts` 已拆成登录 / 续期 / 节流 / 迁移四块（锐评 #5：944 行单体 → 现薄 facade + `token-store/` 七块子模块（六块功能模块 `state`/`grant`/`throttle`/`account`/`renewal`/`acquire` + `constants.ts` 常量表），落地记录见 [TOKEN-STORE-SPLIT.md](./TOKEN-STORE-SPLIT.md)），但四块共享闭包状态、迁移挂在读路径上，纯搬文件极易静默改掉细语义。`store.test.mjs` 的手写 check 只断言「作者想到的语义」；`store-baseline.test.mjs` 把 store 的**完整可观察面**冻结在 `test/baselines/token-store-behavior.json`：17 个场景、48 帧，每帧记录凭据服务调用序列（read/modify/delete/resolve/set/unset）、节流存储读视图、grant/ref 落盘内容、抛出的 `{code,message}` 与完整 `state()` 对象。
+
+- **驱动方式**：只走公开 API（`getToken`/`invalidate`/`saveAccount`/`forgetAccount`/`state`），注入脚本化 `auth`、内存凭据服务、共享内存节流存储（第二个 store 实例模拟「重启」）、虚拟时钟；无网络、无 peer、无墙钟，干净检出可跑。
+- **已钉死的阴沟语义**：`not_configured` 绝不写节流；parked 跨重启零新登录；本地退避 60s→120s 翻倍且关窗后 attempt 保留；平台声明的 2h 窗口不被 30 分钟本地帽截断；并发轮询单飞（恰好一次 refresh）；compare-and-set 慢者赢（并发旋转的 grant 不被覆盖）；`refresh_rejected` 无账号回收 vs 有账号重登的岔路；被拒令牌不复播；旧命名空间 grant/节流一次性收养（节流只收养第一条、第二条等 `clearThrottle` 扫）；密码不落盘（`autoRecoverArmed` 只报布尔）；无凭据服务降级并标记 `ephemeral`。
+- **门禁纪律**：拆分后该套件必须零漂移。有意改动 store 行为时，先逐帧评审、再显式重生成，并在提交信息写明原因。重生成必须显式带一句原因（`BASELINE_REASON`），缺则 `UPDATE_BASELINE=1` 直接 `exit 1`——把「先停下来说」变成机械闸，不留无因可审的冻结面改动：
+
+  ```powershell
+  $env:UPDATE_BASELINE='1'; $env:BASELINE_REASON='…一句：这次行为改动是什么、为什么…'
+  node test/store-baseline.test.mjs
+  Remove-Item Env:UPDATE_BASELINE, Env:BASELINE_REASON
+  ```
+
+  重生成不是「让测试变绿」的手段。套件与基线同进 `npm test`（= `test/run-all.mjs`）与 CI 离线 job（三方名册由 `package.test.mjs` 钉住）。

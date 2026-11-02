@@ -187,7 +187,7 @@ export interface PoolKeyData {
 /** Key 池诊断块（只读——账号在 cordis.patch.yml 配，面板只看与管理）。 */
 export interface PoolDiagData {
   keys: PoolKeyData[];
-  /** (key,组) 池耗尽格子的组侧摘要（key 打码为尾 4 位）。 */
+  /** (key,组) 池耗尽格子的组侧摘要（key 段经 maskKey 打码：首 5 + 点串 + 尾 3，短键全遮；组名保留）。 */
   poolGrid: string[];
   /** 当前全局在途请求数。 */
   inflight: number;

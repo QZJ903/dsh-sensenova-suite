@@ -11,7 +11,8 @@
  *   - parseRetryAfterMs 秒数与 HTTP 日期两形态；
  *   - KeyOrchestrator：按组亲和（商汤组粘、通用组轮）、(key,组) 池格跳过
  *     与 groupFullyPoolMarked、连续 rate 踢出（阈值 3）、探测到期恢复、
- *     全局槽排队、refreshKeys 重种（新增入池/消失摘出/存量相位保留）；
+ *     全局槽排队（含中止不占额度）、refreshKeys 重种（新增入池/消失摘出/存量相位保留）、
+ *     snapshot().poolGrid 诊断投影打码（key 段过 maskKey、组名保留，U4-D1）；
  *   - normalizeAccounts / normalizeModelGroups 的丢弃与回落。
  */
 import { strict as assert } from "node:assert";
@@ -172,6 +173,23 @@ try {
   check("到期探测发生且恢复", probed >= 1 && orch.snapshot().blocked.every((e) => e.key !== victim),
     `probed=${probed} blocked=${JSON.stringify(orch.snapshot().blocked)}`);
 
+  // 3d-b. 探测成功不动池格（2026-11-03 S2=B 拍板）：/models 200 只证明 key 活着，
+  // 不证明积分回血——探测前打的格在探测恢复后必须仍然生效，清点留给 TTL 与额度回正。
+  now += 1;
+  const gridVictim = (await orch.pickStart({ sessionId: "q1", model: "deepseek-v4-flash" })).key;
+  orch.reportRateLimited(gridVictim);
+  orch.reportRateLimited(gridVictim);
+  orch.reportRateLimited(gridVictim); // 再踢进阻塞态
+  orch.reportPoolExhausted(gridVictim, "flash-lite");
+  now += DEFAULT_ORCHESTRATOR_PARAMS.probeInitialMs + 1;
+  probeResult = true;
+  await orch.runDueProbes();
+  check("探测恢复后 key 回运行态", orch.snapshot().running.includes(gridVictim),
+    JSON.stringify(orch.snapshot()));
+  const postProbe = await orch.pickStart({ sessionId: "q2", model: "sensenova-6.8-flash-lite" });
+  check("探测成功不清池格：该组仍跳过它（S2=B）", postProbe.key !== gridVictim,
+    `${postProbe.key} vs ${gridVictim}`);
+
   // 3e. 池格：mark (victim, flash-lite) 后具名组跳过它；general 组不受影响。
   now += 1;
   const poolVictim = (await orch.pickStart({ sessionId: "p1", model: "sensenova-6.8-flash-lite" })).key;
@@ -191,6 +209,17 @@ try {
   orch.reportPoolExhausted(orch.snapshot().blocked[0]?.key ?? "", "flash-lite");
   check("groupFullyPoolMarked：全池标记后为真", orch.groupFullyPoolMarked("flash-lite") === true);
   check("groupFullyPoolMarked：general 组不受影响", orch.groupFullyPoolMarked("general") === false);
+
+  // 3f-b. 诊断投影打码（U4-D1）：snapshot().poolGrid 的 key 段过 maskKey 再出
+  // （shared/wire.ts PoolDiagData 契约），内部判据串不受影响——上一行全标判据
+  // 在同一份内部 Map 上依旧为真。钉投影形状：含 maskKey 点串、无 key 原文、组名段保留。
+  const maskedGrid = orch.snapshot().poolGrid;
+  check("poolGrid 投影非空且 key 段已打码（含 maskKey 点串 U+00B7）",
+    maskedGrid.length > 0 && maskedGrid.every((mark) => mark.includes("\u00B7")), JSON.stringify(maskedGrid));
+  check("poolGrid 投影不含 key 原文",
+    maskedGrid.every((mark) => !mark.includes(poolVictim)), JSON.stringify(maskedGrid));
+  check("poolGrid 投影组名段保留",
+    maskedGrid.every((mark) => mark.endsWith("\u0000flash-lite")), JSON.stringify(maskedGrid));
 
   // 3g. 401 永久移除。
   const before = orch.snapshot();
@@ -212,6 +241,43 @@ try {
   const rel3 = await third;
   check("释放后排队者放行", thirdReleased === true);
   rel2(); rel3();
+
+  // 3h-b. 排队期间中止（U4-T2）：等待者拿空 release、不占额度、不惊动队列——
+  // 「中止的等待者不占额度」的 inflight 守恒语义（此前零钉）。
+  const held1 = await orch.acquireSlot();
+  const held2 = await orch.acquireSlot();
+  const abortCtrl = new AbortController();
+  let abortReleased = false;
+  const waiter = orch.acquireSlot(abortCtrl.signal).then((r) => { abortReleased = true; return r; });
+  await new Promise((r) => setTimeout(r, 20));
+  check("中止前排队者未放行", abortReleased === false);
+  abortCtrl.abort();
+  const noopRelease = await waiter;
+  check("中止的等待者被放行且在途不变（从未占额度）",
+    abortReleased === true && orch.snapshot().inflight === 2);
+  noopRelease();
+  check("空 release 不动在途计数", orch.snapshot().inflight === 2);
+  held1(); held2();
+  check("原持者释放后归零", orch.snapshot().inflight === 0);
+
+  // 3h-c. cap 热缩小：释放只在真有空位时放行等待者，不造超限在途（U4 顺带④）。
+  const c1 = await orch.acquireSlot();
+  const c2 = await orch.acquireSlot();
+  let capWoken = false;
+  const capWaiter = orch.acquireSlot().then((r) => { capWoken = true; return r; });
+  await new Promise((r) => setTimeout(r, 20));
+  params.globalConcurrency = 1; // 热缩小
+  c1();
+  await new Promise((r) => setTimeout(r, 20));
+  check("cap 缩小后释放不放行等待者（在途不超限）", capWoken === false && orch.snapshot().inflight === 1,
+    `woken=${capWoken} inflight=${orch.snapshot().inflight}`);
+  c2();
+  const capRelease = await capWaiter;
+  check("出现真空位后放行", capWoken === true && orch.snapshot().inflight === 1,
+    `woken=${capWoken} inflight=${orch.snapshot().inflight}`);
+  capRelease();
+  params.globalConcurrency = 2; // 还原（本段 orch 后续无消费，纯卫生）
+  check("cap 热缩收尾归零", orch.snapshot().inflight === 0);
 } catch (e) { fail("KeyOrchestrator", e); }
 
 // ── 3i. refreshKeys：面板改凭据后免重启同步池（2026-10-27「未入池」bug）─────
@@ -386,6 +452,15 @@ try {
     && (explicit?.thinking["glm-5.2"]?.length ?? 0) > 0,
     JSON.stringify(explicit?.thinking));
 } catch (e) { fail("thinking-defaults", e); }
+
+// ── vision 首装默认（2026-11-03 S3 拍板：默认值是给新用户用的）───────────────
+try {
+  const { emptyPoolRecord } = await import("../src/host/pool-store.ts");
+  const fresh = emptyPoolRecord();
+  check("首装（无文件）vision 默认勾选集就在空记录里（S3）",
+    JSON.stringify(fresh.vision.visionModels) === JSON.stringify(["deepseek-flash", "kimi-k3", "sensenova-6.8-flash-lite"]),
+    JSON.stringify(fresh.vision));
+} catch (e) { fail("vision-defaults", e); }
 
 // ── N. pool-store 文件面：ADR-006 拒绝表面化 + 读-改-写串行化（2026-10-31 处置轮）──
 try {

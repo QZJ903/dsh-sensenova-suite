@@ -21,9 +21,18 @@
 
 import { SensenovaKeyPool, DEFAULT_KEY_POOL_PARAMS, type KeyPoolParams, type KeyPoolSnapshot } from "./key-pool.ts";
 import { exhaustedModelIds } from "./llm-models.ts";
+import { maskKey } from "./util.ts";
+import { traceLog } from "./trace-log.ts";
 
 /** 裸轮转的空排除集（pickNext 的「从 lastPicked 环回推进」形态）。 */
 const EMPTY_EXCLUDE: ReadonlySet<string> = new Set<string>();
+
+/** 快照内判定单 key 相位（phaseOf 与 statusById 共用一份判据——U4 顺带③去重）。 */
+function phaseInSnapshot(snap: KeyPoolSnapshot, key: string): "running" | "blocked" | "absent" {
+  if (snap.blocked.some((entry) => entry.key === key)) return "blocked";
+  if (snap.running.includes(key)) return "running";
+  return "absent";
+}
 
 /** 池编排参数（配置面可调部分；探测参数沿用 KeyPool 的 KeyPoolParams）。 */
 export interface OrchestratorParams {
@@ -61,7 +70,7 @@ export const DEFAULT_ORCHESTRATOR_PARAMS: Readonly<OrchestratorParams> = Object.
   modelGroups: { "sensenova-6.8-flash-lite": "flash-lite" },
 });
 
-/** pool-429 格子条目：命中时刻（TTL 自愈 + 探测成功清除）。 */
+/** pool-429 格子条目：命中时刻（TTL 自愈 + reportQuotaPools 额度回正清除；探测成功**不动格**——2026-11-03 S2=B 拍板：/models 200 只证明 key 活着，不证明积分回血）。 */
 const GRID_TTL_MS = 30 * 60_000;
 
 /** 一次选 key 的答案。 */
@@ -230,22 +239,15 @@ export class KeyOrchestrator {
   /** 单 key 相位（面板管理用；不在池内 = absent）。 */
   phaseOf(key: string | undefined): "running" | "blocked" | "absent" {
     if (key === undefined) return "absent";
-    const snap = this.pool.snapshot();
-    if (snap.blocked.some((entry) => entry.key === key)) return "blocked";
-    if (snap.running.includes(key)) return "running";
-    return "absent";
+    return phaseInSnapshot(this.pool.snapshot(), key);
   }
 
   /** 面板管理面快照：按账号 id 给相位（masked key 不出）。 */
   async statusById(): Promise<Array<{ id: string; phase: "running" | "blocked" | "absent" }>> {
     await this.ensureSeeded();
     const snap = this.pool.snapshot();
-    const phaseOf = (key: string | undefined): "running" | "blocked" | "absent" => {
-      if (key === undefined) return "absent";
-      if (snap.blocked.some((entry) => entry.key === key)) return "blocked";
-      if (snap.running.includes(key)) return "running";
-      return "absent";
-    };
+    const phaseOf = (key: string | undefined): "running" | "blocked" | "absent" =>
+      key === undefined ? "absent" : phaseInSnapshot(snap, key);
     return [...this.idToKey.entries()].map(([id, key]) => ({ id, phase: phaseOf(key) }));
   }
 
@@ -282,14 +284,16 @@ export class KeyOrchestrator {
     this.affinity.set(sessionId, { key, at: this.now() });
   }
 
+  /** 全局在途上限：>0 取配置值；0/负 = 跟随 key 数（未 seed 时 1）。 */
+  private capOf(): number {
+    const configured = Math.floor(this.params().globalConcurrency);
+    if (configured > 0) return configured;
+    return Math.max(1, this.pool.size);
+  }
+
   /** 全局在途槽：acquire（排队等待）；返回 release。 */
   async acquireSlot(signal?: AbortSignal): Promise<() => void> {
-    const cap = () => {
-      const configured = Math.floor(this.params().globalConcurrency);
-      if (configured > 0) return configured;
-      return Math.max(1, this.pool.size);
-    };
-    if (this.inflight < cap()) {
+    if (this.inflight < this.capOf()) {
       this.inflight += 1;
       return () => this.releaseSlot();
     }
@@ -317,8 +321,13 @@ export class KeyOrchestrator {
 
   private releaseSlot(): void {
     this.inflight = Math.max(0, this.inflight - 1);
-    const next = this.waiters.shift();
-    if (next !== undefined) next.resolve();
+    // 唤醒受 cap 约束（U4 顺带④，2026-11-03）：cap 热缩小时不再把等待者放进
+    // 超限在途——只在真有空位时逐个放行；cap 调大后的唤醒仍挂在下一次
+    // acquire/release 事件上（与原行为一致，不为此引入定时器）。
+    while (this.waiters.length > 0 && this.inflight < this.capOf()) {
+      const next = this.waiters.shift();
+      if (next !== undefined) next.resolve();
+    }
   }
 
   /**
@@ -394,7 +403,13 @@ export class KeyOrchestrator {
   }
 
   reportRateLimited(key: string): { kicked: boolean; strikes: number } {
-    return this.pool.recordTpmStrike(key);
+    const result = this.pool.recordTpmStrike(key);
+    if (result.kicked) {
+      // 踢出行（2026-11-03 他拍板，N1 真机统计的前置）：此前 kick 全程静默、返回值
+      // 零读者——「踢→探测回→再踢」循环没法从 trace 统计，只能人眼盯面板相位。
+      traceLog(`[dsh-sensenova-suite] key 踢出运行态 key=${maskKey(key)} strikes=${result.strikes} 连续限流达阈值，等待探测恢复`);
+    }
+    return result;
   }
 
   reportPoolExhausted(key: string, group: string): void {
@@ -474,11 +489,12 @@ export class KeyOrchestrator {
         recovered = false;
       }
       if (recovered) {
-        // 成功即挂回运行态并清该 key 的全部 pool 格子。
+        // 成功只救相位（2026-11-03 他拍板 S2=B）：挂回运行态，**不动池格**——
+        // /models 200 只证明 key 活着，不证明积分池回血（models 读不耗积分）；
+        // 格子的清点留给 30min TTL 自愈与 reportQuotaPools 额度回正（额度真相
+        // 的专职来源）。此前的「成功清全部格子」会把仍然成立的标记洗掉，该组
+        // 下一个请求白撞一次 pool 429（自愈但多弯一轮）。
         this.pool.onSuccess(entry.key);
-        for (const mark of [...this.poolGrid.keys()]) {
-          if (mark.startsWith(`${entry.key} `)) this.poolGrid.delete(mark);
-        }
       } else {
         this.pool.noteProbeFailed(entry.key);
       }
@@ -486,11 +502,17 @@ export class KeyOrchestrator {
     return probed;
   }
 
-  /** 诊断快照（设置页/日志用）。 */
+  /** 诊断快照（设置页/日志用）。poolGrid 是诊断投影：key 段经 maskKey 打码再出
+   * （shared/wire.ts PoolDiagData 契约「打码」；2026-11-03 U4 审计 D1——此前投影把
+   * 池格内部原文串（完整 key + NUL 分隔 + 组名）直接吐进了面板快照响应）。内部
+   * 判据（gridMarked / reportPoolExhausted / clearPoolCell）仍用原文串，行为不受影响。 */
   snapshot(): KeyPoolSnapshot & { poolGrid: string[]; inflight: number } {
     return {
       ...this.pool.snapshot(),
-      poolGrid: [...this.poolGrid.keys()],
+      poolGrid: [...this.poolGrid.keys()].map((mark) => {
+        const sep = mark.indexOf("\u0000");
+        return sep < 0 ? maskKey(mark) : `${maskKey(mark.slice(0, sep))}\u0000${mark.slice(sep + 1)}`;
+      }),
       inflight: this.inflight,
     };
   }

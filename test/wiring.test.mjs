@@ -33,7 +33,7 @@ const skipMissingPeer = skipOnMissingPeer(suiteName(import.meta.url), [
 ]);
 const { Context } = await loadPeer("cordis").catch(skipMissingPeer);
 
-// The Raccoon "second upstream provider" stores (ROADMAP §6.1): the switch's
+// The Raccoon "second upstream provider" stores: the switch's
 // state file is shared with the plugin's own instance through `$DSH_HOME`
 // (isolated below), and the credential is a credentials-service reference.
 import { results, check, fail, finish } from "./harness.mjs";
@@ -513,65 +513,6 @@ async function bootPlugin({ withCredentials = true, withLlm = false, config = {}
   await stop();
   check("disposing released every registration pair",
     llm.calls.released === llm.calls.adapter + llm.calls.directory, JSON.stringify(llm.calls));
-}
-
-// === F7. a transient seed failure retries instead of leaving the picker empty
-// Raccoon has no poll to heal a missed registration (the Token Plan provider
-// republishes on every catalogue poll). A transient failure at boot must
-// therefore be retried: the fake adapter factory throws once, then succeeds,
-// and the seed's bounded retry must still land the registration.
-{
-  const raccoonSwitch = createFileRaccoonStore({});
-  await raccoonSwitch.save(true);
-  const credentials = makeCredentials();
-  credentials.refs.set(RACCOON_CREDENTIAL_REF, serializeRaccoonCredential({
-    accessToken: "retry-token",
-    refreshToken: "retry-refresh",
-    expiresAtMs: Date.now() + 3_600_000,
-    nickname: "retry-nick"
-  }));
-  const webServer = makeWebServer();
-  const llm = makeLlm();
-  const ctx = new Context();
-  ctx.provide("webServer", webServer);
-  ctx.provide("credentials", credentials);
-  ctx.provide("llm", llm);
-  const host = await import(`../src/host/index.ts?wiring=${Math.random()}`);
-  // The seed refetches the catalogue through the guard; serve it like F5.
-  const guardFetch = globalThis.fetch;
-  const fakeGatewayResponse = (body, status = 200) => ({
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => body
-  });
-  globalThis.fetch = async (input) => {
-    const url = typeof input === "string" ? input : String(input?.url ?? input);
-    if (url.includes("/api/web/llm/v2/model_catalog")) {
-      return fakeGatewayResponse({ code: 0, data: { categories: [{ type: "chat", models: [{ id: "sn-live-1", name: "Live 1", visible: true }] }] } });
-    }
-    return guardFetch(input);
-  };
-  let factoryCalls = 0;
-  const raccoonDeps = {
-    loadRaccoonAdapterModule: async () => ({
-      createRaccoonAdapter: async () => {
-        factoryCalls += 1;
-        if (factoryCalls === 1) throw new Error("transient build failure");
-        return { adapter: { retried: true }, providerIds: [RACCOON_PROVIDER_ID] };
-      }
-    })
-  };
-  const plugin = { name: host.name, inject: host.inject, apply: (fiberCtx, row) => host.apply(fiberCtx, row, raccoonDeps) };
-  const fiber = await ctx.plugin(plugin, {});
-  // The retry backoff is real time (300ms × attempt); wait it out.
-  await new Promise((resolve) => setTimeout(resolve, 1500));
-  await settle();
-  check("a transient seed failure retries into a registration",
-    factoryCalls === 2 && llm.calls.adapter === 1 && llm.calls.lastIds?.[0] === RACCOON_PROVIDER_ID,
-    JSON.stringify({ factoryCalls, calls: llm.calls }));
-  await fiber?.dispose?.();
-  await raccoonSwitch.forget();
-  globalThis.fetch = guardFetch;
 }
 
 // === F8. the mount-time effect registry (ADR-008) =======================

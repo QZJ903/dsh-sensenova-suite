@@ -79,7 +79,7 @@ export function apply(ctx: ClientCtx): void {
     console.warn(`[${NS}] config card registration failed:`, error);
   }
 
-  // 对话框用量胶囊（ROADMAP §6.3）：`conversation.input.right` 座席。`useProjection`
+  // 对话框用量胶囊：`conversation.input.right` 座席。`useProjection`
   // 由 slot 系统自动物化注入（session 作用域严格必需，见 composer-slot-gate.mjs），
   // 这里的 inject 只补插件自己的字典翻译 `tt`。注册失败照 §5 不变量 2 降级：面板
   // 照常用、该模块缺席。

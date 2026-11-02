@@ -25,6 +25,10 @@ import type { StoreOptions } from "./types.ts";
 export const POOL_STORE_VERSION = 1;
 export const KNOWN_POOL_STORE_VERSIONS: readonly number[] = [1];
 
+/** 可看图勾选默认集（2026-10-27 用户拍板的三件套）。readVision 的「字段缺省」
+ * 与 emptyPoolRecord 的「文件还不存在」共用这一份——别抄第二份。 */
+const DEFAULT_VISION_MODELS: readonly string[] = ["deepseek-flash", "kimi-k3", "sensenova-6.8-flash-lite"];
+
 /** 池状态文件所在目录（按 profile 分段，见 PITFALLS §23）。 */
 function poolStoreDir(profile: string | null) {
   return profileStateDir(name, profile);
@@ -86,13 +90,15 @@ export interface PoolStoreRecord {
   defaultNote?: string;
 }
 
-/** 空白记录（全部回落配置默认）。 */
+/** 空白记录（全部回落配置默认）。vision 带默认勾选集：文件还不存在的新用户
+ * 直接站在默认上（2026-11-03 S3 拍板——默认值是给新用户用的；此前要等首次
+ * 任意保存+读缓存过期才播种，新用户零勾选全走转述桥）。 */
 export function emptyPoolRecord(): PoolStoreRecord {
   return {
     version: POOL_STORE_VERSION,
     disabledIds: [], deletedIds: [], globalConcurrency: null, modelProtocols: {},
     keys: [],
-    toolsEnabled: {}, text2img: {}, img2img: {}, vision: {}, thinking: {}
+    toolsEnabled: {}, text2img: {}, img2img: {}, vision: { visionModels: [...DEFAULT_VISION_MODELS] }, thinking: {}
   };
 }
 
@@ -156,7 +162,7 @@ export function parsePoolPayload(raw: unknown): PoolStoreRecord | null {
     // 可看图勾选默认集（2026-10-27 用户拍板）：deepseek-flash / kimi-k3 /
     // sensenova-6.8-flash-lite 原生看图（不走转述）。字段缺省 = 按此默认；
     // 显式保存的空数组（全不勾）尊重用户选择。
-    const out: VisionSettings = { visionModels: ["deepseek-flash", "kimi-k3", "sensenova-6.8-flash-lite"] };
+    const out: VisionSettings = { visionModels: [...DEFAULT_VISION_MODELS] };
     if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
     const rec = value as Record<string, unknown>;
     const model = strOf(rec.model); if (model !== undefined) out.model = model;
@@ -212,7 +218,11 @@ function readThinking(value: unknown): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   const present = typeof value === "object" && value !== null && !Array.isArray(value);
   if (present) {
-    const ALLOWED = ["off", "low", "medium", "high", "xhigh", "max"] as const;
+    // 与 client/model-picker.ts 的 THINKING_CHOICES 同表（2026-11-03 拍板：UI 层与
+    // 存储过滤层统一 5 值，改动必须两边同步）。xhigh 曾是照 API 词表抄进来的化石
+    // （2026-10-26「xhigh 彻底移除」拍板后面板已给不出它）；API 归一另有 facts.efforts
+    // 词表，不在此层。旧文件若手编过 xhigh 会被白名单滤掉。
+    const ALLOWED = ["off", "low", "medium", "high", "max"] as const;
     for (const [modelId, levels] of Object.entries(value as Record<string, unknown>)) {
       if (modelId === "" || !Array.isArray(levels)) continue;
       out[modelId] = levels.filter((l): l is string => typeof l === "string" && (ALLOWED as readonly string[]).includes(l));

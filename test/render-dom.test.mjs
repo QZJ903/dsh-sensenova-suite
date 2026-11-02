@@ -5,7 +5,7 @@
  * through `client-surface.js`: the client SOURCE loaded into Node, a recording
  * `h` instead of React, hooks stubbed to their initial value. That stand-in is
  * deliberate — and it has two documented edges, both recorded in
- * `docs/TESTING.md` and `docs/QODER-GAP.md` §4/§6.2:
+ * `docs/TESTING.md` (and the qoder 对照档, now retired):
  *
  *   1. it runs the source, not the bundle — the artifact was never proven to
  *      load, register, or render;
@@ -124,7 +124,6 @@ const CLIENT_ID = "dsh-sensenova-suite";
 const ACCOUNT_PATH = `/api/${CLIENT_ID}/account`;
 const MODELS_PATH = `/api/${CLIENT_ID}/models`;
 const SNAPSHOT_PATH = `/api/${CLIENT_ID}/snapshot`;
-const RACCOON_PATH = `/api/${CLIENT_ID}/raccoon`;
 
 const registrations = [];
 win.__ModuleLoader__ = { load: (registration) => registrations.push(registration) };
@@ -540,22 +539,15 @@ function typeInto(input, value) {
   // the whole isolation claim — a bar count alone would pass a pill that read
   // the snapshot AND the balance.
   const routes = [];
-  // Swappable so the Raccoon frames below can change the gateway's answer.
-  // 42 150 and not 4 215: `count()` only reaches for a thousands separator at
-  // or above 10 000, and a balance figure is exactly where that rule must
-  // hold — a comma-less five-digit balance is the reading we would ship wrong.
-  let raccoonState = { ok: true, loggedIn: true, balance: 42150 };
   win.fetch = (path) => {
     pillFetches += 1;
     routes.push(path);
-    const body = path === RACCOON_PATH ? raccoonState : pillSnapshot;
+    const body = pillSnapshot;
     // The stall stands in for a real `reset()`: the gateway's answer is served
     // immediately instead of after the hook's own network latency.
     return new Promise((resolve) => setTimeout(
       () => resolve({ ok: true, status: 200, json: async () => body }), 0));
   };
-  // `let`: the Raccoon frames below remount the pill through the unmount →
-  // mount path a real provider switch takes.
   let pill = mount(React.createElement(panel.components.ComposerUsagePill, { tt, useProjection }));
   const button = () => pill.host.querySelector("button.dsh-sensenova-composer-pill");
   const text = () => pill.host.textContent;

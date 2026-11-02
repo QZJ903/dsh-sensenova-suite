@@ -36,7 +36,7 @@ export const ADAPTERS_UPDATED_EVENT = "llm/adapters-updated";
  * The state fields EVERY publisher shares — the part `publish-core` itself
  * reads (`createPairReleaser`, `registerProviderPair`, `unregister`).
  *
- * Declared here, not per publisher (docs/IMPROVEMENTS.md §8): the two
+ * Declared here, not per publisher: the two
  * publishers' inline literals each pinned `error: null` to the type `null` and
  * `built: null`/`releaseAdapter: null` likewise, so assigning a real error
  * string or release function was a type error in both. The domain fields

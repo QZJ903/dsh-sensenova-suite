@@ -1,5 +1,17 @@
 # 更新日志（Changelog）
 
+## 0.1.44（2026-11-03）
+
+- **U4 审计修复轮（键池与配额状态机，问题清单零挂账终态）**：
+  - **poolGrid 裸 key 明文上屏修复（P2）**：诊断快照的 (key,组) 池格串曾把**完整 key 明文**带进面板快照 HTTP 响应（wire 契约写明「key 打码」但生产者无人打码，面板也未消费该字段）。修=诊断投影按首个分隔符拆分、key 段过 `maskKey` 再出；池格判据串不变，行为零变化。
+  - **探测不再清池格**：探测成功（GET /models 200）只把 key 挂回运行态、**不动 (key,组) 积分格**——/models 不耗积分，200 不证明积分回血；清格留给 30min TTL 自愈与额度回正。此前的「成功清全部格子」会把仍然成立的标记洗掉，让该组下一个请求白撞一次 pool 429。
+  - **踢出可见**：key 被踢出运行态时 trace 日志记一行（`key 踢出运行态 key=… strikes=3 连续限流达阈值`）——此前踢出全程静默，真机无法统计「踢→探测回→再踢」循环。
+  - **新用户默认勾选集**：首装（pool.json 不存在）时「可看图」默认三件套即刻生效（此前要等首次任意保存+缓存过期才出现，期间全部图走转述桥）。语义定版：默认值是给新用户用的，老用户配置一经落盘即冻结（即使是当初的默认也不随版本变动）。
+  - **sticky 有界**：quota 轮换粘住的会话→key 映射此前只增不清无上限，改为成功即清 + 512 上限（副作用：通用组会话成功后不再永久粘轮换 key，商汤组亲和粘性不受影响）。
+  - **词表统一**：存储层档位白名单与面板勾选统一 `off/low/medium/high/max` 五值（xhigh 从白名单移除，对齐「xhigh 彻底移除」既有拍板；API 归一层词表不动）。
+  - **常量与卫生**：`PROVIDER_RETRY_AFTER_CAP_MS` 收敛 rate-classify 唯一真源（adapter 本地副本删除）；index 空白记录改调 `emptyPoolRecord()`；相位判定去重；releaseSlot 唤醒受并发上限约束（cap 热缩小不再造超限在途）；诊断快照单帧取用。
+  - **验证**：typecheck 0 错；pool 100（87→100，新增打码/中止/池格存活/热缩 cap/首装默认钉）/ contract 92 / retry / duplication 14 / snapshot-aggregate / pool-route / vision-image / key-health / provider / docs / doctor / package 全绿；key-orchestrator.ts 源码字面 NUL 归零。
+
 ## 0.1.43（2026-11-02）
 
 - **429 调度重做：4 轮轮询 + 桶维判据 + 统一退避梯**：

@@ -70,6 +70,8 @@ export function ModelRoster({ models, enabledIds, busy, tt, onToggle, modelProto
 }): unknown {
   const list = Array.isArray(models) ? models : [];
   const visionSet = Array.isArray(visionIds) ? new Set(visionIds) : null;
+// 与 host 侧 pool-store readThinking 的入库白名单同表（2026-11-03 拍板：UI 层与
+// 存储过滤层统一 5 值，改动必须两边同步）。
 const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
   return h(
     "ul",

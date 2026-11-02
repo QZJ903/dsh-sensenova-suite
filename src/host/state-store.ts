@@ -1,7 +1,7 @@
 /**
  * 状态文件公共原语 —— 把四个 store（throttle / catalog / provider / draw）此前
  * 各自手写的同一段"版本载荷 + temp 文件 + rename 原子 + 0600 + 损坏即忽略"
- * 收敛到这里（docs/IMPROVEMENTS.md §4.1 第一步）。
+ * 收敛到这里（第一步）。
  *
  * 第二步收敛的是**读缓存**：provider / draw 早有 1s TTL，而 catalog 完全没有
  * （进程内永不失效）——同一个「两个进程共享一个 state 目录」的问题修了两个、

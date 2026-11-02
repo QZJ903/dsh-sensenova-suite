@@ -1,5 +1,5 @@
 /**
- * 对话框用量胶囊（ROADMAP §6.3）—— 输入框工具栏 `conversation.input.right` 座席。
+ * 对话框用量胶囊 —— 输入框工具栏 `conversation.input.right` 座席。
  *
  * 形态跟随 opencode-go 的「用量胶囊」，不跟随 workbuddy 的「纯文本余额读数」：
  * 商汤 Token Plan 是 5h / 周 滚动额度池，**没有**单一余额可显示，所以胶囊画的是
@@ -94,7 +94,7 @@ import type { Tt } from "./runtime.ts";
 import type { PoolData, QuotaWindowData } from "./wire.ts";
 
 /**
- * The provider this pill claims (ROADMAP §6.3). Named as a constant because
+ * The provider this pill claims. Named as a constant because
  * the provider match IS the pill's data decision: the numbers come from the
  * Token Plan snapshot route.
  */

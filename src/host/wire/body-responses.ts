@@ -1,5 +1,4 @@
-/** Responses 请求体构造（make-responses-default-wire-protocol 2.x；
- * docs/sensenova-upgrade-plan.md §6.5）。
+/** Responses 请求体构造（make-responses-default-wire-protocol 2.x）。
  *
  * 协议纪律（§5.4，spec 硬约束）：绝不发送 store / background /
  * previous_response_id / truncation / include；不发 stop（决策表命中即降级 Chat）；

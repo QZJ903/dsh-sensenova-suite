@@ -18,7 +18,10 @@
  *   - `routes/account.ts`   — panel sign-in / forget, trace writes;
  *   - `routes/api-key.ts`   — the `sk-` reference, forget-and-republish;
  *   - `routes/provider.ts`  — the registration switch;
- *   - `routes/models.ts`    — the curated allow-list.
+ *   - `routes/models.ts`    — the curated allow-list;
+ *   - `routes/pool.ts`      — the pool admin surface (stop / restore / delete
+ *                             keys, global concurrency, per-group protocol
+ *                             partition — the panel's read-only pool card).
  *
  * The registration ORDER is load-bearing: the returned `off()` callbacks run
  * in this order on teardown. Public API and export surface are unchanged.

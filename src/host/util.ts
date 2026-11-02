@@ -359,8 +359,8 @@ export function numOrNull(value: unknown) {
  *   so callers that only need "no answer" pass nothing.
  * @returns the value, or `fallback` on absence or rejection.
  *
- * Generic over both the value and the fallback rather than annotated `unknown`
- * (docs/IMPROVEMENTS.md §8): the caller's declared fallback is what makes the
+ * Generic over both the value and the fallback rather than annotated `unknown`:
+ * the caller's declared fallback is what makes the
  * result usable at the call site — `optional(x, { credential: null })` must
  * yield that object's shape, not `unknown`. The default-parameter form this
  * replaces was typed FROM the `null` initializer under strictNullChecks, so

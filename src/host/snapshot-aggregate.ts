@@ -423,7 +423,7 @@ export async function buildSnapshotBody({
   // catalogue changing. When it does, rebuild the registration so the picker
   // drops/restores the affected models — `PiAiAdapter` memoizes the profiles
   // snapshot on Map identity, so only a fresh registration can change the
-  // offered set (ROADMAP.md §3.3). Skip when the catalogue branch already
+  // offered set. Skip when the catalogue branch already
   // published this exact set a moment ago.
   //
   // Skipped entirely when the quota is UNKNOWN. An unknown state is not a

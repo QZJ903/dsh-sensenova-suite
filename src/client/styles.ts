@@ -239,7 +239,7 @@ export const S = {
   modelPanel: { border: "1px solid var(--dsw-alias-border-l1)", borderRadius: 12, background: "var(--dsw-alias-bg-layer-1)", padding: "12px 14px" },
   // === the composer pill: a different surface, borrowed metrics ============
   // Every token above draws INSIDE this plugin's own card — 13px type, framed
-  // buttons, 8–12px radii, brand ink. The pill (ROADMAP §6.3) is a guest in
+  // buttons, 8–12px radii, brand ink. The pill is a guest in
   // the HOST's composer toolbar, where its neighbours are the model picker and
   // the attach/mode ghost controls: 28px tall, unframed, 12px, transparent.
   // It therefore borrows the TOOLBAR's scale, not the card's — a card-sized pill

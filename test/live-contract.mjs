@@ -12,7 +12,7 @@
  * A failure is INFORMATION, not a regression — the fix belongs in
  * `docs/SENSENOVA-API.md` §7 (the comment layer) plus a refresh of the
  * baseline JSON with the new platform response, never in `llm-models.js`
- * logic. See ROADMAP.md §2.3 (the "live failure is not a regression" rule).
+ * logic (the "live failure is not a regression" rule).
  *
  *   npm run test:live:contract
  *
@@ -101,7 +101,7 @@ if (apiKey === "") {
 // --- 2. inference probes: one `reasoning_effort` per untested model ------
 // Each probe answers ONE question per call, and the answer is written back
 // into the baseline by hand afterwards (the "live failure is not a
-// regression, refresh the baseline" rule, ROADMAP §2.3):
+// regression, refresh the baseline" rule):
 //   - `reasoning_effort: "low"`   -> does the baseline's `low` cell flip?
 //   - `reasoning_effort: "medium"`-> does the baseline's `medium` cell flip?
 // The existing `none` probe (the "thinking object is even accepted"
