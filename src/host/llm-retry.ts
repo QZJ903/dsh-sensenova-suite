@@ -15,11 +15,12 @@
  * the optional peer block at the end of `test/retry.test.mjs`, a SKIP when the
  * peer is absent):
  *
- *   - `QUOTA` / `ACCOUNT_QUOTA` — the Token Plan pool is depleted. Retrying
- *     cannot refill it, and the pool is SHARED across every model on this key,
- *     so hammering it only extends the cool-down (the same lesson `st-rotator`
- *     bakes into its AIMD limiter). Deliberately NOT retried: fast-fail and let
- *     the panel say why.
+ *   - `QUOTA` / `ACCOUNT_QUOTA` — 额度耗尽类，fast-fail and let the panel say
+ *     why.（2026-11-03 语义校准：旧注释断言「Token Plan pool is depleted」——但
+ *     pool 类的请求侧识别（message 特征串）实测全部是限流误标已废，积分池耗尽的
+ *     body 形状至今零样本；`QUOTA` 目前零生产者，`ACCOUNT_QUOTA` 唯一生产链 =
+ *     「组内全部 key 持续限流升级」（tpm 持续判据，另行落地）+ console 通道。
+ *     码位保留供接入。）
  *   - `RATE_LIMIT` — a transient throttle that self-clears. Retried, with a
  *     backoff biased longer than the peer default so one shared pool is not
  *     re-hit immediately: SenseNova's daytime rpm/tpm ceiling is aggressive

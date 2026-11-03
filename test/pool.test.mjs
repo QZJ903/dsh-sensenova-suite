@@ -3,11 +3,13 @@
  *
  * 钉住的契约：
  *   - classify429Full 七分类（code 8 / 429001 / 429003=rate-soft / insufficient_quota /
- *     Endpoint* / ModelAccount* / 池特征串 / 未知兜底；insufficient_quota 2026-10-31
- *     依上游 freeapi 订正从池特征串移出按 tpm 处理；429003 同日改 rate-soft——
- *     轮换不记 strike）；**桶维（2026-11-02 统一退避）**：踢出判据只看 bucket
- *     （tpm 计、rpm 不计），作用域族按 code 里的 TPM/RPM 定桶；退避值统一走
- *     一套梯子（PROBE_BACKOFF_STEPS_MS = 3/5/10/15/30s，30 封顶）；kind 仅日志标签；
+ *     Throttling.AllocationQuota=rate-soft / Endpoint* / ModelAccount* / 未知兜底；
+ *     insufficient_quota 2026-10-31 依上游 freeapi 订正从池特征串移出、2026-11-03
+ *     按真机样本改 rpm 桶；429003 同日改 rate-soft——轮换不记 strike；旧池特征串
+ *     message 子串判定 2026-11-03 全废（两个词条实测全为限流误标））；**桶维
+ *     （2026-11-02 统一退避）**：踢出判据只看 bucket（tpm 计、rpm 不计），作用域族
+ *     按 code 里的 TPM/RPM 定桶；退避值统一走一套梯子
+ *     （PROBE_BACKOFF_STEPS_MS = 3/5/10/15/30s，30 封顶）；kind 仅日志标签；
  *   - parseRetryAfterMs 秒数与 HTTP 日期两形态；
  *   - KeyOrchestrator：按组亲和（商汤组粘、通用组轮）、(key,组) 池格跳过
  *     与 groupFullyPoolMarked、连续 rate 踢出（阈值 3）、探测到期恢复、
@@ -16,7 +18,7 @@
  *   - normalizeAccounts / normalizeModelGroups 的丢弃与回落。
  */
 import { strict as assert } from "node:assert";
-import { classify429Full, classify429Body, bucketCountsStrike, probeFloorFor, PROBE_BACKOFF_STEPS_MS, parseRetryAfterMs } from "../src/host/rate-classify.ts";
+import { classify429Full, classify429Body, bucketCountsStrike, probeFloorFor, summarize429Body, PROBE_BACKOFF_STEPS_MS, parseRetryAfterMs } from "../src/host/rate-classify.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "../src/host/key-orchestrator.ts";
 import { DEFAULT_KEY_POOL_PARAMS } from "../src/host/key-pool.ts";
 import { normalizeAccounts, normalizeModelGroups, CONFIG_DEFAULTS } from "../src/host/host-config.ts";
@@ -33,8 +35,13 @@ try {
   check("code '8'（字符串）同样 rate-rps", rpsStr.kind === "rate-rps", JSON.stringify(rpsStr));
   const tpm = classify429Full('{"error":{"code":429001,"type":"invalid_request_error"}}');
   check("code 429001 → rate-tpm", tpm.kind === "rate-tpm", JSON.stringify(tpm));
-  const pool = classify429Full('{"error":{"code":1213,"message":"Allocated quota exceeded"}}');
-  check("Allocated quota exceeded → pool", pool.kind === "pool", JSON.stringify(pool));
+  // 池特征串判定已废（2026-11-03）：message 子串 "allocated quota exceeded" 实测
+  // 是 Throttling.AllocationQuota（rpm 限流）的措辞、词条 2 无出处——删除后不再有
+  // message 入口，pool kind 暂无请求侧生产者（池格由 console 通道/tpm 持续判据驱动）。
+  const legacyMarker = classify429Full('{"error":{"code":1213,"message":"Allocated quota exceeded"}}');
+  check("旧池特征串 message（code 不认识）→ unknown（特征串已废）", legacyMarker.kind === "unknown", JSON.stringify(legacyMarker));
+  const allocationQuota = classify429Full('{"error":{"code":"Throttling.AllocationQuota","message":"Workspace allocated quota exceeded, please increase your quota limit.","type":"invalid_request_error"},"status":429}');
+  check("Throttling.AllocationQuota → rate-soft（2026-11-03 真机样本实测 rpm 限流，不归 pool）", allocationQuota.kind === "rate-soft" && allocationQuota.bucket === "rpm" && allocationQuota.retryFloorMs === 3_000, JSON.stringify(allocationQuota));
   const unknown = classify429Full("not json at all");
   check("非 JSON → unknown（兜底按 rate 处理）", unknown.kind === "unknown", JSON.stringify(unknown));
   // 2026-10-31 真 key 实测：作用域写进 code。同一时刻 A/C 200、B 429 ⇒ 换 key 能绕开，
@@ -62,13 +69,13 @@ try {
   const plainQuota = classify429Body('{"error":{"code":8}}');
   check("classify429Body 兼容面：code 8 quota:true", plainQuota.quota === true && plainQuota.kind === "rate");
   // insufficient_quota：上游 freeapi 订正——命名像「配额耗尽」、实为 tpm/rpm 速率
-  // 限流（2026-10-31 从池类特征串 POOL_EXHAUSTED_MARKERS 移出，按 code 归 tpm 档）。
-  // 归池类的实害：速率窗被记成 (key,组) 积分格，组内全中招时错误触发「换无可换」
-  // 快速失败，而实测换 key 能绕开。
+  // 限流（2026-10-31 从池类特征串 POOL_EXHAUSTED_MARKERS 移出）。2026-11-03 用户
+  // 真机样本（message "inference exceeds tpm/rpm limit"）实测 rpm 形态快速自愈，
+  // 按 rpm 桶换 key 不计踢（与 429003 同待遇；漏踢真 tpm 由梯子+宿主重试兜底）。
   const aliasQuota = classify429Body('{"error":{"code":"insufficient_quota"}}');
-  check("insufficient_quota → tpm（quota:true，3s 起分级）", aliasQuota.quota === true && aliasQuota.kind === "tpm" && aliasQuota.retryFloorMs === 3_000, JSON.stringify(aliasQuota));
+  check("insufficient_quota → rate-soft/rpm（quota:true，3s 起分级）", aliasQuota.quota === true && aliasQuota.kind === "rate-soft" && aliasQuota.bucket === "rpm" && aliasQuota.retryFloorMs === 3_000, JSON.stringify(aliasQuota));
   const aliasFull = classify429Full('{"error":{"code":"insufficient_quota","message":"inference exceeds tpm/rpm limit"}}');
-  check("insufficient_quota 全链分类 → rate-tpm（不再归 pool）", aliasFull.kind === "rate-tpm" && aliasFull.retryFloorMs === 3_000, JSON.stringify(aliasFull));
+  check("insufficient_quota 全链分类 → rate-soft（rpm 桶不计踢）", aliasFull.kind === "rate-soft" && aliasFull.bucket === "rpm" && aliasFull.retryFloorMs === 3_000, JSON.stringify(aliasFull));
   const aliasMsgOnly = classify429Full('{"error":{"code":1213,"message":"insufficient_quota"}}');
   check("insufficient_quota 只出现在 message（code 不认识）→ 不归 pool（unknown 兜底）", aliasMsgOnly.kind === "unknown", JSON.stringify(aliasMsgOnly));
   // 踢出阈值单一判据（2026-11-02 定稿：按桶）：只有 TPM 桶计数；RPM 桶
@@ -85,7 +92,7 @@ try {
   check("429001 → bucket=tpm", tpm.bucket === "tpm", JSON.stringify(tpm));
   check("429003 → bucket=rpm", code429003.bucket === "rpm", JSON.stringify(code429003));
   check("unknown → bucket=undefined", unknown.bucket === undefined, JSON.stringify(unknown));
-  check("pool → bucket=undefined（走格子，不走 strike）", pool.bucket === undefined, JSON.stringify(pool));
+  check("rate-soft（insufficient_quota/AllocationQuota）→ bucket=rpm（走轮换不走 strike）", aliasQuota.bucket === "rpm" && allocationQuota.bucket === "rpm", JSON.stringify([aliasQuota.bucket, allocationQuota.bucket]));
   // 退避统一（2026-11-02 他拍板）：所有配额类共用一套梯子 3/5/10/15/30s、30 封顶。
   check("梯子 = 3/5/10/15/30s（30 封顶）", JSON.stringify(PROBE_BACKOFF_STEPS_MS) === "[3000,5000,10000,15000,30000]", JSON.stringify(PROBE_BACKOFF_STEPS_MS));
   check("probeFloorFor(0) = 3s（入口首档）", probeFloorFor(0) === 3_000);
@@ -110,12 +117,9 @@ try {
   const clock = () => now;
   const keys = ["sk-a", "sk-b", "sk-c"];
   const params = { ...DEFAULT_ORCHESTRATOR_PARAMS, globalConcurrency: 2 };
-  const probeCalls = [];
-  let probeResult = true;
   const orch = new KeyOrchestrator({
     params: () => params,
     resolveKeys: async () => keys.map((key, index) => ({ id: `acc-${index}`, key })),
-    probe: async (key) => { probeCalls.push(key); return probeResult; },
     now: clock,
   });
 
@@ -166,28 +170,33 @@ try {
   const r4 = orch.reportRateLimited(victim);
   check("阻塞态再记 rate 不重复踢（借用语义）", r4.kicked === false);
 
-  // 3d. 探测恢复：到期（probeInitialMs 15s 后）探测成功 → 挂回运行态。
-  now += DEFAULT_ORCHESTRATOR_PARAMS.probeInitialMs + 1;
-  probeResult = true;
-  const probed = await orch.runDueProbes();
-  check("到期探测发生且恢复", probed >= 1 && orch.snapshot().blocked.every((e) => e.key !== victim),
-    `probed=${probed} blocked=${JSON.stringify(orch.snapshot().blocked)}`);
+  // 3d. 时间门放出（2026-11-03 批 D）：驻留满 10min 的阻塞 key 放回轮换（考验
+  // 状态——strike 预置阈值-1）。取代旧 /models 探测（恒 200 假阳性循环）。
+  now += 10 * 60_000;
+  const released = orch.releaseDueBlocked();
+  check("驻留期满放出且进入考验状态", released.includes(victim)
+    && orch.snapshot().blocked.every((e) => e.key !== victim),
+    `released=${JSON.stringify(released)} blocked=${JSON.stringify(orch.snapshot().blocked)}`);
+  const reKick = orch.reportRateLimited(victim);
+  check("考验状态：放出后 1 次 tpm 429 立即回笼", reKick.kicked === true,
+    JSON.stringify(reKick));
+  check("回笼后再驻留", orch.snapshot().blocked.some((e) => e.key === victim),
+    JSON.stringify(orch.snapshot()));
 
-  // 3d-b. 探测成功不动池格（2026-11-03 S2=B 拍板）：/models 200 只证明 key 活着，
-  // 不证明积分回血——探测前打的格在探测恢复后必须仍然生效，清点留给 TTL 与额度回正。
+  // 3d-b. 时间门放出不动池格（S2=B 语义延续）：放出 ≠ 格清——格的清点留给
+  // 30min TTL 与 reportQuotaPools 额度回正。
   now += 1;
   const gridVictim = (await orch.pickStart({ sessionId: "q1", model: "deepseek-v4-flash" })).key;
   orch.reportRateLimited(gridVictim);
   orch.reportRateLimited(gridVictim);
   orch.reportRateLimited(gridVictim); // 再踢进阻塞态
   orch.reportPoolExhausted(gridVictim, "flash-lite");
-  now += DEFAULT_ORCHESTRATOR_PARAMS.probeInitialMs + 1;
-  probeResult = true;
-  await orch.runDueProbes();
-  check("探测恢复后 key 回运行态", orch.snapshot().running.includes(gridVictim),
+  now += 10 * 60_000;
+  orch.releaseDueBlocked();
+  check("时间门放出后 key 回运行态", orch.snapshot().running.includes(gridVictim),
     JSON.stringify(orch.snapshot()));
   const postProbe = await orch.pickStart({ sessionId: "q2", model: "sensenova-6.8-flash-lite" });
-  check("探测成功不清池格：该组仍跳过它（S2=B）", postProbe.key !== gridVictim,
+  check("时间门放出不清池格：该组仍跳过它（S2=B 延续）", postProbe.key !== gridVictim,
     `${postProbe.key} vs ${gridVictim}`);
 
   // 3e. 池格：mark (victim, flash-lite) 后具名组跳过它；general 组不受影响。
@@ -292,7 +301,6 @@ try {
   const orch = new KeyOrchestrator({
     params: () => ({ ...DEFAULT_ORCHESTRATOR_PARAMS, modelGroups: {} }),
     resolveKeys: async () => accounts.map((a) => ({ id: a.id, key: a.key })),
-    probe: async () => true,
   });
   await orch.pickStart({ model: "m" }); // 触发首种（acc-0/acc-1 两把）
   accounts.push({ id: "acc-2", key: "sk-c" }); // 面板加第三把——修复前它永远「未入池」且轮换选不中
@@ -344,7 +352,6 @@ try {
       globalConcurrency: 2,
     }),
     resolveKeys: async () => [{ id: "acc-0", key: "sk-q" }],
-    probe: async () => true,
   });
   await orch.pickStart({ model: "m-flash" }); // 先种池：groupFullyPoolMarked 对空池（tracked=0）恒 false
   const pools = (p) => ({ pools: p });
@@ -565,6 +572,91 @@ try {
       JSON.stringify(onDisk));
   });
 } catch (e) { fail("pool-store-file-surface", e); }
+
+// ── O. 借用不受驻留限制（2026-11-03 批 D 同批钉，freeapi 本命通道）：运行态候选
+//    全被排除时，阻塞 key 立即可借（不等到 10min 驻留期满）；借用 2xx 立即转正。
+//    独立实例——主链的池格/相位会干扰借用候选。三把 key：两把池踢不出阻塞态
+//    （保底：运行态剩 1 把不踢）。
+try {
+  const orchO = new KeyOrchestrator({
+    params: () => ({ ...DEFAULT_ORCHESTRATOR_PARAMS, globalConcurrency: 2 }),
+    resolveKeys: async () => [
+      { id: "a0", key: "sk-x" }, { id: "a1", key: "sk-y" }, { id: "a2", key: "sk-z" },
+    ],
+    now: () => nowO,
+  });
+  let nowO = 9_000_000;
+  await orchO.pickStart({ sessionId: "o0", model: "m" }); // seed
+  const bv = (await orchO.pickStart({ sessionId: "o1", model: "m" })).key;
+  orchO.reportRateLimited(bv);
+  orchO.reportRateLimited(bv);
+  orchO.reportRateLimited(bv); // 第 3 次踢出（运行态剩 2 > 1，保底不拦）
+  const runningBefore = orchO.snapshot().running;
+  const borrowed = await orchO.pickNext(new Set(runningBefore), "general"); // 运行态全排除 → 借
+  check("借用：运行态排空时阻塞 key 立即可借（不看驻留）", borrowed === bv,
+    JSON.stringify({ bv, borrowed: borrowed.key, running: runningBefore }));
+  orchO.reportSuccess(bv);
+  check("借用 2xx 立即转正（成功是池已恢复的最强证据）", bv !== undefined && orchO.snapshot().running.includes(bv),
+    JSON.stringify(orchO.snapshot()));
+} catch (e) { fail("borrow-channel", e); }
+
+// ── P. 额度耗尽升级（2026-11-03 批 C 建、2026-11-04 批 E 断流重置式定稿）+
+//    summarize429Body（429 诊断行 body 摘要）────────────────────────────────
+// 判据：所有 429 记账（与桶解耦）；429 间隔超 30min 翻篇重记（闲置不算持续）；
+// 连续段攒满 30min 打格；成功清全账；格中/最近打格的空闲豁免（隔离期不算断流）。
+try {
+  let nowP = 5_000_000;
+  const orchP = new KeyOrchestrator({
+    params: () => ({ ...DEFAULT_ORCHESTRATOR_PARAMS, globalConcurrency: 2 }),
+    resolveKeys: async () => [{ id: "acc-0", key: "sk-x" }, { id: "acc-1", key: "sk-y" }],
+    now: () => nowP,
+  });
+  check("耗时钟：未撞过 429 不判持续", orchP.sustainedLimited("sk-x") === false);
+  orchP.noteLimited("sk-x", "general");
+  check("耗时钟：首撞未满 30min 不判持续", orchP.sustainedLimited("sk-x") === false);
+  nowP += 30 * 60_000;
+  check("耗时钟：连续段满 30min 判持续", orchP.sustainedLimited("sk-x") === true);
+  orchP.noteLimited("sk-x", "general");
+  nowP += 10 * 60_000;
+  orchP.noteLimited("sk-x", "general"); // 间隔 10min < 30min，同一场
+  check("耗时钟：段内间隔不重置（仍按首撞计时）", orchP.sustainedLimited("sk-x") === true);
+  nowP += 60 * 60_000;
+  orchP.noteLimited("sk-x", "general"); // 间隔 1h > 30min → 翻篇重记（他的公平场景）
+  check("耗时钟：断流翻篇（闲置 1h 后首撞不背旧账）", orchP.sustainedLimited("sk-x") === false);
+  nowP += 30 * 60_000;
+  check("耗时钟：新段重新攒满才判持续", orchP.sustainedLimited("sk-x") === true);
+  // 成功清全账（唯一翻篇真信号）。
+  orchP.noteLimited("sk-y", "general");
+  nowP += 31 * 60_000;
+  orchP.reportSuccess("sk-y");
+  check("耗时钟：成功清全账（first/last 两清）", orchP.sustainedLimited("sk-y") === false);
+  // 格中豁免：打格后隔离期空闲不算断流——试探 429 立即再格（节律每 30min 一次）。
+  orchP.noteLimited("sk-x", "general");
+  nowP += 30 * 60_000;
+  orchP.noteLimited("sk-x", "general"); // 攒满新段
+  orchP.reportPoolExhausted("sk-x", "general"); // 打格
+  nowP += 30 * 60_000;                  // 格 TTL 过期（隔离期空闲 30min）
+  orchP.noteLimited("sk-x", "general"); // 试探 429
+  check("耗时钟：格中/格后豁免（试探 429 立即再格，不翻篇）", orchP.sustainedLimited("sk-x") === true);
+  // 时间门放出的阻塞 key 同样跨态累计（批 D 后时钟与相位彻底解耦）。
+  orchP.noteLimited("sk-y", "general");
+  nowP += 31 * 60_000;             // 段先攒满
+  orchP.reportRateLimited("sk-y");
+  orchP.reportRateLimited("sk-y");
+  orchP.reportRateLimited("sk-y"); // 第 3 次进阻塞态
+  nowP += 10 * 60_000;             // 驻留期满
+  orchP.releaseDueBlocked();       // 时间门放出（考验状态）
+  check("耗时钟：阻塞态/时间门放出不清（跨相位持续累计）", orchP.sustainedLimited("sk-y") === true);
+  // summarize429Body（结构化提取 / message 截断 / 非 JSON 原文）。
+  const allocBody = '{"error":{"code":"Throttling.AllocationQuota","type":"invalid_request_error","message":"Workspace allocated quota exceeded, please increase your quota limit."}}';
+  check("摘要：结构化 body 提取 code/type/message",
+    summarize429Body(allocBody) === 'code=Throttling.AllocationQuota type=invalid_request_error msg="Workspace allocated quota exceeded, please increase your quota limit."',
+    summarize429Body(allocBody));
+  const longMsg = "x".repeat(200);
+  const sm = summarize429Body(JSON.stringify({ error: { code: 8, type: "quota_exceeded_error", message: longMsg } }));
+  check("摘要：message 截 120 字", sm.includes(`msg="${"x".repeat(120)}"`) && !sm.includes("x".repeat(121)), sm.slice(0, 60));
+  check("摘要：非 JSON 原文截断", summarize429Body("<html>gateway</html>") === 'raw="<html>gateway</html>"', summarize429Body("<html>gateway</html>"));
+} catch (e) { fail("exhaustion-upgrade/summary", e); }
 
 let failed = 0;
 for (const r of results) if (!r.pass) failed += 1;

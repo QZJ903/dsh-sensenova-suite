@@ -6,16 +6,20 @@
  * 解除，只能重启进程。本模块用显式两态列表替代它：
  *
  *   - **运行态**：可被 agent 请求选中；连续 `kickThreshold` 次 tpm 类限流后被移出。
- *   - **阻塞态**：等待恢复；由外部调度器定期探测，成功即挂回运行态末尾。
+ *   - **阻塞态**：等待恢复；驻留满 `BLOCKED_RESIDENCY_MS`（10min）由时间门放回运行态
+ *     （**考验状态**：strike 预置为阈值-1，下一次 tpm 429 立即回笼），或被借用后
+ *     拿到 2xx 立即转正。
  *
  * 三条不可让步的性质（与旧机制的区别全在这里）：
  *
  *   1. **保底**：运行态只剩 1 把时永不踢出 ⇒ 池不会因踢出而空，agent 请求永远发得出去。
  *   2. **借用**：运行态候选被 `exclude` 排空时，从阻塞态取「阻塞最久」的一把临时使用
  *      （**不改变其相位**），使一轮内仍能试满 `accountCount` 把。
- *   3. **恢复与 agent 请求解耦**：阻塞态的相位**只由探测结果决定**。保底状态下 agent
- *      请求会反复打在同一把 key 上（外部表现类似旧短路），但探测不经过 agent 请求路径
- *      ⇒ 不受「零成功」影响，随时能把 key 救回运行态。这是旧短路死锁的根治点。
+ *   3. **恢复判定只用真信号**：时间门放出的 key 由**轮换流量自己检验**（下一次
+ *      真实请求的 429/2xx），没有 /models 这类恒真旁路信号——2026-11-03 批 D
+ *      （他拍板）：/models 探测对 tpm/耗尽恒 200，假阳性「放进去就出来」循环且
+ *      令 probeAttempts 退避机制死码，整个探测面拆除。借用+2xx 转正通道原样保留
+ *      （「成功是池已恢复的最强证据」）。
  *
  * 纯模块：不 import cordis、不碰网络与磁盘，时钟可注入以便单测。
  *
@@ -29,12 +33,6 @@ export type KeyPhase = 'running' | 'blocked'
 export interface KeyPoolParams {
   /** 连续多少次 tpm 类限流后踢出运行态（默认 2）。 */
   kickThreshold: number
-  /** 首次探测间隔毫秒（默认 15000）。 */
-  probeInitialMs: number
-  /** 连续探测失败的退避倍率（默认 2 ⇒ 15/30/60s）。 */
-  probeBackoffFactor: number
-  /** 探测间隔上限毫秒（默认 60000）。 */
-  probeMaxMs: number
   /** 池容量上限（2026-10-29 放开：999 ≈ 实际不限。上游 freeapi 默认 10，出自作者
    * 实测 2 账号×5 把；超出的 key 仍被忽略——防呆上界保留，代码路径零漂移）。 */
   capacity: number
@@ -42,14 +40,20 @@ export interface KeyPoolParams {
 
 /** 池策略缺省值。kickThreshold 原为 2、运行时恒被 orchestrator 层默认（3）
  * 遮蔽（index.ts 展开传入、poolDeps 转发）——2026-10-31 对齐到 3 消灭双值分叉，
- * 同形钉在 pool.test（U1 审计复核补记 §四）。 */
+ * 同形钉在 pool.test（U1 审计复核补记 §四）。probe 三参数随探测面拆除（2026-11-03
+ * 批 D），旧配置残留字段由归一化自然丢弃。 */
 export const DEFAULT_KEY_POOL_PARAMS: Readonly<KeyPoolParams> = Object.freeze({
   kickThreshold: 3,
-  probeInitialMs: 15_000,
-  probeBackoffFactor: 2,
-  probeMaxMs: 60_000,
   capacity: 999,
 })
+
+/**
+ * 阻塞态最短驻留（毫秒）：tpm 踢出后至少等待该时长才由时间门放回轮换（考验状态）。
+ * 定标：EndpointTPM 单次实测 10 分钟（窗口上限无权威数据），10min 覆盖一个窗口
+ * 周期+余量；窗口已滚的 key 放出来自然 2xx 转正，没滚的 1 次 tpm 429 立即回笼。
+ * 2026-11-03 批 D（他拍板）。
+ */
+export const BLOCKED_RESIDENCY_MS = 10 * 60_000;
 
 /** 池内一把 key 的运行状态。 */
 export interface KeyPoolEntry {
@@ -57,14 +61,10 @@ export interface KeyPoolEntry {
   readonly key: string
   /** 当前相位。 */
   phase: KeyPhase
-  /** 连续 tpm 类命中数（成功或探测成功时清零）。 */
+  /** 连续 tpm 类命中数（成功时清零；时间门放出时预置为阈值-1 = 考验状态）。 */
   tpmStrikes: number
-  /** 进入阻塞态的时刻（epoch ms）；处于运行态时为 0。「阻塞最久」的判据。 */
+  /** 进入阻塞态的时刻（epoch ms）；处于运行态时为 0。「阻塞最久」的判据 + 时间门计时。 */
   blockedSince: number
-  /** 连续探测失败次数（驱动 15/30/60s 退避）。 */
-  probeAttempts: number
-  /** 上次探测时刻（epoch ms）；被踢出时置为踢出时刻。 */
-  lastProbedAt: number
 }
 
 /** 只读快照，供设置页只读面板展示。 */
@@ -73,7 +73,6 @@ export interface KeyPoolSnapshot {
   readonly blocked: readonly {
     readonly key: string
     readonly blockedSince: number
-    readonly probeAttempts: number
   }[]
 }
 
@@ -150,8 +149,6 @@ export class SensenovaKeyPool {
         phase: 'running',
         tpmStrikes: 0,
         blockedSince: 0,
-        probeAttempts: 0,
-        lastProbedAt: 0,
       }
       this.running.push(entry)
       this.index.set(key, entry)
@@ -213,8 +210,7 @@ export class SensenovaKeyPool {
    * 记一次 tpm 类限流。
    *
    * - **运行态**：计数 +1；达到 `kickThreshold` 且**运行态多于 1 把**时移入阻塞态。
-   * - **阻塞态**：**不计 strikes**（相位只由探测决定），但刷新 `lastProbedAt` ——
-   *   刚被借用试过就不必马上再探测。
+   * - **阻塞态**：**不计 strikes**（相位只由时间门与成功信号决定）。
    * - **不在池内**：忽略。
    *
    * @returns `kicked` = 本次是否发生「运行态 → 阻塞态」迁移；`strikes` = 当前计数。
@@ -223,7 +219,6 @@ export class SensenovaKeyPool {
     const entry = this.index.get(key)
     if (entry === undefined) return { kicked: false, strikes: 0 }
     if (entry.phase === 'blocked') {
-      entry.lastProbedAt = this.now()
       return { kicked: false, strikes: entry.tpmStrikes }
     }
     entry.tpmStrikes += 1
@@ -246,8 +241,31 @@ export class SensenovaKeyPool {
     if (entry === undefined) return
     entry.tpmStrikes = 0
     if (entry.phase !== 'blocked') return
-    entry.probeAttempts = 0
     this.moveToRunning(entry)
+  }
+
+  /**
+   * 时间门（2026-11-03 批 D，他拍板）：把阻塞驻留满 `BLOCKED_RESIDENCY_MS` 的 key
+   * 放回运行态，**以考验状态返回**（strike 预置为阈值-1——下一次 tpm 429 立即回笼；
+   * 2xx 成功清零即正常留在轮换面）。取代旧 /models 探测：不发起任何网络请求，
+   * 恢复检验由轮换流量的真实 429/2xx 完成（/models 对 tpm/耗尽恒 200，假阳性
+   * 「放进去就出来」循环且令退避机制死码——探测面整体拆除的依据）。
+   *
+   * @returns 本次放出的 key 列表（调用方打日志）。
+   */
+  releaseDueBlocked(): string[] {
+    const due: KeyPoolEntry[] = []
+    for (const entry of this.blocked) {
+      if (this.now() - entry.blockedSince < BLOCKED_RESIDENCY_MS) continue
+      due.push(entry)
+    }
+    const threshold = Math.max(1, Math.floor(this.params().kickThreshold))
+    for (const entry of due) {
+      this.moveToRunning(entry)
+      // 考验状态：差 1 次即回笼。2xx 成功会清零并退出考验。
+      entry.tpmStrikes = threshold - 1
+    }
+    return due.map(entry => entry.key)
   }
 
   /** 401 永久禁用：把该 key 从池中彻底移除。 */
@@ -259,59 +277,6 @@ export class SensenovaKeyPool {
     if (this.lastPicked === key) this.lastPicked = undefined
   }
 
-  /** 该条目的下次可探测时刻。 */
-  nextProbeAt(entry: KeyPoolEntry): number {
-    return entry.lastProbedAt + this.probeIntervalMs(entry)
-  }
-
-  /** 探测间隔：`probeInitialMs × factor^probeAttempts`，封顶 `probeMaxMs`。 */
-  probeIntervalMs(entry: KeyPoolEntry): number {
-    const params = this.params()
-    const initial = Math.max(1, Math.floor(params.probeInitialMs))
-    const factor = params.probeBackoffFactor >= 1 ? params.probeBackoffFactor : 1
-    const ceiling = Math.max(initial, Math.floor(params.probeMaxMs))
-    const growth = factor ** Math.min(Math.max(0, entry.probeAttempts), 16)
-    return Math.min(Math.round(initial * growth), ceiling)
-  }
-
-  /**
-   * 回写一次探测结果。
-   *
-   * 成功 ⇒ 计数清零并挂回运行态末尾；失败 ⇒ `probeAttempts + 1`（下次退避更久）。
-   * 两种情况都刷新 `lastProbedAt`。
-   */
-  recordProbe(entry: KeyPoolEntry, recovered: boolean): void {
-    entry.lastProbedAt = this.now()
-    if (recovered) {
-      entry.probeAttempts = 0
-      entry.tpmStrikes = 0
-      if (entry.phase === 'blocked') this.moveToRunning(entry)
-      return
-    }
-    entry.probeAttempts += 1
-  }
-
-  /**
-   * 按探测失败回写（编排层入口，dsh-sensenova-suite 加）：找到条目并走
-   * `recordProbe(entry, false)` —— probeAttempts +1，下次退避更久。
-   * 不在池内的 key 忽略（401 移除后的迟到回写）。
-   */
-  noteProbeFailed(key: string): void {
-    const entry = this.index.get(key)
-    if (entry === undefined) return
-    this.recordProbe(entry, false)
-  }
-
-  /**
-   * 该 key 现在是否到期可探测（编排层入口，dsh-sensenova-suite 加）：
-   * 阻塞态且 now ≥ nextProbeAt。探测节奏的唯一判据，别在调用方重算。
-   */
-  probeDue(key: string, now: number = this.now()): boolean {
-    const entry = this.index.get(key)
-    if (entry === undefined || entry.phase !== 'blocked') return false
-    return now >= this.nextProbeAt(entry)
-  }
-
   /** 只读快照（设置页诊断面板用）。 */
   snapshot(): KeyPoolSnapshot {
     return {
@@ -319,7 +284,6 @@ export class SensenovaKeyPool {
       blocked: this.blocked.map(entry => ({
         key: entry.key,
         blockedSince: entry.blockedSince,
-        probeAttempts: entry.probeAttempts,
       })),
     }
   }
@@ -338,9 +302,6 @@ export class SensenovaKeyPool {
     this.detach(entry)
     entry.phase = 'blocked'
     entry.blockedSince = this.now()
-    entry.probeAttempts = 0
-    // 置为「现在」⇒ 首次探测在 probeInitialMs 之后，而不是立刻。
-    entry.lastProbedAt = this.now()
     this.blocked.push(entry)
   }
 

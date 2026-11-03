@@ -1,5 +1,16 @@
 # 更新日志（Changelog）
 
+## 0.1.48（2026-11-04）
+
+- **429 池类误判全链翻修（真机事故驱动：4 账号 key 同秒连环被误判「池耗尽」→ 1 轮抛 ACCOUNT_QUOTA + 30min 拒服）**：
+  - **根因**：`POOL_EXHAUSTED_MARKERS` 两个 message 子串（"allocated quota exceeded" / "quota exceeded for the current window"）实测**全部命中限流**——词条 1 = `Throttling.AllocationQuota`（workspace 分配配额节流，真机实测 rpm 形态）的措辞、词条 2 无任何出处（两仓 git 全历史仅初始导入带入、全部参考工程/文档零命中）；18 条真机 pool 日志三簇全为限流秒级连环（10-31 簇 1 分钟后恢复成功直接反证）。**积分池耗尽的 body 形状至今零样本——pool 类从建立到今天没有一次真耗尽识别**。
+  - **两个 message marker 删除**（message 彻底退出判定——「只认 code」纪律的完全体）；`Throttling.AllocationQuota` 与 `insufficient_quota` 按 2026-11-03 真机样本归 **rpm 桶**（只换不记 strike）。
+  - **额度耗尽账本（断流重置式，2026-11-04 定稿）**：**所有 429 形状**（与桶解耦——rpm/unknown/an 线全入口）记账；429 间隔超 30min 翻篇重记（闲置不算持续）；连续段攒满 30min 且无成功 ⇒ 打池格（30min TTL 放出试探、429 立即再格 / 2xx 清账转正）；全组格满 ⇒ ACCOUNT_QUOTA 快速终止（文案改「持续限流不可用」，不再断言积分池耗尽）。**成功是唯一翻篇信号**；格中/最近打格的空闲豁免（隔离期不算断流）。
+- **tpm 隔离恢复重做（/models 探测面整体拆除）**：探测对 tpm/额度耗尽恒 200（恒真信号）——「放进去就出来」假恢复循环且令探测退避机制（probeAttempts 15/30/60s）整段死码。改**时间门**：阻塞态驻留 10min（`BLOCKED_RESIDENCY_MS`）放回轮换，**考验状态**（strike 预置阈值-1）——1 次 tpm 即回笼、2xx 清零转正；freeapi 的「借用 + 2xx 转正」本命通道原样保留，恢复检验由轮换流量的真实 429/2xx 完成。
+- **识图 describe 工具下线**（能看图的直接看了，不能的还有读图桥）：`vision/run.ts` 整删、tools 注册面改纯出图、`VisionFeedback`/`VisionOptions` 挪 bridge.ts；识图架构 = 勾「可看图」原生看图 + 未勾桥转述，无第三条路。
+- **读图桥/出图链的 429 与分类解耦**（只保证服务继续）：429 ⇒ 换 key 重试，**遍历全池**（tried 集合累积、全试完才收场——出图冷却 30s + 报错；桥抛错由既有占位收场「图片转换失败」）；**记住成功的 key**（lastGoodImageKey/lastGoodKey：下一次起点优先、失败不留案底、401 清除防死 key 卡死）；不打池格不记账。
+- **验证**：typecheck 两配置 0 错；pool 122（105+17）/ vision-image 22（19+3）/ contract 92 / config 152 / provider 247+ / key-health / retry 25 / docs / duplication 14 全绿；scope-check 102/102 三项 0。真机生效 = 完整重启 DSH。
+
 ## 0.1.47（2026-11-03）
 
 - **拆除主 key（拍板：池成员人人平等）**：

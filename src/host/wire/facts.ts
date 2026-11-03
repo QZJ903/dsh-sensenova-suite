@@ -81,6 +81,9 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     // Anthropic 线发图：兼容文档明写「仅 6.8-flash-lite 支持」→ false（deepseek-flash
     // 先例：文档 false 被真机翻 true——上真机测一次，成了翻案）。Responses 线
     // 输出上限文档无本模型行 → null 未申报（同 deepseek-flash 先例，须实测）。
+    // Anthropic 线发图：兼容文档明写「仅 6.8-flash-lite 支持」→ 曾按文档写
+    // false；2026-11-03 用户真机确认 an 线可以带图 → 翻 true（deepseek-flash
+    // 同款先例：文档口径被实测推翻，档案以实测为准）。
     id: 'sensenova-6.8-flash',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
     defaultChain: STANDARD_CHAIN,
@@ -101,7 +104,7 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsImages: true,
     imageFormats: ['jpg', 'jpeg', 'png', 'webp'],
     imageRequiresBase64: false,
-    anthropicSupportsImages: false, // 兼容文档：仅 lite——真机实测后可翻（先例 deepseek-flash）
+    anthropicSupportsImages: true, // 2026-11-03 用户真机确认（文档「仅 lite」被实测推翻，deepseek-flash 同款先例）
     responsesMaxOutputTokens: null,
     responsesSupportsJsonSchema: false,
   }],

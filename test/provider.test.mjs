@@ -100,9 +100,9 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       JSON.stringify(defaultThinkingLevels("sensenova-6.8-flash")) === JSON.stringify(["low", "medium", "high", "max"]),
       JSON.stringify(defaultThinkingLevels("sensenova-6.8-flash")));
     const flash68 = factsFor("sensenova-6.8-flash", undefined);
-    check("the 6.8-flash facts row: no thinking-off, image in, doc ceiling 128K, an-line images per doc false",
+    check("the 6.8-flash facts row: no thinking-off, image in (an line too — 真机 2026-11-03), doc ceiling 128K",
       flash68.forbidThinkingDisabled === true && flash68.supportsImages === true &&
-      flash68.imageRequiresBase64 === false && flash68.anthropicSupportsImages === false &&
+      flash68.imageRequiresBase64 === false && flash68.anthropicSupportsImages === true &&
       flash68.outputLimitMax === 131072 && flash68.requiresReasoningReplay === false &&
       flash68.responsesMaxOutputTokens === null,
       JSON.stringify(flash68));

@@ -7,8 +7,13 @@
  *      code 429001 = inference tpm 限速（quota:'tpm'）；code 实测可能是数字或字符串。
  *      按 code 而非 message/type 分类：message 措辞随版本漂移，429001 的 type 实测为
  *      invalid_request_error 而非官方错误表标注的 quota_exceeded_error。
- *   2. 池类（pool）——「Allocated quota exceeded」形态（provider-config 文档记录、
- *      pi-ai 的 isQuotaExceededError 同款判据）：积分池耗尽，滚动 5h/周窗口自愈。
+ *   2. 池类（pool）——**2026-11-03 请求侧信号归零**：旧判据为 message 子串
+ *      （"allocated quota exceeded" / "quota exceeded for the current window"），
+ *      实测全部命中限流（Throttling.AllocationQuota = workspace 分配配额节流、rpm
+ *      形态；18 条真机 pool 日志均为限流误标、词条 2 无任何出处）——两个词条已删。
+ *      积分池耗尽的 body 形状至今零样本，请求侧识别 = tpm 持续判据（同 key 首撞
+ *      超 30min 仍无成功 ⇒ 打格；key-orchestrator 时钟 + llm-adapter 分派）；
+ *      管线（pool429 → 打格 → 全组终止）由此重新有了生产者。
  *   3. 未知 429 形态兜底归 rate（轮转+可重试侧；宿主重试层有次数上限，不会卡死）。
  *
  * 分类结果是池层（key-orchestrator）与适配器共同消费的契约。**两个正交字段**：
@@ -61,20 +66,6 @@ export function probeFloorFor(hits: number): number {
 }
 
 /**
- * 池类 429 的响应体特征（Allocated quota exceeded，provider-config docs 实测形态）。
- *
- * `insufficient_quota` 曾按名字列在这里，2026-10-31 依上游 freeapi 订正移出：它
- * 命名像「配额耗尽」、实为 tpm/rpm 速率限流（freeapi adapter.ts 明写「命名误导：
- * message 同为 tpm/rpm 限流」），归池类会把速率窗误记成 (key,组) 积分格——组内
- * 全中招时还会错误触发「换无可换」快速失败，而实测换 key 能绕开。现按 code 归
- * tpm 档（classify429Body 的 string-code 分支）。
- */
-const POOL_EXHAUSTED_MARKERS: readonly string[] = [
-  "allocated quota exceeded",
-  "quota exceeded for the current window",
-];
-
-/**
  * 限流器的 code 族（2026-10-31 真 key 实测捕获）。
  *
  * 商汤把作用域写进了 code：`RateLimitExceeded.Endpoint*Exceeded` 与
@@ -88,7 +79,9 @@ const POOL_EXHAUSTED_MARKERS: readonly string[] = [
 const ENDPOINT_RATE_CODE = /^RateLimitExceeded\.Endpoint[A-Za-z0-9]*Exceeded$/i;
 const ACCOUNT_RATE_CODE = /^ModelAccount[A-Za-z0-9]*RateLimitExceeded$/i;
 
-/** 429 分类（rate 细分五档含 rate-soft，pool=积分池，unknown 兜底归 rate）。 */
+/** 429 分类（rate 细分五档含 rate-soft，unknown 兜底归 rate）。pool 保留为管线
+ * kind：2026-11-03 起请求侧无生产者（特征串判定已废），池格由 console 通道与
+ * tpm 持续判据（另行落地）驱动。 */
 export type RateLimitKind = "rate-rps" | "rate-tpm" | "rate-endpoint" | "rate-account" | "rate-soft" | "pool" | "unknown";
 
 /**
@@ -185,8 +178,16 @@ export function classify429Body(bodyText: string): RateLimit429Classification {
   if (code === 429001 || code === "429001") return { quota: true, retryFloorMs: floor, kind: "tpm", bucket: "tpm" };
   if (typeof code === "string") {
     // insufficient_quota：freeapi 实测 message 同为 tpm/rpm 限流措辞，命名误导、
-    // 实为速率限流（曾按名字误归池类，2026-10-31 订正）——按 tpm 桶换 key + 计数。
-    if (code === "insufficient_quota") return { quota: true, retryFloorMs: floor, kind: "tpm", bucket: "tpm" };
+    // 实为速率限流（曾按名字误归池类，2026-10-31 订正）；2026-11-03 用户真机样本
+    // （message "inference exceeds tpm/rpm limit"）实测 rpm 形态快速自愈——按 rpm
+    // 桶换 key 不计踢（与 429003 同待遇；漏踢真 tpm 由梯子+宿主重试兜底）。
+    if (code === "insufficient_quota") return { quota: true, retryFloorMs: floor, kind: "rate-soft", bucket: "rpm" };
+    // Throttling.AllocationQuota：Workspace 分配配额节流（2026-11-03 用户真机样本
+    // "Workspace allocated quota exceeded, please increase your quota limit." 实测
+    // 为 rpm 限流：14s~1min 自愈、4 账号同秒各自撞各自的模型级分配配额窗）——
+    // code 里的 quota/Allocation 是配额维措辞，不是积分池耗尽；旧实现以 message
+    // 子串 "allocated quota exceeded" 把它误归池类（POOL_EXHAUSTED_MARKERS，已废）。
+    if (code === "Throttling.AllocationQuota") return { quota: true, retryFloorMs: floor, kind: "rate-soft", bucket: "rpm" };
     // 作用域族：桶类型写在 code 里（…TPMExceeded / …RPMExceeded），只决定**踢出
     // 判据**（RPM 不计、TPM 计）；退避值统一走梯子，不再按桶分两套。
     if (ENDPOINT_RATE_CODE.test(code)) return { quota: true, retryFloorMs: floor, kind: "endpoint", bucket: bucketOfCode(code) };
@@ -203,9 +204,13 @@ export function classify429Body(bodyText: string): RateLimit429Classification {
  * - code 429001 → rate-tpm / tpm 桶
  * - `RateLimitExceeded.Endpoint*Exceeded` → rate-endpoint，桶按 code 里的 TPM/RPM 定
  * - `ModelAccount*RateLimitExceeded` → rate-account（同上，按 TPM/RPM 定桶）
- * - 池类特征串（大小写不敏感）→ pool / 无桶（记格子，走独立的 QUOTA 出口）
+ * - `insufficient_quota` / `Throttling.AllocationQuota` → rate-soft / rpm 桶（2026-11-03
+ *   真机样本实测均为 rpm 限流，见 classify429Body 内注）
  * - 其余未知形态 → unknown / 无桶（兜底按 rate 处理：轮转+可重试；宿主 maxRetries
  *   封顶；不计数——形状不明时判死一把 key 太武断）
+ * - 旧「池类特征串」message 子串判定已废（2026-11-03：两个词条实测全为限流误标，
+ *   见模块头注）；kind:"pool" 暂无请求侧生产者，池格由 console 通道与 tpm 持续
+ *   判据（另行落地）驱动。
  */
 export function classify429Full(bodyText: string): { kind: RateLimitKind; bucket: RateBucket | undefined; retryFloorMs: number | undefined } {
   const byCode = classify429Body(bodyText);
@@ -214,11 +219,29 @@ export function classify429Full(bodyText: string): { kind: RateLimitKind; bucket
   if (byCode.kind === "tpm") return { kind: "rate-tpm", bucket: byCode.bucket, retryFloorMs: byCode.retryFloorMs };
   if (byCode.kind === "endpoint") return { kind: "rate-endpoint", bucket: byCode.bucket, retryFloorMs: byCode.retryFloorMs };
   if (byCode.kind === "account") return { kind: "rate-account", bucket: byCode.bucket, retryFloorMs: byCode.retryFloorMs };
-  const lower = bodyText.toLowerCase();
-  if (POOL_EXHAUSTED_MARKERS.some((marker) => lower.includes(marker))) {
-    return { kind: "pool", bucket: undefined, retryFloorMs: probeFloorFor(0) };
-  }
   return { kind: "unknown", bucket: undefined, retryFloorMs: undefined };
+}
+
+/**
+ * 429 响应体的一句话摘要（诊断行用，2026-11-03 批 C）：结构化 body 提取
+ * code/type/message（message 截 120 字），非 JSON 原文截断。动机：pool 类
+ * 误分类破案（2026-11-02 真机事故）全程被「429 行不打 body」卡住——积分池
+ * 耗尽的 body 形状至今零样本，摘要落日志后下次真撞即可识别。
+ */
+export function summarize429Body(bodyText: string): string {
+  try {
+    const parsed: unknown = JSON.parse(bodyText);
+    if (isRecord(parsed) && isRecord(parsed.error)) {
+      const rawCode = parsed.error.code;
+      const code = typeof rawCode === "string" || typeof rawCode === "number" ? String(rawCode) : "-";
+      const type = typeof parsed.error.type === "string" ? parsed.error.type : "-";
+      const message = typeof parsed.error.message === "string" ? parsed.error.message.slice(0, 120) : "-";
+      return `code=${code} type=${type} msg="${message}"`;
+    }
+  } catch {
+    // 非 JSON：原文截断落日志（网关 HTML/代理错误页也是形状证据）。
+  }
+  return `raw="${bodyText.slice(0, 120)}"`;
 }
 
 /**

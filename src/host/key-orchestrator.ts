@@ -9,12 +9,14 @@
  *      用户配置的全局并发数（默认 = key 数），排队等待而非报错。
  *   3. **(key, 组) 的 pool-429 格子**（§5.2）：池类 429 不踢 key（积分池滚动窗口
  *      自愈），只按组标记；该组在所有 key 上都中招 → 本轮换 key 耗尽，快速失败。
- *   4. **探测调度**（§5.6）：到期探测由外部时钟驱动（index.ts 的 interval 调
- *      runDueProbes），探测与 agent 请求解耦——根治「只在 2xx 清零」的短路死锁。
+ *   4. **阻塞恢复调度**（§5.6）：外部时钟驱动（index.ts 的 interval 调
+ *      releaseDueBlocked）把驻留期满（10min）的阻塞 key 放回轮换——2026-11-03
+ *      批 D 拆除 /models 探测面：探测对 tpm/耗尽恒 200（假阳性「放进去就出来」
+ *      循环且令退避机制死码），恢复检验改由轮换流量的真实 429/2xx 完成（考验
+ *      状态：放出时 strike 预置阈值-1，一次 tpm 回笼；2xx 清零转正）。
  *
- * 纯模块：不 import cordis、不碰网络与磁盘（探测请求由 deps.probe 注入），
- * 时钟可注入以便单测。KeyPool 三不变量（保底/借用/探测解耦）由 freeapi 状态机
- * 原样保证，本层不重复实现。
+ * 纯模块：不 import cordis、不碰网络与磁盘，时钟可注入以便单测。KeyPool 三
+ * 不变量（保底/借用/真信号恢复）由 freeapi 状态机原样保证，本层不重复实现。
  *
  * @module dsh-sensenova-suite/key-orchestrator
  */
@@ -34,16 +36,12 @@ function phaseInSnapshot(snap: KeyPoolSnapshot, key: string): "running" | "block
   return "absent";
 }
 
-/** 池编排参数（配置面可调部分；探测参数沿用 KeyPool 的 KeyPoolParams）。 */
+/** 池编排参数（配置面可调部分；阻塞驻留为模块常量 BLOCKED_RESIDENCY_MS 不进配置）。 */
 export interface OrchestratorParams {
   /** 连续 rate 类 429 踢出阈值（tpm/rpm 不分；PLAN §5.6 定稿 = 3）。 */
   kickThreshold: number;
   /** KeyPool 容量。 */
   capacity: number;
-  /** 探测参数三件套（初始/倍率/上限）。 */
-  probeInitialMs: number;
-  probeBackoffFactor: number;
-  probeMaxMs: number;
   /** 会话亲和保持时长（仅商汤组使用；PLAN §5.4 = 300s）。 */
   affinityTtlMs: number;
   /** 亲和表 LRU 上限（常量级，不进配置面）。 */
@@ -57,9 +55,6 @@ export interface OrchestratorParams {
 export const DEFAULT_ORCHESTRATOR_PARAMS: Readonly<OrchestratorParams> = Object.freeze({
   kickThreshold: 3,
   capacity: DEFAULT_KEY_POOL_PARAMS.capacity,
-  probeInitialMs: DEFAULT_KEY_POOL_PARAMS.probeInitialMs,
-  probeBackoffFactor: DEFAULT_KEY_POOL_PARAMS.probeBackoffFactor,
-  probeMaxMs: DEFAULT_KEY_POOL_PARAMS.probeMaxMs,
   affinityTtlMs: 300_000,
   affinityMax: 512,
   globalConcurrency: 0, // 0 = 跟随 key 数（index.ts 归一化）
@@ -70,8 +65,20 @@ export const DEFAULT_ORCHESTRATOR_PARAMS: Readonly<OrchestratorParams> = Object.
   modelGroups: { "sensenova-6.8-flash-lite": "flash-lite" },
 });
 
-/** pool-429 格子条目：命中时刻（TTL 自愈 + reportQuotaPools 额度回正清除；探测成功**不动格**——2026-11-03 S2=B 拍板：/models 200 只证明 key 活着，不证明积分回血）。 */
+/** pool-429 格子条目：命中时刻（TTL 自愈 + reportQuotaPools 额度回正清除；时间门放出**不动格**——格的清点留给 TTL 与额度回正，放出≠格清）。 */
 const GRID_TTL_MS = 30 * 60_000;
+
+/**
+ * 额度耗尽升级阈值（毫秒）——**一个参数两个职责**（2026-11-04 定稿）：
+ * ① 断流窗：同 key 两次 429 间隔超过它 ⇒ 翻篇（firstLimitedAt 重置，闲置不算持续）；
+ * ② 打格阈值：连续段（首撞至今无成功、429 间隔均未断流）攒满它 ⇒ 打 pool 格。
+ * 定标：30min 下不误伤任何已知限流窗口（tpm 族分钟级）、覆盖对话节奏的回合间隔
+ * （分钟级不算断流）、给耗尽 key 的白撞期收口到半小时；额度耗尽为滚动 5h 起步，
+ * 阈值落在两簇之间的宽带内。2026-11-03 拍板（「被认为是 tpm 且一段时间无法使用
+ * 就归为额度耗尽」），2026-11-04 他驳回首撞制加公平语义（「空闲时间不算，过了
+ 一段时间第一次请求 429 对 key1 不公平」）后定稿为断流重置式。
+ */
+const LIMITED_SUSTAIN_MS = 30 * 60_000;
 
 /** 一次选 key 的答案。 */
 export interface PickedKey {
@@ -85,8 +92,6 @@ export interface OrchestratorDeps {
   params: () => OrchestratorParams;
   /** 解析全部账户（id + key）；空数组 = 无可用凭据。id 面板管理用（"default"=面板 key）。 */
   resolveKeys: () => Promise<Array<{ id: string; key: string }>>;
-  /** 探测回调：返回是否成功（由 index.ts 注入 GET {apiBase}/models 的轻探测）。 */
-  probe: (key: string) => Promise<boolean>;
   /** 可注入时钟（测试用）。 */
   now?: () => number;
   /** 日志（可缺省）。 */
@@ -114,6 +119,16 @@ export class KeyOrchestrator {
   private readonly affinity = new Map<string, AffinityEntry>();
   /** (key \u0000 group) → 命中时刻。 */
   private readonly poolGrid = new Map<string, number>();
+  /** key → 本轮连续限流段的首撞时刻（额度耗尽升级判据，2026-11-04 断流重置式）：
+   * noteLimited 记（幂等首记；与上次 429 间隔超过 LIMITED_SUSTAIN_MS 且不在豁免
+   * 窗内 ⇒ 翻篇重置）、reportSuccess 清零、跨阻塞态与时间门持续累计。 */
+  private readonly firstLimitedAt = new Map<string, number>();
+  /** key → 最近一次 429 时刻（断流判据的另一半；与 firstLimitedAt 同生共死）。 */
+  private readonly lastLimitedAt = new Map<string, number>();
+  /** key → 最近一次打格时刻（格中豁免的延长窗）：格 TTL 过期后的试探 429 时格
+   * 已消失，若无此窗试探会触发断流重置 → 白撞率回升一半。豁免窗 = 2×GRID_TTL：
+   * 覆盖「格过期 → 试探 → 立即再格（刷新本字段）」全循环；真断流（超窗）不豁免。 */
+  private readonly lastGridAt = new Map<string, number>();
   private inflight = 0;
   private readonly waiters: SlotWaiter[] = [];
   private resolvingKeys: Promise<void> | undefined;
@@ -125,9 +140,6 @@ export class KeyOrchestrator {
         const p = this.params();
         return {
           kickThreshold: p.kickThreshold,
-          probeInitialMs: p.probeInitialMs,
-          probeBackoffFactor: p.probeBackoffFactor,
-          probeMaxMs: p.probeMaxMs,
           capacity: p.capacity,
         };
       },
@@ -395,11 +407,41 @@ export class KeyOrchestrator {
    * - pool：记 (key, 组) 格子；不踢不冷却。
    */
   reportSuccess(key: string): void {
+    // 成功是唯一翻篇信号：连续限流段全清（first/last），key 回到无嫌疑状态。
+    this.firstLimitedAt.delete(key);
+    this.lastLimitedAt.delete(key);
     this.pool.onSuccess(key);
   }
 
   reportAuthRejected(key: string): void {
+    this.firstLimitedAt.delete(key);
+    this.lastLimitedAt.delete(key);
     this.pool.remove(key);
+  }
+
+  /**
+   * 记一次 429（额度耗尽计时的统一入口，2026-11-04 批 E）——**与桶无关**：
+   * tpm/rpm/unknown/an 线的 429 都进来（rpm/an 线的持续耗尽此前零隔离）。
+   *
+   * 断流重置：与上次 429 间隔超过 LIMITED_SUSTAIN_MS ⇒ 翻篇（firstLimitedAt
+   * 重置，闲置不算持续——「过了一段时间第一次请求 429 对 key1 不公平」）。
+   * 豁免两拦（隔离相关的空闲不算断流——是关着不是好了）：①格中；②最近打过格
+   * （lastGridAt 半径 2×GRID_TTL）——后者保护「格 TTL 过期后的试探 429」：格已
+   * 消失但隔离期的空闲不该翻账，试探保留旧首撞 ⇒ 立即再格，节律保持每 30min 一次。
+   * reportSuccess 是唯一翻篇信号（成功清全账）。
+   */
+  noteLimited(key: string, group: string): void {
+    const now = this.now();
+    const last = this.lastLimitedAt.get(key);
+    const gridAt = this.lastGridAt.get(key);
+    const inIsolation = this.gridMarked(key, group)
+      || (gridAt !== undefined && now - gridAt < GRID_TTL_MS * 2);
+    const breakFlow = last !== undefined
+      && now - last > LIMITED_SUSTAIN_MS
+      && !inIsolation;
+    if (breakFlow) this.firstLimitedAt.delete(key);
+    if (!this.firstLimitedAt.has(key)) this.firstLimitedAt.set(key, now);
+    this.lastLimitedAt.set(key, now);
   }
 
   reportRateLimited(key: string): { kicked: boolean; strikes: number } {
@@ -407,13 +449,25 @@ export class KeyOrchestrator {
     if (result.kicked) {
       // 踢出行（2026-11-03 他拍板，N1 真机统计的前置）：此前 kick 全程静默、返回值
       // 零读者——「踢→探测回→再踢」循环没法从 trace 统计，只能人眼盯面板相位。
-      traceLog(`[dsh-sensenova-suite] key 踢出运行态 key=${maskKey(key)} strikes=${result.strikes} 连续限流达阈值，等待探测恢复`);
+      traceLog(`[dsh-sensenova-suite] key 踢出运行态 key=${maskKey(key)} strikes=${result.strikes} 连续限流达阈值，等待恢复`);
     }
     return result;
   }
 
+  /**
+   * 该 key 是否「连续限流段攒满升级阈值」⇒ 按额度耗尽处置（打 pool 格）。
+   * 判据与 body 无关（积分池耗尽的形状零样本），纯行为观测：连续段只在成功时
+   * 清零、429 间隔超阈值即翻篇重置。判定点在 llm-adapter.rotateApiKey——
+   * noteLimited 之后紧邻调用（此时 lastLimitedAt 刚刷新，段必然存活）。
+   */
+  sustainedLimited(key: string): boolean {
+    const at = this.firstLimitedAt.get(key);
+    return at !== undefined && this.now() - at >= LIMITED_SUSTAIN_MS;
+  }
+
   reportPoolExhausted(key: string, group: string): void {
     this.poolGrid.set(`${key}\u0000${group}`, this.now());
+    this.lastGridAt.set(key, this.now());
   }
 
   /** 清一格（reportQuotaPools 额度回正与探测成功清格共用同一份键拼接）。 */
@@ -472,34 +526,20 @@ export class KeyOrchestrator {
   }
 
   /**
-   * 探测一轮（外部 interval 驱动）：到期且未恢复的阻塞 key 逐个探测。
-   * KeyPool 的相位只由探测结果决定（三不变量之三）。
+   * 时间门一轮（外部 interval 驱动）：把阻塞驻留满 10min 的 key 放回轮换（考验
+   * 状态——strike 预置阈值-1，下一次 tpm 429 立即回笼；2xx 清零转正）。
+   * 取代旧 /models 探测（2026-11-03 批 D）：探测对 tpm/耗尽恒 200，假阳性
+   * 「放进去就出来」循环且令退避机制死码——恢复检验由轮换流量的真实 429/2xx
+   * 完成，本方法零网络。KeyPool 的相位只由时间门与成功信号决定。
+   *
+   * @returns 本次放出的 key 列表（诊断与测试用）。
    */
-  async runDueProbes(): Promise<number> {
-    await this.ensureSeeded();
-    const snapshot = this.pool.snapshot();
-    let probed = 0;
-    for (const entry of snapshot.blocked) {
-      if (!this.pool.probeDue(entry.key, this.now())) continue;
-      probed += 1;
-      let recovered = false;
-      try {
-        recovered = await this.opts.probe(entry.key);
-      } catch {
-        recovered = false;
-      }
-      if (recovered) {
-        // 成功只救相位（2026-11-03 他拍板 S2=B）：挂回运行态，**不动池格**——
-        // /models 200 只证明 key 活着，不证明积分池回血（models 读不耗积分）；
-        // 格子的清点留给 30min TTL 自愈与 reportQuotaPools 额度回正（额度真相
-        // 的专职来源）。此前的「成功清全部格子」会把仍然成立的标记洗掉，该组
-        // 下一个请求白撞一次 pool 429（自愈但多弯一轮）。
-        this.pool.onSuccess(entry.key);
-      } else {
-        this.pool.noteProbeFailed(entry.key);
-      }
+  releaseDueBlocked(): string[] {
+    const released = this.pool.releaseDueBlocked();
+    for (const key of released) {
+      traceLog(`[dsh-sensenova-suite] key 驻留期满放回轮换 key=${maskKey(key)}（阻塞 10min，考验状态：1 次 tpm 回笼 / 2xx 转正）`);
     }
-    return probed;
+    return released;
   }
 
   /** 诊断快照（设置页/日志用）。poolGrid 是诊断投影：key 段经 maskKey 打码再出

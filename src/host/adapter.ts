@@ -35,7 +35,7 @@ import type {
   StreamChunk,
   TokenUsage,
 } from '@deepseek-ai/dsh-llm';
-import { parseRetryAfterMs, classify429Body, classify429Full, bucketCountsStrike, probeFloorFor, PROVIDER_RETRY_AFTER_CAP_MS } from './rate-classify.ts';
+import { parseRetryAfterMs, classify429Body, classify429Full, bucketCountsStrike, probeFloorFor, summarize429Body, PROVIDER_RETRY_AFTER_CAP_MS } from './rate-classify.ts';
 import { shouldRotateUnclassified } from './key-health.ts';
 import { retryableCodes, ANTHROPIC_TRUNCATED_CODE, QUOTA_CODES } from './llm-retry.ts';
 import { MODELS_TIMEOUT_MS, CATALOG_FAILURE_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
@@ -924,11 +924,14 @@ function httpError(status: number, errText: string, retryAfterMs: number | undef
     // 语义：Retry-After <= 上限时透传，超长整值不透传（也不截断），由宿主本地
     // 退避策略计算。
     //
-    // 积分池全标（poolExhausted）走 ACCOUNT_QUOTA：滚动 5h/周窗口，宿主重试
-    // 毫无意义，快速失败让面板说出原因才是可处置的形态。
+    // 该组全标（poolExhausted）走 ACCOUNT_QUOTA：组内全部 key 持续限流不可用
+    // （tpm 持续判据升级/console 通道实证），宿主重试毫无意义，快速失败让面板
+    // 说出原因才是可处置的形态。（2026-11-03 语义校准：旧文案断言「积分池已耗尽」
+    // ——但 pool 类请求侧信号实测全部是限流误标，积分池耗尽的 body 形状至今
+    // 零样本；文案改为只陈述观测事实「持续限流不可用」。）
     if (poolExhausted) {
       return new LlmError(
-        'llm-sensenova: SenseNova credit pool exhausted for this model group；SenseNova 积分池已耗尽（该模型组所有 key 均无额度），等待额度恢复或更换账号',
+        'llm-sensenova: SenseNova model group persistently rate-limited；SenseNova 该模型组全部 key 持续限流不可用（连续超阈升级），已停止重试，稍后自动恢复或更换账号',
         QUOTA_CODES.accountQuota,
         { status: 429 },
       );
@@ -1506,8 +1509,10 @@ export class SensenovaAdapter extends LlmAdapter {
         const classified = classify429Body(errText);
         const full = classify429Full(errText);
         const quota429 = attempt.status === 429 && classified.quota;
-        // suite 扩展：积分池类 429（Allocated quota exceeded 形态）同样参与
-        // 粘性换 key；池类不冷却不禁用，只由池层记 (key, 组) 格子。
+        // suite 扩展：池类 429 同样参与粘性换 key；池类不冷却不禁用，只由池层记
+        // (key, 组) 格子。（2026-11-03：pool 类请求侧信号暂无生产者——旧特征串
+        // 判定实测全为限流误标已废，积分池耗尽 body 零样本；管线保留待 tpm 持续
+        // 判据/真耗尽 code 接入。）
         const pool429 = attempt.status === 429 && !classified.quota && full.kind === 'pool';
         // 配额类 429 的退避档位：取**入口快照**（上游 W3，2026-11-02 对齐）——
         // 整次 stream() 调用（= 一次宿主重试周期）内所有 internal attempt 共用
@@ -1523,13 +1528,16 @@ export class SensenovaAdapter extends LlmAdapter {
         // 429 诊断（2026-10-27）：限流本身此前全程静默——「为什么慢了」「key 是不是
         // 被限」无从判断。每次 429 一行：模型/key/分类/本档退避；30s 级退避下量可控。
         // 轨迹账本在此追加（换 key 的 continue 之前，保证链上每把 key 都入账）。
+        // body 摘要（2026-11-03 批 C）：pool 误分类破案（2026-11-02 事故）全程被
+        // 「429 行不打 body」卡住——积分池耗尽形状零样本，摘要落日志后下次真撞即可识别。
         const trail429 = this.session429Trail.get(options.sessionId) ?? [];
         if (!trail429.includes(apiKey)) trail429.push(apiKey);
         this.session429Trail.set(options.sessionId, trail429);
         traceLog(`[dsh-sensenova-suite] 429 model=${options.model} key=${maskKey(apiKey)} ` +
           `kind=${pool429 ? "pool" : classified.quota ? classified.kind : "unknown"} ` +
           `bucket=${full.bucket ?? "-"} round=${round}/${FINAL_ROUND} ` +
-          `退避=${dynamicFloorMs !== undefined ? `${Math.round(dynamicFloorMs / 1000)}s` : retryAfterMs !== undefined ? `${Math.round(retryAfterMs / 1000)}s(retry-after)` : "宿主默认"}`);
+          `退避=${dynamicFloorMs !== undefined ? `${Math.round(dynamicFloorMs / 1000)}s` : retryAfterMs !== undefined ? `${Math.round(retryAfterMs / 1000)}s(retry-after)` : "宿主默认"} ` +
+          `body=${summarize429Body(errText)}`);
         // 配额类 429 且开关开启：轮换到下一把本请求本轮未试过的 key（tried 集合做
         // 本轮内防乒乓——轮边界处清空，各 key 在下一轮重新获得一次机会）。
         // 积分池类（pool）同样参与换 key，但**只打标不打断流程**：格子由池层在选

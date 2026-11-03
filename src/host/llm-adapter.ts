@@ -161,6 +161,19 @@ export function createAdapterFactory(pool: PoolFacade) {
           orchestrator.reportAuthRejected(rejectedKey);
           return orchestrator.pickNext(exclude, group);
         }
+        // 持续限流记账（2026-11-04 批 E）：**所有** 429 形状统一入账（tpm/rpm/
+        // unknown/an 线——rpm 与 an 线的持续耗尽此前零隔离），判定与桶解耦。
+        orchestrator.noteLimited(rejectedKey, group);
+        // 耗尽升级（2026-11-03 批 C 建、2026-11-04 批 E 扩全量）：连续限流段攒满
+        // 30min（断流重置式——间隔超 30min 翻篇、格中空闲豁免，见 noteLimited）
+        // ⇒ 行为上就是额度耗尽（body 形状零样本，判据纯行为观测）——走池类管线
+        // 打 (key,组) 格子，30min TTL 到期放出试一次（段未清，仍超阈则立即再格
+        // ——每 30min 一次探测性 RTT）。对全部 rejection 形状生效。
+        if (orchestrator.sustainedLimited(rejectedKey)) {
+          orchestrator.reportPoolExhausted(rejectedKey, group);
+          if (orchestrator.groupFullyPoolMarked(group)) return undefined;
+          return orchestrator.pickNext(exclude, group);
+        }
         if (rejection === "pool-exhausted") {
           orchestrator.reportPoolExhausted(rejectedKey, group);
           // 全池中招快速失败（PLAN §5.2 判据首次接线，2026-10-31）：该组每把

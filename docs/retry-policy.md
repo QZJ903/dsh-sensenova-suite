@@ -17,13 +17,17 @@
 | 端点族 · RPM 形态 | `RateLimitExceeded.Endpoint*RPMExceeded` | 同族请求数形态（窗口长度无实测数据，按桶语义归快） | **rpm** | 秒～分钟（推定，未实测） |
 | 账号族 · TPM 形态 | `ModelAccount*Tpm*` | 这把 key 的账号级 token 限流，跨模型同时受限 | **tpm** | 同端点族 |
 | 账号族 · RPM 形态 | `ModelAccount*Rpm*` | 同族请求数形态（无窗口实测数据） | **rpm** | 推定同上 |
-| 池类 | message 含 "Allocated quota exceeded" 等 | 积分池耗尽；官方积分规则为滚动 5h（6 万）+ 滚动周（60 万）两层额度 | 无（记格子） | 分钟～小时（窗口老化自愈） |
+| 配额维节流 | `code: "Throttling.AllocationQuota"`（message "Workspace allocated quota exceeded…"） | workspace 对模型的分配配额节流——**2026-11-03 真机实测为 rpm 限流**（14s~1min 自愈、多账号各自撞各自的窗），不是积分池耗尽 | rpm | 秒～分钟；**轮换不记 strike** |
+| （已废）池特征串 | ~~message 含 "Allocated quota exceeded" 等~~ | **2026-11-03 判定废除**：两个词条实测全为限流误标（词条 1 = AllocationQuota 限流措辞、词条 2 无任何出处），18 条真机 pool 日志均为限流。积分池耗尽的 body 形状至今零样本；请求侧识别 = **持续限流记账（已落地，2026-11-04 断流重置式）**：**所有 429 形状**（与桶解耦——rpm/unknown/an 线全入口）记账，429 间隔超 30min 翻篇重记（闲置不算持续）、连续段攒满 30min 且无成功 ⇒ 打池格（key-orchestrator.noteLimited/sustainedLimited + llm-adapter.rotateApiKey 统一分派），30min 格 TTL 到期放出试一次、段未清立即再格——每 30min 一次探测性 RTT；全组格满 → ACCOUNT_QUOTA 快速终止。池格另由 console 通道驱动 | — | — |
+| `insufficient_quota` | `code: "insufficient_quota"`（message "inference exceeds tpm/rpm limit"） | 命名像配额耗尽、实为速率限流（2026-10-31 freeapi 订正；2026-11-03 真机样本实测 rpm 形态） | rpm | 秒～分钟；**轮换不记 strike**（2026-11-03 前曾按 tpm 计踢） |
 
 > **`429003` 归速率桶的依据与不确定性**：样本只有一条（来自上游 token-plan 插件的线上记录），它的 message 与 429001 完全相同、type 与端点族相同，**两者都区分不了**。归类依据是用户对「商汤 RPM 很低、429 常见」的实测观察，不是编号规律。若日后抓到的样本显示它其实是 token 窗口，改这一行即可。
 >
 > **strike 口径（2026-11-02 定稿）**：踢出阈值（连续 3 次）只计 **TPM 桶**——429001 / EndpointTPM / AccountTPM（窗口分钟级以上，持续命中才值得关禁闭）。RPM 桶（code 8 / 429003 / EndpointRPM / AccountRPM，14s 级自愈）轮换但不计数；判据单一来源 = `rate-classify.ts` 的 `bucketCountsStrike`（入参是桶，不是 kind），对话链与识图/出图链都从它取。2026-10-31 的旧口径按 kind 白名单（tpm/endpoint/account 全计），把作用域族的 RPM 形态也计成了重形态——已改。
 
 **作用域结论（2026-10-31 真 key 实测，推翻旧结论）**：此前有说法称 `EndpointTPMExceeded` 是「端点共享、换 key 无用」，**该结论没有实测支撑**。当日实测同一时刻三把 key 打同一模型：A 200、C 200、B 429（`EndpointTPMExceeded`）；B 换 kimi-k3 仍 429（`ModelAccountRpmRateLimitExceeded`），而 A/C 始终可用。⇒ 这两族到不了「端点共享」，**换 key 能绕开**；B 的 429 是这把 key 自己的窗口（几小时不恢复也出现过，但同一时刻别的 key 完好）。
+
+**tpm 隔离的恢复机制（2026-11-03 批 D 重做；2026-11-04 批 E 与耗尽账本解耦）**：连续 3 次 tpm 踢出阻塞态后，**驻留 10 分钟**（`BLOCKED_RESIDENCY_MS`）由时间门放回轮换——**考验状态**（strike 预置阈值-1）：下一次 tpm 429 立即回笼再驻留 10min，2xx 成功清零转正。**不做网络探测**——旧 /models 探测对 tpm/额度耗尽恒 200（恒真信号），「放进去就出来」的假恢复循环且令探测退避机制（probeAttempts 15/30/60s）整段死码，已整体拆除；恢复检验由轮换流量的真实 429/2xx 完成（freeapi 的「借用+2xx 转正」本命通道原样保留，借用不受驻留限制）。池紧张时借阻塞 key 兜吞吐的语义不变。**额度耗尽账本与该机制解耦**（批 E）：连续限流段跨阻塞态与时间门持续累计，只有 2xx 清账——隔离期的空闲不算断流（是关着不是好了）。
 
 **作用域不参与处置（2026-11-02）**：`Endpoint` / `ModelAccount` 这层前缀只说明窗口记在哪一层，**踢出差异全部来自它后面那个桶类型**（TPM/RPM）。旧实现把两族各当一个 kind，于是 `EndpointRPMExceeded` 跟着 `EndpointTPMExceeded` 一起计 strike——短桶被当成长窗口。现改为按桶类型判踢出，作用域只留在 `kind` 日志标签里；退避值则快慢共用一套梯子。
 

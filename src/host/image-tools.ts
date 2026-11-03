@@ -36,15 +36,26 @@ export interface ImageToolOptions {
   timeoutMs: number;
 }
 
-/** 依赖注入：每工具配置解析（sn_text2img / sn_img2img 各自一份）、key 解析（池）与成功上报。 */
+/** 依赖注入：每工具配置解析（sn_text2img / sn_img2img 各自一份）、key 解析（池）、
+ * 成功上报与额度耗尽换 key（2026-11-04 批 H：429 遍历全池——失败一直换到所有
+ * key 试过，不打池格不记账，与对话链的耗尽账本无关）。
+ * rotateOnQuota 的 exclude = 本轮已试过的 key 全集（含失败 key），池层返回
+ * 未试过的一把；全池试完返回 undefined（调用方冷却+报错收场）。 */
 export interface ImageToolDeps {
   options: (tool: "text2img" | "img2img") => ImageToolOptions;
   resolveKey: (model: string) => Promise<string>;
   reportSuccess: (key: string) => void;
+  /** 额度耗尽换 key：从池里挑一把不在 exclude 的；全试过返回 undefined。 */
+  rotateOnQuota: (key: string, model: string, exclude: ReadonlySet<string>) => Promise<string | undefined>;
   /** 可注入时钟/请求（测试用）。 */
   now?: () => number;
   fetchImpl?: typeof fetch;
 }
+
+/** 出图「上次成功的 key」（model → key，模块级跨调用）：下一次请求优先用它，
+ * 失败的 key 不留案底——上次失败的这次照常参与轮询（2026-11-04 他裁定）。
+ * 条目数 ≤ 出图模型数，无界风险无。 */
+const lastGoodImageKey = new Map<string, string>();
 
 /** 失败后的冷却期：30s 内出图工具直接拒绝。 */
 export const IMAGE_COOLDOWN_MS = 30_000;
@@ -85,7 +96,9 @@ async function postImage(path: string, apiKey: string, body: Record<string, unkn
       const parsed = asRecord(json);
       const err = asRecord(parsed.error);
       const msg = typeof err.message === "string" ? err.message : (typeof parsed.error === "string" ? parsed.error : text);
-      throw new Error(`SenseNova API 错误（HTTP ${response.status}）：${msg}`);
+      const error = new Error(`SenseNova API 错误（HTTP ${response.status}）：${msg}`) as Error & { status?: number };
+      error.status = response.status;
+      throw error;
     }
     return asRecord(json);
   } finally {
@@ -252,21 +265,51 @@ export async function callImageApi(
     });
   }
 
+  // 起始 key：上次成功的优先（2026-11-04 他裁定「记住成功的 key，下一次还用他」），
+  // 没有或解析失败回池层 resolveKey。
   let key: string;
+  const preferred = lastGoodImageKey.get(model);
   try {
-    key = await deps.resolveKey(model);
+    key = preferred ?? (await deps.resolveKey(model));
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 
   const url = `${config.apiBase.replace(/\/+$/, "")}${endpoint}`;
   let result: Record<string, unknown>;
-  try {
-    result = await postImage(url, key, body, config.timeoutMs, fetchImpl);
-  } catch (error) {
-    cooldownUntil = now() + IMAGE_COOLDOWN_MS;
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  // 额度耗尽遍历（2026-11-04 批 H，他裁定）：429 ⇒ 排除已试 key 换下一把，
+  // **一直换到所有 key 都试过**（每把一次），全试完 ⇒ 冷却+报错收场。
+  // 失败的 key 不留案底——上一轮失败的这一轮照常参与轮询；成功 key 记入
+  // lastGoodImageKey 作下一次起点。不打池格不记账（与对话链账本无关）。
+  const tried = new Set<string>();
+  for (;;) {
+    tried.add(key);
+    try {
+      result = await postImage(url, key, body, config.timeoutMs, fetchImpl);
+      break;
+    } catch (error) {
+      const status = (error as { status?: unknown }).status;
+      if (status !== 429) {
+        // 401（key 已失效，常见于面板删 key 后 lastGood 残留）⇒ 清记忆，
+        // 下一次回池层 resolveKey 重新选——否则永久卡死在死 key 上。
+        if (status === 401) lastGoodImageKey.delete(model);
+        cooldownUntil = now() + IMAGE_COOLDOWN_MS;
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      let next: string | undefined;
+      try {
+        next = await deps.rotateOnQuota(key, model, tried);
+      } catch {
+        next = undefined;
+      }
+      if (next === undefined || next === "" || tried.has(next)) {
+        cooldownUntil = now() + IMAGE_COOLDOWN_MS;
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      key = next;
+    }
   }
+  lastGoodImageKey.set(model, key);
   deps.reportSuccess(key);
 
   const data = asRecord(Array.isArray(result.data) ? asRecord(result.data[0]) : {});

@@ -38,7 +38,6 @@ import { createFileCatalogStore } from "./catalog-store.ts";
 import { createFileProviderStore } from "./provider-store.ts";
 import { profileSegment, profileStateDir } from "./state-store.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "./key-orchestrator.ts";
-import { bucketCountsStrike } from "./rate-classify.ts";
 import { createFilePoolStore, emptyPoolRecord, effectiveVisionModels } from "./pool-store.ts";
 import { thinkingWithDefaults } from "./wire/facts.ts";
 import { identifyVisionModel } from "./llm-models.ts";
@@ -275,19 +274,6 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       const excluded = new Set([...poolRecord.disabledIds, ...poolRecord.deletedIds]);
       return (await resolvePoolKeys()).filter((entry) => !excluded.has(entry.id));
     },
-    probe: async (key: string) => {
-      // 最轻探测：GET {apiBase}/models（不耗积分、不占对话速率桶的目录读）。
-      try {
-        const origin = settings.apiBase.replace(/\/+$/, "");
-        const response = await fetch(`${origin}/models`, {
-          headers: { Authorization: `Bearer ${key}` },
-          signal: AbortSignal.timeout(10_000),
-        });
-        return response.ok;
-      } catch {
-        return false;
-      }
-    },
     logger: ctx.logger,
   });
   // 面板目录线的 key，两级回落：①pickStart（健康 key 优先，与适配器同源，
@@ -349,6 +335,12 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       resolveKey: async () => {
         const picked = await orchestrator.pickStart({ model: poolRecord.vision?.model ?? settings.visionModel });
         return picked.key;
+      },
+      // 读图桥 429 换 key（2026-11-04 批 H 遍历式，同出图链）：exclude = 本轮已试
+      // key 全集；不打格不记账，与 429 分类无关。
+      rotateOnQuota: async (key, exclude) => {
+        const group = orchestrator.groupOf(poolRecord.vision?.model ?? settings.visionModel);
+        return await orchestrator.pickNext(new Set([key, ...exclude]), group);
       },
       get feedback() {
         return visionFeedback;
@@ -620,15 +612,10 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   startSideEffects(ctx, wiring, effects);
 
   // ── 出图 + 视觉 ────────────────────────────────────────────────────────
-  /** 视觉调用结局回池（单份定义，tools 与桥共用——两段手抄会漂）。 */
-  const visionFeedback: import("./vision/run.ts").VisionFeedback = {
-    on429: (key, kind, bucket) => {
-      // unknown（形状不明）与 RPM 桶（code 8 / 429003 / *RPM* 族，14s 级自愈）
-      // 都不记 strike，与对话链同一教义（判据单一来源 = bucketCountsStrike）。
-      // 落空 = 不记格不计数，key 留在轮转里，探测调度照常兜底；TPM 桶才计数踢出。
-      if (kind === "pool") orchestrator.reportPoolExhausted(key, orchestrator.groupOf(poolRecord.vision?.model ?? settings.visionModel));
-      else if (bucketCountsStrike(bucket)) orchestrator.reportRateLimited(key);
-    },
+  /** 视觉调用结局回池（读图桥专用；出图链与桥的 429 都走各自换 key，不经此）。
+   * 2026-11-04 批 G：on429 记账分支撤（他裁定「读图桥也和出图链一样，与 429
+   * 分类无关，只保证服务继续」——429 由桥内换 key 重试处理），只留 401/成功。 */
+  const visionFeedback: import("./vision/bridge.ts").VisionFeedback = {
     on401: (key) => orchestrator.reportAuthRejected(key),
     onSuccess: (key) => orchestrator.reportSuccess(key)
   };
@@ -663,7 +650,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
           // ctx.get 暴露——此前 ctx.get("tools") 恒 null，工具从未注册（2026-10-27）。
           const tools = (ctx as { tools?: { register?: (tool: unknown) => () => void } }).tools ?? null;
           if (tools === null || typeof tools.register !== "function") {
-            ctx.logger?.warn?.(`${name}: ctx.tools 未注入（inject 缺 "tools"），出图/识图工具未注册`);
+            ctx.logger?.warn?.(`${name}: ctx.tools 未注入（inject 缺 "tools"），出图工具未注册`);
             return;
           }
           stage = "读取 pool.json";
@@ -671,30 +658,15 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
           const enabled = (name: string): boolean => {
             if (name === "sn_text2img") return settings.text2imgEnabled || poolRecord.toolsEnabled.text2img === true;
             if (name === "sn_img2img") return settings.img2imgEnabled || poolRecord.toolsEnabled.img2img === true;
-            if (name === "sn_describe_image" || name === "sn_describe_images") {
-              return settings.visionToolsEnabled || poolRecord.toolsEnabled.visionTools === true;
-            }
-            return false;
+            return false; // 识图工具已下线（2026-11-04：原生看图+读图桥覆盖，见 vision/tools.ts）
           };
-          const anyEnabled = settings.text2imgEnabled || settings.img2imgEnabled || settings.visionToolsEnabled
-            || poolRecord.toolsEnabled?.text2img === true || poolRecord.toolsEnabled?.img2img === true
-            || poolRecord.toolsEnabled?.visionTools === true;
+          const anyEnabled = settings.text2imgEnabled || settings.img2imgEnabled
+            || poolRecord.toolsEnabled?.text2img === true || poolRecord.toolsEnabled?.img2img === true;
           if (!anyEnabled) return; // 全关：保持零注册（与旧行为一致，peer 也不加载）。
           stage = "加载 tools 模块";
           const module = await import("./vision/tools.ts");
           stage = "构建工具集";
           const toolset = module.buildToolset({
-            visionOptions: () => ({
-              apiBase: settings.apiBase,
-              model: poolRecord.vision?.model ?? settings.visionModel,
-              imageMode: settings.visionImageMode,
-              timeoutMs: settings.visionTimeoutMs,
-            }),
-            resolveVisionKey: async () => {
-              const picked = await orchestrator.pickStart({ model: settings.visionModel });
-              return picked.key;
-            },
-            visionFeedback: () => visionFeedback,
             // 每工具生效值：面板保存值（pool-store）> patch 默认 > 代码默认。
             imageOptions: (tool: "text2img" | "img2img") => {
               const saved = tool === "text2img" ? poolRecord.text2img : poolRecord.img2img;
@@ -727,6 +699,10 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
               }
             },
             reportImageSuccess: (key) => orchestrator.reportSuccess(key),
+            // 出图额度耗尽换 key（2026-11-04 批 H 遍历式）：只换不打格——exclude =
+            // 本轮已试 key 全集，池层返回未试过的一把；与对话链的耗尽账本无关。
+            rotateImageKey: async (key, model, exclude) =>
+              orchestrator.pickNext(new Set([key, ...exclude]), orchestrator.groupOf(model)),
             ctx: { get: (service: string) => getService(service) },
           });
           stage = "注册工具";
@@ -764,12 +740,12 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     };
   }, `${name}: image/vision`);
 
-  // 探测时钟：每 15s 扫一次到期探测——探测与 agent 请求解耦，
-  // 「只在 2xx 清零」的短路死锁由此根治。挂 ctx.effect 随插件卸载清掉。
-  // catch 必须有：凭据服务未注册时 resolveKeys 抛错（防降级首种），空拒绝
-  // 会变成每 15s 一次的 unhandledRejection。
+  // 恢复时钟：每 15s 扫一次阻塞驻留——驻留满 10min 的 key 由时间门放回轮换
+  // （考验状态），恢复检验由轮换流量的真实 429/2xx 完成（2026-11-03 批 D 拆除
+  // /models 探测：恒 200 假阳性循环且令退避机制死码）。时间门是纯状态操作
+  // （零网络、零 promise），同步调用即可。挂 ctx.effect 随插件卸载清掉。
   const probeTimer = setInterval(() => {
-    orchestrator.runDueProbes().catch((error: unknown) => ctx.logger?.warn?.(`${name}: probe tick skipped (pool not seeded yet)`, error));
+    orchestrator.releaseDueBlocked();
   }, 15_000);
   probeTimer.unref?.();
   ctx.effect(() => () => clearInterval(probeTimer), `${name}: probe timer`);

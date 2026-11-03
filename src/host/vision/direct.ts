@@ -3,7 +3,7 @@
  *
  * `redirect: 'error'`（凭据请求拒重定向）；超时用 `AbortSignal.timeout`。
  * 单模型（用户选择）；HTTP 失败抛出的错误带 `status` 与 `body`，供上层把
- * 429/401 按套件教义回池（run.ts 的 VisionFeedback）。
+ * 429/401 按套件教义回池（bridge.ts 的 VisionFeedback）。
  *
  * 纯函数 + 可注入 `fetchImpl`。
  *

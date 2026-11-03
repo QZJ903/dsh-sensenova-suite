@@ -16,10 +16,27 @@
  */
 
 import { postChat, extractText } from "./direct.ts";
-import { classify429Full } from "../rate-classify.ts";
 import { traceLog } from "../trace-log.ts";
 import type { ImageAttachmentRef } from "./image-input.ts";
-import type { VisionFeedback, VisionOptions } from "./run.ts";
+
+/** 视觉运行配置（host-config 解析后的形状）：单模型，由用户选择。
+ * （2026-11-04 自 run.ts 挪入——describe 工具下线后本文件是唯一消费者。） */
+export interface VisionOptions {
+  apiBase: string;
+  model: string;
+  imageMode: "image_url" | "image_base64";
+  timeoutMs: number;
+}
+
+/**
+ * 结局反馈：视觉调用的结局按套件统一教义回池——429 记账（批 E：与桶解耦，
+ * 连续段攒满 30min 打格）、401 永久移除、成功清零。index.ts 注入；本模块不 import 池。
+ */
+export interface VisionFeedback {
+  /** 401 永久移除（key 坏）。429 不经此——桥内换 key 重试（与 429 分类无关）。 */
+  on401: (key: string) => void;
+  onSuccess: (key: string) => void;
+}
 
 /** bridge 三种模式。 */
 
@@ -35,7 +52,12 @@ export interface ImageSwapperDeps {
    *  kimi-k3 / sensenova-6.8-flash-lite）。判定源：勾选 = 原生看图，不转述。 */
   checkedIds: () => readonly string[];
   resolveKey: () => Promise<string>;
+  /** 429 换 key（exclude = 本轮已试 key 全集；不打格不记账——与 429 分类无关，
+   * 只保证服务继续）。 */
+  rotateOnQuota: (key: string, exclude: ReadonlySet<string>) => Promise<string | undefined>;
   feedback: VisionFeedback;
+  /** 可注入请求（测试用）；缺省全局 fetch。 */
+  fetchImpl?: typeof fetch;
   /** 读一张已入库图片 → base64（附件服务桥接的本地只读路径）。 */
   loadImage: (ref: ImageAttachmentRef) => Promise<{ base64: string; mediaType: string }>;
 }
@@ -83,46 +105,70 @@ function errorText(error: unknown): string {
 /**
  * 用直连链读取一张已入库图片并转述（key 经池解析），返回带标注的观察文本。
  * 图片字节经注入的 loadImage（附件服务桥接的本地只读路径）取得。
+ * 429 处置（2026-11-04 批 G，他裁定「读图桥也和出图链一样，与 429 分类无关，
+ * 只保证服务继续」）：换一把 key 重试一次（rotateOnQuota 排除失败 key），不打
+ * 格不记账；401 仍移除、2xx 仍转正（非 429 的池纪律保留）。
  */
 async function describeImage(
   loadImage: (ref: ImageAttachmentRef) => Promise<{ base64: string; mediaType: string }>,
   options: VisionOptions,
   resolveKey: () => Promise<string>,
+  rotateOnQuota: (key: string, exclude: ReadonlySet<string>) => Promise<string | undefined>,
   feedback: VisionFeedback,
+  fetchImpl: typeof fetch | undefined,
+  preferred: string | undefined,
   ref: ImageAttachmentRef,
   prompt: string,
   meta: { imageIndex: number; imageTotal: number },
-): Promise<{ text: string; model: string }> {
+): Promise<{ text: string; model: string; usedKey?: string }> {
   const stored = await loadImage(ref);
   if (typeof stored.base64 !== "string" || stored.base64 === "") {
     throw new Error("图片附件为空或不可读");
   }
-  const apiKey = await resolveKey();
   const content = [
     { type: "image_url", image_url: { url: `data:${stored.mediaType};base64,${stored.base64}` } },
     { type: "text", text: prompt },
   ];
-  let result: string;
-  try {
-    result = await postChat({
-      apiBase: options.apiBase,
-      model: options.model,
-      content,
-      apiKey,
-      timeoutMs: options.timeoutMs
-    }).then((data) => { feedback.onSuccess(apiKey); return extractText(data); });
-  } catch (error: unknown) {
-    const err = error as { status?: unknown; body?: unknown };
-    const status = typeof err.status === "number" ? err.status : undefined;
-    if (status === 429) {
-      const classified = classify429Full(typeof err.body === "string" ? err.body : "");
-      feedback.on429(apiKey, classified.kind, classified.bucket);
+  // 额度耗尽遍历（2026-11-04 批 H，同出图链）：429 ⇒ 排除已试 key 换下一把，
+  // 一直换到所有 key 都试过（每把一次）再抛——上层 rewrite 回调的占位 catch
+  // （【图片转换失败：…】）收场，对话继续。起点优先「上次成功的 key」；失败
+  // key 不留案底，下一轮照常参与。401 仍移除。
+  const tried = new Set<string>();
+  let current = preferred ?? (await resolveKey());
+  for (;;) {
+    tried.add(current);
+    let data: Record<string, unknown>;
+    try {
+      data = await postChat({
+        apiBase: options.apiBase,
+        model: options.model,
+        content,
+        apiKey: current,
+        timeoutMs: options.timeoutMs,
+        ...(fetchImpl === undefined ? {} : { fetchImpl })
+      });
+    } catch (error: unknown) {
+      const status = (error as { status?: unknown }).status;
+      if (status !== 429) {
+        if (status === 401) feedback.on401(current);
+        throw error;
+      }
+      let next: string | undefined;
+      try {
+        next = await rotateOnQuota(current, tried);
+      } catch {
+        next = undefined;
+      }
+      if (next === undefined || next === "" || tried.has(next)) throw error;
+      current = next;
+      continue;
     }
-    else if (status === 401) feedback.on401(apiKey);
-    throw error;
+    feedback.onSuccess(current);
+    const result = extractText(data);
+    const tag = `【视觉观察：${options.model}${meta.imageTotal > 1 ? ` · 第 ${meta.imageIndex}/${meta.imageTotal} 张` : ""}】`;
+    return { text: `${tag}
+${result.trim()}`, model: options.model, usedKey: current };
   }
-  const tag = `【视觉观察：${options.model}${meta.imageTotal > 1 ? ` · 第 ${meta.imageIndex}/${meta.imageTotal} 张` : ""}】`;
-  return { text: `${tag}\n${result.trim()}`, model: options.model };
 }
 
 /**
@@ -237,6 +283,9 @@ const observationCache = new Map<string, string>();
  * 与 session 投影不被触碰——用户侧界面保持原图原文。
  */
 export function createImageSwapper(deps: ImageSwapperDeps) {
+  // 上次成功的转述 key（2026-11-04 批 H）：下一次转述优先用它；成功才更新，
+  // 失败不留案底（上次失败的这一轮照常参与）。全池试完由上层占位收场。
+  let lastGoodKey: string | undefined;
   return async function swapImagesForObservations<T>(
     messages: readonly T[],
     context: { model: string },
@@ -264,7 +313,8 @@ export function createImageSwapper(deps: ImageSwapperDeps) {
       if (cached !== undefined) return cached;
       const prompt = buildBridgePrompt(options, imageIndex, stats.total);
       try {
-        const result = await describeImage(deps.loadImage, options, deps.resolveKey, deps.feedback, ref, prompt, { imageIndex, imageTotal: stats.total });
+        const result = await describeImage(deps.loadImage, options, deps.resolveKey, deps.rotateOnQuota, deps.feedback, deps.fetchImpl, lastGoodKey, ref, prompt, { imageIndex, imageTotal: stats.total });
+        if (result.usedKey !== undefined) lastGoodKey = result.usedKey;
         if (cacheKey !== "") observationCache.set(cacheKey, result.text);
         return result.text;
       } catch (error: unknown) {

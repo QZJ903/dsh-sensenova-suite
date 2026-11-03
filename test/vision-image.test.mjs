@@ -5,7 +5,7 @@
  *   - image-tools：参数校验（空 prompt / edits 无 images 抛错）、成功值形状
  *     （url 信封 → 只回 URL 不回 base64 + 面板 outputDir 落盘拉字节）、失败进 30s 冷却（冷却期直接拒绝）、
  *     key 经池解析并上报成功；
- *   - vision/run：describe 信封（成功 metadata.attempts / 失败 envelope），fetch 全部走注入桩；
+ *   - 出图工具：额度耗尽换 key（2026-11-04——只换不打格，与对话链账本无关）；
  *   - vision/bridge：contentHasImage 递归（含 tool-result 内嵌）；
  *   - host-config：模型链归一化与出图/视觉键的回落。
  */
@@ -14,8 +14,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callImageApi, resetImageCooldown, IMAGE_COOLDOWN_MS } from "../src/host/image-tools.ts";
-import { describe as runDescribe } from "../src/host/vision/run.ts";
-import { contentHasImage } from "../src/host/vision/bridge.ts";
+import { contentHasImage, createImageSwapper } from "../src/host/vision/bridge.ts";
 
 const results = [];
 const check = (name, ok, detail = "") => results.push({ name, pass: ok === true, detail: String(detail) });
@@ -113,48 +112,73 @@ try {
   resetImageCooldown();
   const recovered = await callImageApi(deps(), { prompt: "冷却结束" }, "text2img", "/images/generations");
   check("冷却结束后恢复", recovered.ok === true);
+
+  // 额度耗尽换 key（2026-11-04）：429 → rotateOnQuota 换一把重试一次；成功走
+  // reportSuccess（新 key）。不打格不记账——与对话链耗尽账本无关（他裁定）。
+  resetImageCooldown();
+  const rotated = [];
+  const rotateDeps = {
+    ...deps(),
+    fetchImpl: (async (_url, init) => {
+      const auth = String(init?.headers?.Authorization ?? "");
+      if (auth.includes("sk-pool-1")) {
+        return new Response(JSON.stringify({ error: { code: "Throttling.AllocationQuota", message: "Workspace allocated quota exceeded" } }), { status: 429 });
+      }
+      return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("y").toString("base64") }] }), { status: 200 });
+    }),
+    resolveKey: async () => "sk-pool-1",
+    rotateOnQuota: async (failedKey) => { rotated.push(failedKey); return "sk-pool-2"; },
+  };
+  const rotValue = await callImageApi(rotateDeps, { prompt: "耗尽换 key" }, "text2img", "/images/generations");
+  check("429 → 换 key 重试成功（新 key 走 reportSuccess，不打格）",
+    rotValue.ok === true && rotated[0] === "sk-pool-1" && successes.includes("sk-pool-2"),
+    JSON.stringify(rotValue).slice(0, 140));
+  // 批 H 遍历式：429 一直换到所有 key 试过（每把一次），全试完才报错收场。
+  resetImageCooldown();
+  const poolKeys = ["sk-1", "sk-2", "sk-3"];
+  const seenKeys = [];
+  const traverseDeps = {
+    ...deps(),
+    resolveKey: async () => "sk-1",
+    fetchImpl: (async (_url, init) => {
+      seenKeys.push(String(init?.headers?.Authorization ?? "").replace("Bearer ", ""));
+      return new Response(JSON.stringify({ error: { code: "Throttling.AllocationQuota", message: "Workspace allocated quota exceeded" } }), { status: 429 });
+    }),
+    rotateOnQuota: async (_failed, _model, exclude) => poolKeys.find((k) => !exclude.has(k)),
+  };
+  const travValue = await callImageApi(traverseDeps, { prompt: "全池遍历" }, "text2img", "/images/generations");
+  check("批 H 遍历：lastGood 起点后全池各试一次再报错收场",
+    travValue.ok === false
+    && seenKeys[0] === "sk-pool-2" && new Set(seenKeys).size === 4
+    && seenKeys.slice(1).join(",") === "sk-1,sk-2,sk-3",
+    JSON.stringify({ seenKeys, value: travValue }).slice(0, 200));
+  // lastGood 优先：上次成功的 key（sk-pool-2）下一次直接用，resolveKey 不被调。
+  resetImageCooldown();
+  let resolveCalled = 0;
+  const goodDeps = {
+    ...deps(),
+    resolveKey: async () => { resolveCalled += 1; return "sk-fresh"; },
+    fetchImpl: (async (_url, init) => {
+      const auth = String(init?.headers?.Authorization ?? "");
+      if (!auth.includes("sk-pool-2")) return new Response("unexpected key", { status: 500 });
+      return new Response(JSON.stringify({ data: [{ b64_json: Buffer.from("z").toString("base64") }] }), { status: 200 });
+    }),
+  };
+  const goodValue = await callImageApi(goodDeps, { prompt: "lastGood 优先" }, "text2img", "/images/generations");
+  check("批 H lastGood：上次成功的 key 直接复用（resolveKey 不调）",
+    goodValue.ok === true && resolveCalled === 0, JSON.stringify(goodValue).slice(0, 120));
+  // 换无可换：rotateOnQuota 返回 undefined → 原错误报出 + 冷却。
+  resetImageCooldown();
+  const noNext = {
+    ...rotateDeps,
+    fetchImpl: (async () => new Response(JSON.stringify({ error: { code: "Throttling.AllocationQuota", message: "quota" } }), { status: 429 })),
+    rotateOnQuota: async () => undefined,
+  };
+  const noNextValue = await callImageApi(noNext, { prompt: "换无可换" }, "text2img", "/images/generations");
+  check("换无可换 → 报错收场 + 冷却", noNextValue.ok === false && String(noNextValue.error).includes("429"), JSON.stringify(noNextValue).slice(0, 140));
 } catch (e) { fail("image-tools", e); }
 
-// ── 2. vision/run（fetch 桩）────────────────────────────────────────────────
-try {
-  const options = {
-    apiBase: "https://token.sensenova.cn/v1",
-    model: "sensenova-6.8-flash-lite",
-    imageMode: "image_url",
-    timeoutMs: 5_000,
-  };
-  // 1x1 PNG 的 base64。
-  const pngB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-  const calls = [];
-  const fetchStub = (async (url, init) => {
-    calls.push(String(url));
-    if (calls.length === 2) {
-      // 第 2 次调用 429（验 429 回池分类）；第 1 次与之后 200（验成功信封与回池）。
-      return new Response(JSON.stringify({ error: { code: 8, message: "rps exhausted" } }), { status: 429 });
-    }
-    return new Response(JSON.stringify({ choices: [{ message: { content: "图里有只海豹" } }] }), { status: 200 });
-  });
-  const feedbackCalls = [];
-  const feedback = {
-    on429: (key, kind) => feedbackCalls.push(["429", key, kind]),
-    on401: (key) => feedbackCalls.push(["401", key]),
-    onSuccess: (key) => feedbackCalls.push(["ok", key])
-  };
-  const ctx = { get: (service) => (service === "fetch" ? fetchStub : undefined) };
-
-  const envelopeText = await runDescribe(ctx, { image: `data:image/png;base64,${pngB64}` }, options, async () => "sk-v", feedback, "image_reasoning");
-  const envelope = JSON.parse(envelopeText);
-  check("describe 单模型成功", envelope.ok === true && envelope.tool_used === "sensenova:sensenova-6.8-flash-lite", envelopeText.slice(0, 140));
-  check("成功回池（onSuccess）", feedbackCalls.some((c) => c[0] === "ok" && c[1] === "sk-v"), JSON.stringify(feedbackCalls));
-
-  const failText = await runDescribe(ctx, { image: `data:image/png;base64,${pngB64}` }, options, async () => "sk-v", feedback, "image_reasoning");
-  void failText;
-  check("429 回池分类为 rate-rps", feedbackCalls.some((c) => c[0] === "429" && c[2] === "rate-rps"), JSON.stringify(feedbackCalls));
-  const noKey = JSON.parse(await runDescribe(ctx, { image: `data:image/png;base64,${pngB64}` }, options, async () => { throw new Error("pool empty"); }, feedback, "image_reasoning"));
-  check("池空 → 失败信封（不抛）", noKey.ok === false && String(noKey.error).includes("pool empty"), JSON.stringify(noKey));
-} catch (e) { fail("vision/run", e); }
-
-// ── 3. bridge.contentHasImage ───────────────────────────────────────────────
+// ── 2. bridge.contentHasImage ───────────────────────────────────────────────
 try {
   const img = [{ type: "image", attachment: { kind: "image", id: "a1" } }];
   check("顶层 image 块", contentHasImage(img) === true);
@@ -164,6 +188,64 @@ try {
     { type: "tool-result", content: [{ type: "image", attachment: { kind: "image", id: "t1" } }] },
   ]) === true);
 } catch (e) { fail("bridge", e); }
+
+// ── 3. 桥 429 换 key（2026-11-04 批 G：与 429 分类无关，只保证服务继续）────
+try {
+  const pngB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const swapperCalls = [];
+  const fetchStub = (async (_url, init) => {
+    const auth = String(init?.headers?.authorization ?? init?.headers?.Authorization ?? "");
+    swapperCalls.push(auth);
+    if (auth.includes("sk-b1")) {
+      return new Response(JSON.stringify({ error: { code: "Throttling.AllocationQuota", message: "Workspace allocated quota exceeded" } }), { status: 429 });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: "图里有只海豹" } }] }), { status: 200 });
+  });
+  const okKeys = [];
+  const swapper = createImageSwapper({
+    options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", imageMode: "image_url", timeoutMs: 5_000, bridgePrompt: "描述图片", relayOn: true }),
+    checkedIds: () => [], // 未勾选 → 走转述
+    resolveKey: async () => "sk-b1",
+    rotateOnQuota: async (k) => { await Promise.resolve(); return k === "sk-b1" ? "sk-b2" : undefined; },
+    feedback: { on401: () => {}, onSuccess: (key) => okKeys.push(key) },
+    loadImage: async () => ({ base64: pngB64, mediaType: "image/png" }),
+    fetchImpl: fetchStub,
+  });
+  const out = await swapper(
+    [{ role: "user", content: [{ type: "image", attachment: { kind: "image", id: "a1" } }, { type: "text", text: "看图" }] }],
+    { model: "deepseek-flash" },
+  );
+  const obsText = JSON.stringify(out);
+  check("桥 429 → 换 key 重试成功（转述文本进消息）",
+    obsText.includes("视觉观察") && obsText.includes("图里有只海豹"), obsText.slice(0, 160));
+  check("桥换 key 排除失败 key（成功上报走新 key）",
+    swapperCalls[0]?.includes("sk-b1") && swapperCalls[1]?.includes("sk-b2") && okKeys.includes("sk-b2"),
+    JSON.stringify({ calls: swapperCalls, okKeys }));
+  // 批 H 遍历式：全池试完 → describeImage 抛 → 上层占位收场（对话继续）。
+  resetImageCooldown?.();
+  const bridgePool = ["sk-c1", "sk-c2"];
+  const failStub = (async (_url, init) => {
+    swapperCalls.push(String(init?.headers?.authorization ?? init?.headers?.Authorization ?? ""));
+    return new Response(JSON.stringify({ error: { code: "Throttling.AllocationQuota", message: "quota" } }), { status: 429 });
+  });
+  const failingSwapper = createImageSwapper({
+    options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", imageMode: "image_url", timeoutMs: 5_000, bridgePrompt: "p", relayOn: true }),
+    checkedIds: () => [],
+    resolveKey: async () => "sk-c1",
+    rotateOnQuota: async (_k, exclude) => bridgePool.find((k) => !exclude.has(k)),
+    feedback: { on401: () => {}, onSuccess: () => {} },
+    loadImage: async () => ({ base64: pngB64, mediaType: "image/png" }),
+    fetchImpl: failStub,
+  });
+  const failOut = await failingSwapper(
+    [{ role: "user", content: [{ type: "image", attachment: { kind: "image", id: "a2" } }] }],
+    { model: "deepseek-flash" },
+  );
+  const failText2 = JSON.stringify(failOut);
+  check("桥全池试完 → 占位收场（对话继续）",
+    failText2.includes("图片转换失败") && swapperCalls.filter((c) => c.includes("sk-c")).length === 2,
+    failText2.slice(0, 160));
+} catch (e) { fail("bridge-rotate", e); }
 
 let failed = 0;
 for (const r of results) if (!r.pass) failed += 1;
