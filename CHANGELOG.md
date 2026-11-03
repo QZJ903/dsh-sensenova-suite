@@ -1,5 +1,17 @@
 # 更新日志（Changelog）
 
+## 0.1.50（2026-11-04）
+
+- **U9 视觉与出图链审计处置（台账全部终态零挂账，仅能力覆盖双层注入一笔转总审）**：
+  - **D1（P2）读图桥 lastGoodKey 401 粘死**：上次成功的转述 key 被撤销/面板删除后，每次转述仍从它起步——401 不触发桥内换 key（换 key 仅 429）也不清记忆，`resolveKey` 永远轮不到，读图桥全链静默失效直到重启。修法与 image-tools 的 401 清 lastGoodImageKey 同形（0.1.48 批 H 桥侧漏改，本轮补齐）。
+  - **D2 两条诊断行改真话**：① bridge 走向日志改为分支定局后打（原生发图 / 转述关闭（原样放行）/ 转述）——旧版先打「转述」再判 relayOn，开关关闭时日志失实；② adapter「换图后仍携带图片块」诊断条件**从未触发过**（`contentHasImage` 参数是块数组、旧写法把消息数组整体喂入恒 false），改为逐消息取 content 查 + 归因文案中性化（勾选=预期原生；未勾选=转述关闭或块无附件引用）。
+  - **D3 观察缓存加上限**：`OBSERVATION_CACHE_LIMIT = 200`（FIFO 按插入序淘汰，`cacheObservation` 收口写侧）——进程级 Map 此前无界；被淘汰的图下轮重转述一次，正确性不受影响。
+  - **D4 describe 下线残留清理**：`vision/image-input.ts` 整文件删除（运行时归一化链全仓零消费者，`ImageAttachmentRef` 类型随唯一消费者迁入 bridge.ts）；direct.ts 删 `imagePart`/`envelopeFail`/`PostChatOptions.now` 死码；**visionImageMode 配置面全链删除**（host-config 解析/默认/类型 + index 写点 + VisionOptions 字段——运行时零读者的安慰剂开关，唯一消费者 imagePart 本身已死）。
+  - **D5 注释改真话**：「peer 依赖半区 / defineTool 包装」四处失实表述清除——上游 lib/index.js 同为裸对象注册，defineTool 从未存在过；index 能力覆盖注释改「恒开、装一次」。
+  - **他拍板三项落地**：img2img schema 补 `maxItems: 5`（平台「至多 5 张」入调用侧契约，不跑注定 400 的往返）；postImage 补 `redirect: 'error'`（与 direct.ts postChat 同纪律——跨源重定向剥 Authorization / POST 转 GET 丢 body）；visionToolsEnabled 补语义漂移注释（describe 下线后唯一读者是 relayOn）。
+  - **销号两笔**：S1（response_format 系请求参数不存在「平台忽略」——他裁定结案）；S2（真机日志多处 N=M 实证宿主 image 块恒带 attachment ref，无附件块无实际可达面）。
+- **测试**：vision-image 22→29（+桥 401 失效记忆 3 钉 / 缓存命中 / 失败不缓存 / 空 id 跳过 / relayOn=false 零请求 4 钉）；typecheck 0 错；scope-check 101 文件 0/0/0。真机生效 = 完整重启 DSH。
+
 ## 0.1.49（2026-11-04）
 
 - **协议线档案三连修（文档口径被真机逐个推翻的收口，全部他拍板）**：

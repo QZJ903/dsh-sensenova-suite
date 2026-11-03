@@ -6,7 +6,9 @@
  *     （url 信封 → 只回 URL 不回 base64 + 面板 outputDir 落盘拉字节）、失败进 30s 冷却（冷却期直接拒绝）、
  *     key 经池解析并上报成功；
  *   - 出图工具：额度耗尽换 key（2026-11-04——只换不打格，与对话链账本无关）；
- *   - vision/bridge：contentHasImage 递归（含 tool-result 内嵌）；
+ *   - vision/bridge：contentHasImage 递归（含 tool-result 内嵌）；429 换 key（批 G/H）；
+ *     401 失效 lastGood 记忆（U9 D1 回归钉）；观察缓存语义（命中/失败不缓存/空 id 跳过）；
+ *     relayOn=false 整链下线（处置轮 T1/T2）；
  *   - host-config：模型链归一化与出图/视觉键的回落。
  */
 import { strict as assert } from "node:assert";
@@ -203,7 +205,7 @@ try {
   });
   const okKeys = [];
   const swapper = createImageSwapper({
-    options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", imageMode: "image_url", timeoutMs: 5_000, bridgePrompt: "描述图片", relayOn: true }),
+    options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", timeoutMs: 5_000, bridgePrompt: "描述图片", relayOn: true }),
     checkedIds: () => [], // 未勾选 → 走转述
     resolveKey: async () => "sk-b1",
     rotateOnQuota: async (k) => { await Promise.resolve(); return k === "sk-b1" ? "sk-b2" : undefined; },
@@ -229,7 +231,7 @@ try {
     return new Response(JSON.stringify({ error: { code: "Throttling.AllocationQuota", message: "quota" } }), { status: 429 });
   });
   const failingSwapper = createImageSwapper({
-    options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", imageMode: "image_url", timeoutMs: 5_000, bridgePrompt: "p", relayOn: true }),
+    options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", timeoutMs: 5_000, bridgePrompt: "p", relayOn: true }),
     checkedIds: () => [],
     resolveKey: async () => "sk-c1",
     rotateOnQuota: async (_k, exclude) => bridgePool.find((k) => !exclude.has(k)),
@@ -246,6 +248,116 @@ try {
     failText2.includes("图片转换失败") && swapperCalls.filter((c) => c.includes("sk-c")).length === 2,
     failText2.slice(0, 160));
 } catch (e) { fail("bridge-rotate", e); }
+
+// ── 4. 桥 401 失效记忆 + 缓存语义 + relayOn 关（2026-11-04 处置轮，U9 台账 T1/T2）──
+try {
+  const pngB64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+  const okBody = (text) => new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), { status: 200 });
+
+  // T1（D1 回归钉）：lastGood key 转 401 后必须失效记忆——401 轮先试它
+  // （401 + on401 回调），下一轮绝不再碰它、回池层 resolveKey 另选。
+  {
+    const authLog = [];
+    const on401 = [];
+    const resolveQueue = ["sk-a", "sk-b"];
+    let skAHits = 0;
+    const swapper = createImageSwapper({
+      options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", timeoutMs: 5_000, bridgePrompt: "p", relayOn: true }),
+      checkedIds: () => [],
+      resolveKey: async () => resolveQueue.shift() ?? "sk-b",
+      rotateOnQuota: async () => undefined,
+      feedback: { on401: (key) => on401.push(key), onSuccess: () => {} },
+      loadImage: async () => ({ base64: pngB64, mediaType: "image/png" }),
+      fetchImpl: (async (_url, init) => {
+        const auth = String(init?.headers?.authorization ?? init?.headers?.Authorization ?? "").replace("Bearer ", "");
+        authLog.push(auth);
+        if (auth === "sk-a") {
+          skAHits += 1;
+          return skAHits === 1 ? okBody("第一次成功") : new Response("revoked", { status: 401 });
+        }
+        return okBody("新 key 成功");
+      }),
+    });
+    const msg = (id) => [{ role: "user", content: [{ type: "image", attachment: { kind: "image", id } }] }];
+    const out1 = await swapper(msg("t1"), { model: "deepseek-flash" }); // 成功 → lastGood=sk-a
+    const out2 = await swapper(msg("t2"), { model: "deepseek-flash" }); // lastGood=sk-a → 401 → 占位
+    const out3 = await swapper(msg("t3"), { model: "deepseek-flash" }); // 记忆已失效 → sk-b
+    check("401 轮先试 lastGood 并回调 on401（占位收场）",
+      authLog[1] === "sk-a" && on401.includes("sk-a") && JSON.stringify(out2).includes("图片转换失败"),
+      JSON.stringify({ authLog, on401 }));
+    check("401 后记忆失效：下一轮回池层另选，不再碰死 key",
+      authLog[2] === "sk-b" && !authLog.slice(2).includes("sk-a"),
+      JSON.stringify(authLog));
+    check("401 前后调用各自成功", JSON.stringify(out1).includes("视觉观察") && JSON.stringify(out3).includes("视觉观察"),
+      JSON.stringify(out1).slice(0, 80) + " / " + JSON.stringify(out3).slice(0, 80));
+  }
+
+  // T2：缓存语义——命中不再转述 / 失败不缓存 / 空 id 跳过缓存 / relayOn 关不发请求。
+  {
+    let fetchCount = 0;
+    const swapper = createImageSwapper({
+      options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", timeoutMs: 5_000, bridgePrompt: "p", relayOn: true }),
+      checkedIds: () => [],
+      resolveKey: async () => "sk-cache",
+      rotateOnQuota: async () => undefined,
+      feedback: { on401: () => {}, onSuccess: () => {} },
+      loadImage: async () => ({ base64: pngB64, mediaType: "image/png" }),
+      fetchImpl: (async () => { fetchCount += 1; return okBody(`转述第 ${fetchCount} 次`); }),
+    });
+    const msgWithId = [{ role: "user", content: [{ type: "image", attachment: { kind: "image", id: "c1" } }] }];
+    const cacheHit1 = await swapper(msgWithId, { model: "deepseek-flash" });
+    const cacheHit2 = await swapper(msgWithId, { model: "deepseek-flash" });
+    check("同 ref 命中缓存：第二次不再转述、文本一致",
+      fetchCount === 1 && JSON.stringify(cacheHit1) === JSON.stringify(cacheHit2),
+      `fetchCount=${fetchCount}`);
+
+    // 失败不缓存：全 429 打占位，恢复后同 ref 重新转述（fetchCount 继续涨）。
+    const failSwapper = createImageSwapper({
+      options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", timeoutMs: 5_000, bridgePrompt: "p", relayOn: true }),
+      checkedIds: () => [],
+      resolveKey: async () => "sk-fail",
+      rotateOnQuota: async () => undefined,
+      feedback: { on401: () => {}, onSuccess: () => {} },
+      loadImage: async () => ({ base64: pngB64, mediaType: "image/png" }),
+      fetchImpl: (async () => new Response("quota", { status: 429 })),
+    });
+    const msgFail = [{ role: "user", content: [{ type: "image", attachment: { kind: "image", id: "c2" } }] }];
+    const failed1 = await failSwapper(msgFail, { model: "deepseek-flash" });
+    const failedCount = fetchCount;
+    // failSwapper 的桩不吃共享 fetchCount——「恢复」用第一个 swapper 驱动同一
+    // ref id（两实例共享模块级 observationCache）：失败那次没被缓存才会真转述。
+    const recovered = await swapper(msgFail, { model: "deepseek-flash" });
+    check("失败不缓存：占位后同 ref 重新转述成功",
+      JSON.stringify(failed1).includes("图片转换失败") && fetchCount === failedCount + 1
+      && JSON.stringify(recovered).includes("视觉观察"),
+      `fetchCount=${fetchCount} failedCount=${failedCount}`);
+
+    // 空 id 不缓存：无 id 的 ref 两次都真转述。
+    const msgNoId = [{ role: "user", content: [{ type: "image", attachment: { kind: "image" } }] }];
+    await swapper(msgNoId, { model: "deepseek-flash" });
+    const noIdCount = fetchCount;
+    await swapper(msgNoId, { model: "deepseek-flash" });
+    check("无 id ref 不缓存：两次都真转述", noIdCount === fetchCount - 1, `fetchCount=${fetchCount}`);
+
+    // relayOn=false：零请求、消息原样返回（含图片块）。
+    const offSwapper = createImageSwapper({
+      options: () => ({ apiBase: "https://token.sensenova.cn/v1", model: "sensenova-6.8-flash-lite", timeoutMs: 5_000, bridgePrompt: "p", relayOn: false }),
+      checkedIds: () => [],
+      resolveKey: async () => "sk-off",
+      rotateOnQuota: async () => undefined,
+      feedback: { on401: () => {}, onSuccess: () => {} },
+      loadImage: async () => ({ base64: pngB64, mediaType: "image/png" }),
+      fetchImpl: (async () => { fetchCount += 1; return okBody("不该被调"); }),
+    });
+    const beforeOff = fetchCount;
+    const offOut = await offSwapper(msgWithId, { model: "deepseek-flash" });
+    // contentHasImage 吃块数组不吃消息数组（adapter 旧写法误用即此）——断言取消息的 content。
+    check("relayOn=false：零请求、原样放行（图片块仍在）",
+      fetchCount === beforeOff && contentHasImage(offOut[0]?.content) === true
+        && !JSON.stringify(offOut).includes("视觉观察"),
+      `fetchCount=${fetchCount}`);
+  }
+} catch (e) { fail("bridge-401-cache", e); }
 
 let failed = 0;
 for (const r of results) if (!r.pass) failed += 1;

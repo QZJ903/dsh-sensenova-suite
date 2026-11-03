@@ -17,21 +17,6 @@ export function chatUrl(baseUrl: string): string {
   return `${base}/chat/completions`;
 }
 
-/** 构造一个图片内容部件。 */
-export function imagePart(imageRef: string, mode: "image_url" | "image_base64"): Record<string, unknown> {
-  if (mode === "image_base64") {
-    let raw = imageRef;
-    if (raw.startsWith("data:") && raw.includes(";base64,")) {
-      raw = raw.slice(raw.indexOf(";base64,") + 8);
-    }
-    if (raw.startsWith("http://") || raw.startsWith("https://")) {
-      throw new Error("image_base64 mode needs base64 bytes or a local file path, not an http URL");
-    }
-    return { type: "image_base64", image_base64: raw };
-  }
-  return { type: "image_url", image_url: { url: imageRef } };
-}
-
 /** 从响应 JSON 提取文本。 */
 export function extractText(data: Record<string, unknown>): string {
   const choices = data["choices"];
@@ -57,7 +42,6 @@ export interface PostChatOptions {
   apiKey: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
-  now?: () => number;
 }
 
 /**
@@ -94,9 +78,4 @@ export async function postChat(options: PostChatOptions): Promise<Record<string,
   } finally {
     clearTimeout(timer);
   }
-}
-
-/** 失败信封（MCP 兼容）。 */
-export function envelopeFail(taskType: string, error: string): Record<string, unknown> {
-  return { ok: false, task_type: taskType, error };
 }

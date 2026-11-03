@@ -17,14 +17,23 @@
 
 import { postChat, extractText } from "./direct.ts";
 import { traceLog } from "../trace-log.ts";
-import type { ImageAttachmentRef } from "./image-input.ts";
+
+/** 宿主 dsh-attachment ImageAttachmentRef 的最小结构面（字段以运行时宿主为准）。
+ * 原 image-input.ts 随 describe 工具下线整删——运行时归一化链（normalizeImageInput
+ * 等）全仓零消费者，本类型随唯一消费者迁入此处（U9 台账 D4）。 */
+export interface ImageAttachmentRef {
+  kind?: 'image';
+  id?: string;
+  mediaType?: string;
+}
 
 /** 视觉运行配置（host-config 解析后的形状）：单模型，由用户选择。
- * （2026-11-04 自 run.ts 挪入——describe 工具下线后本文件是唯一消费者。） */
+ * （2026-11-04 自 run.ts 挪入——describe 工具下线后本文件是唯一消费者。
+ * 旧 imageMode 字段随唯一消费者 imagePart 一并删除：运行时零读者的安慰剂
+ * 配置，visionImageMode 配置面同批清理——U9 台账 D4。） */
 export interface VisionOptions {
   apiBase: string;
   model: string;
-  imageMode: "image_url" | "image_base64";
   timeoutMs: number;
 }
 
@@ -273,8 +282,22 @@ function buildBridgePrompt(
 }
 
 /** 观察文本缓存（按附件 ref id，进程级）：同一张图跨轮次/跨重注册只转述一次；
- * 不按转述提示词分键——改提示词不重述历史图。失败不缓存（下轮重试）。 */
+ * 不按转述提示词分键——改提示词不重述历史图。失败不缓存（下轮重试）。
+ * 容量上限 200 条（FIFO，Map 保插入序）：条目值是转述文本（KB 级），上限内存
+ * 亚 MB；被淘汰的图下一轮重新转述一次，正确性不受影响（U9 台账 D3）。 */
+const OBSERVATION_CACHE_LIMIT = 200;
 const observationCache = new Map<string, string>();
+
+/** 写缓存并按上限淘汰最旧（key="" 不缓存——无 id 的 ref 无法跨调用复用）。 */
+function cacheObservation(key: string, text: string): void {
+  if (key === "") return;
+  observationCache.set(key, text);
+  while (observationCache.size > OBSERVATION_CACHE_LIMIT) {
+    const oldest = observationCache.keys().next();
+    if (oldest.done === true) break;
+    observationCache.delete(oldest.value);
+  }
+}
 
 /**
  * 请求边界的图片换图器（适配器出站前调用）。判定源 = 「可看图」勾选
@@ -295,15 +318,19 @@ export function createImageSwapper(deps: ImageSwapperDeps) {
     const stats = countImageBlocks(typed);
     if (stats.total === 0) return [...messages];
     const checked = deps.checkedIds().includes(context.model);
+    // 走向在分支定局后落日志——文案说的就是实际发生的（U9 台账 D2：旧版先打
+    // 「转述」再判 relayOn，开关关闭时日志失实）。
+    const route = checked ? "原生发图"
+      : options.relayOn === false ? "转述关闭（原样放行）" : "转述";
     // 诊断行（仅带图请求输出）：判定源与走向一屏可见。
     traceLog(
       `[dsh-sensenova-suite] 图片桥: model=${context.model} 可看图勾选=${checked} ` +
-        `图片块=${stats.total}（带附件引用=${stats.withRef}，offloaded=${stats.offloaded}）→ ${checked ? "原生发图" : "转述"}`,
+        `图片块=${stats.total}（带附件引用=${stats.withRef}，offloaded=${stats.offloaded}）→ ${route}`,
     );
     // 恒为自动（2026-10-27 用户拍板，读图桥设置已删）：勾选 = 原生直传。
     if (checked) return [...messages];
     // 「启用转述」关 = 转述链路整体下线（工具不注册 + 请求边界不转述），
-    // 未勾选模型的图原样出站——文本模型收图是否 400 由调用方自担。
+    // 未勾选模型的图原样放行——文本模型收图是否 400 由调用方自担。
     if (options.relayOn === false) return [...messages];
     let imageIndex = 0;
     const rewritten = await rewriteBridgeMessages(typed, async (ref) => {
@@ -315,9 +342,15 @@ export function createImageSwapper(deps: ImageSwapperDeps) {
       try {
         const result = await describeImage(deps.loadImage, options, deps.resolveKey, deps.rotateOnQuota, deps.feedback, deps.fetchImpl, lastGoodKey, ref, prompt, { imageIndex, imageTotal: stats.total });
         if (result.usedKey !== undefined) lastGoodKey = result.usedKey;
-        if (cacheKey !== "") observationCache.set(cacheKey, result.text);
+        cacheObservation(cacheKey, result.text);
         return result.text;
       } catch (error: unknown) {
+        // 401 ⇒ 上次成功的 key 已死（平台撤销/面板删除）：失效记忆，下一轮回
+        // 池层重新选。401 不触发桥内换 key（换 key 仅 429，批 G/H 口径），不清
+        // 记忆则每次都从死 key 起步、resolveKey 永远轮不到——读图桥全链静默
+        // 失效直到重启（与 image-tools.ts 401 清 lastGoodImageKey 同形；批 H
+        // 桥侧漏改，U9 台账 D1 补齐）。
+        if ((error as { status?: unknown }).status === 401) lastGoodKey = undefined;
         return `【图片转换失败：${errorText(error)}】`;
       }
     });

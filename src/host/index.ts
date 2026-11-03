@@ -326,7 +326,6 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       options: () => ({
         apiBase: settings.apiBase,
         model: poolRecord.vision?.model ?? settings.visionModel,
-        imageMode: settings.visionImageMode,
         timeoutMs: settings.visionTimeoutMs,
         bridgePrompt: poolRecord.vision?.bridgePrompt ?? settings.visionBridgePrompt,
         relayOn: settings.visionToolsEnabled || poolRecord.toolsEnabled.visionTools === true,
@@ -725,8 +724,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     reregisterImageTools = registerImageTools;
     void registerImageTools();
     // 图片桥能力覆盖：让 DSH 的发送前图片校验放行（换图本体在适配器请求
-    // 边界，vision/bridge.ts createImageSwapper）。开关读面板现值——装一次、
-    // 动态生效，不再按 patch 默认值条件安装。
+    // 边界，vision/bridge.ts createImageSwapper）。恒开、装一次（2026-10-27
+    // 读图桥设置已删，能力覆盖不再有开关）。
     const restoreCapability = installCapabilityOverride(
       ctx as unknown as import("./vision/bridge.ts").BridgeCtx,
       () => true,

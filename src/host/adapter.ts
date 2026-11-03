@@ -1322,9 +1322,15 @@ export class SensenovaAdapter extends LlmAdapter {
       bridgedMessages = await this.deps.imageSwapper(bridgedMessages, {
         model: options.model,
       }) as GenerateOptions['messages'];
-      // 诊断：换图器已挂但消息里仍有带附件引用的图片块 = 勾选判定的走向核对点。
-      if (contentHasImage(bridgedMessages as never)) {
-        traceLog(`[dsh-sensenova-suite] 图片桥: 换图后消息仍携带图片块（勾选模型走原生，属预期）`);
+      // 诊断：换图器已挂但消息里仍有图片块 = 走向核对点。归因有三种，看
+      // bridge 走向日志定案：勾选模型=预期原生直传；未勾选=转述关闭
+      // （relayOn=false）或图片块无附件引用（换图器只换带 attachment 的块）。
+      // ⚠️ contentHasImage 的参数是块数组不是消息数组——旧写法把消息数组
+      // 整体喂进去恒 false，本诊断从未触发过（U9 处置轮发现即修）。
+      if ((bridgedMessages as Array<{ content?: unknown }>).some(
+        (message) => contentHasImage(message.content as never),
+      )) {
+        traceLog(`[dsh-sensenova-suite] 图片桥: 换图后消息仍携带图片块（勾选=预期原生；未勾选=转述关闭或块无附件引用）`);
       }
     }
     // add-multimodal-input 2.1：非视觉模型（facts.supportsImages=false，其判据

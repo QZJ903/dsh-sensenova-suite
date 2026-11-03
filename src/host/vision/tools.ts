@@ -8,8 +8,9 @@
  * 「能看图的直接看了，不能的还有桥」——勾选「可看图」的模型图原样进请求，
  * 未勾选的走读图桥（bridge.ts）转述，describe 工具是冗余的第三条路。
  *
- * 本模块是 peer 依赖半区（import @deepseek-ai/dsh-tools），由 index.ts 懒加载，
- * 离线测试用假工具服务替代。
+ * 本模块是纯转发（buildToolset → buildImageTools 裸工具对象）：index.ts 懒加载
+ * 后把对象直接注册进 ctx.tools——无 defineTool 包装（defineTool 在上游也不存在，
+ * 上游 lib/index.js:313 同为裸对象注册），离线测试直接驱动 buildImageTools。
  *
  * @module dsh-sensenova-suite/vision/tools
  */

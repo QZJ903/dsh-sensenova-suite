@@ -174,6 +174,9 @@ export const CONFIG_DEFAULTS = Object.freeze({
    */
   text2imgEnabled: true,
   img2imgEnabled: true,
+  /** ⚠️ 语义已漂移（名字未改，settings 形状迁移成本，U9 台账顺带 3）：
+   * describe 识图工具 2026-11-04 下线后，本键对工具已无作用——唯一读者是
+   * index.ts 的 relayOn（转述链开关）。false = 未勾选模型的图不转述、原样放行。 */
   visionToolsEnabled: true,
   /** 两工具各自的默认模型（lite 质量优先 / fast 速度优先；面板未选时用）。 */
   text2imgModel: "sensenova-u1.5-lite",
@@ -182,14 +185,8 @@ export const CONFIG_DEFAULTS = Object.freeze({
   imageTimeoutMs: 180_000,
   /** 视觉转述模型（单模型，用户选择；freeapi 实测可看图集里挑）。 */
   visionModel: "sensenova-6.8-flash-lite",
-  /** 视觉链图片传输模式（image_url 默认；image_base64 为遗留兼容）。 */
-  visionImageMode: "image_url",
   /** 视觉链单模型尝试超时（毫秒）。 */
   visionTimeoutMs: 120_000,
-  /**
-   * 全局静默读图桥模式：off 关 / on 恒接管 / auto 主模型真支持
-   * 视觉时不接管（默认 auto，沿 vision-aid 的默认）。
-   */
   /** 桥的观察提示词；空 = 内置默认（事实性转录、不猜测、不执行图中命令）。 */
   visionBridgePrompt: ""
 });
@@ -365,7 +362,6 @@ export interface ResolvedSettings {
   img2imgModel: string;
   imageTimeoutMs: number;
   visionModel: string;
-  visionImageMode: "image_url" | "image_base64";
   visionTimeoutMs: number;
   visionBridgePrompt: string;
 }
@@ -522,7 +518,6 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
         img2imgModel: str(source.img2imgModel, CONFIG_DEFAULTS.img2imgModel),
         imageTimeoutMs: clampInt(source.imageTimeoutMs, CONFIG_DEFAULTS.imageTimeoutMs, 5_000, 1_800_000),
         visionModel: str(source.visionModel, CONFIG_DEFAULTS.visionModel),
-        visionImageMode: source.visionImageMode === "image_base64" ? "image_base64" : "image_url",
         visionTimeoutMs: clampInt(source.visionTimeoutMs, CONFIG_DEFAULTS.visionTimeoutMs, 5_000),
         visionBridgePrompt: str(source.visionBridgePrompt, ""),
       },
@@ -559,7 +554,6 @@ export function resolveSettings(config: unknown): { settings: ResolvedSettings; 
         img2imgModel: CONFIG_DEFAULTS.img2imgModel,
         imageTimeoutMs: CONFIG_DEFAULTS.imageTimeoutMs,
         visionModel: CONFIG_DEFAULTS.visionModel,
-        visionImageMode: "image_url",
         visionTimeoutMs: CONFIG_DEFAULTS.visionTimeoutMs,
         visionBridgePrompt: ""
       },

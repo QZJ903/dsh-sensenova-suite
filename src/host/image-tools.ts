@@ -14,8 +14,9 @@
  *      返回值（一张 2K 图 ≈ 7MB 文本，回传即灌爆模型上下文）；落盘走「保存目录」
  *      ——插件拉取 URL 字节存文件，失败不吞结果（诊断日志）。
  *
- * 纯逻辑模块（fetch 全局；peer 由 vision/tools.ts 的 defineTool 包裹），
- * 可离线单测。
+ * 纯逻辑模块（fetch 可注入），可离线单测；工具对象由 vision/tools.ts 裸转发、
+ * index.ts 直接注册 ctx.tools——无 defineTool 包装（上游 lib/index.js 同为裸对象
+ * 注册，defineTool 从未存在过；U9 台账 D5）。
  *
  * @module dsh-sensenova-suite/image-tools
  */
@@ -85,6 +86,10 @@ async function postImage(path: string, apiKey: string, body: Record<string, unkn
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      // 凭据请求拒重定向（与 direct.ts postChat 同纪律，2026-11-04 他拍板）：
+      // 跟随 3xx 会在跨源时剥 Authorization 头、或把 POST 转 GET 丢 body——
+      // 用户自配 apiBase 落在反代/升级跳转后面时报一个当场明确的错。
+      redirect: "error",
       signal: controller.signal,
     });
     const text = await response.text();
@@ -200,6 +205,9 @@ export const img2imgParams = {
     images: {
       type: "array",
       description: "图片输入数组，每项包含 { image_url }。第 1 张为主编辑图，最多 5 张。",
+      // 平台使用限制「至多支持 5 张参考图」入契约：>5 在调用侧就拒，
+      // 不必走一次注定 400 的平台往返（2026-11-04 他拍板，U9 台账其他判据 1）。
+      maxItems: 5,
       items: {
         type: "object",
         properties: { image_url: { type: "string", description: "公网 URL 或 Base64 Data URL" } },
@@ -213,7 +221,7 @@ export const img2imgParams = {
 } as const;
 
 /**
- * 出图执行核心（两工具共用）。暴露给测试与 vision/tools.ts 的 defineTool 包装。
+ * 出图执行核心（两工具共用）。暴露给测试与 vision/tools.ts 的注册面。
  * 冷却：一次失败后 30s 内直接返回失败值（不发起请求）。
  */
 export async function callImageApi(
@@ -346,8 +354,9 @@ export function resetImageCooldown(): void {
 
 /**
  * 构建出图两工具的**形状描述**（name/description/parameters/output schema/render/
- * execute）。真正的 defineTool 包装在 vision/tools.ts（peer 半区）；本函数返回
- * 纯数据 + execute 闭包，离线测试可直接驱动。
+ * execute）。工具对象由 vision/tools.ts 裸转发、index.ts 直接注册 ctx.tools
+ * （无 defineTool 包装，与上游同形）；本函数返回纯数据 + execute 闭包，离线
+ * 测试可直接驱动。
  */
 export function buildImageTools(deps: ImageToolDeps): Array<{
   name: string;
