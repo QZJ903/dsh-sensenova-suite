@@ -199,7 +199,7 @@ const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
               : null),
             // 分隔线：档位行与协议行之间。
             h("div", { style: { borderTop: "1px solid var(--dsw-alias-border-l1)", margin: "2px 0" } }),
-            // 协议降级链并入面板：一行 label + 三个槽位 select（统一链 re>an>chat；
+            // 协议降级链并入面板：一行 label + 三个槽位 select（统一链 an>re>chat，2026-11-04 倒序；
             // 不重复、选一个少一个、槽1 必填、前一槽为空或为 chat 则后槽禁用），
             // 与档位同属「保存才生效」。
             onChainSlotChange !== undefined

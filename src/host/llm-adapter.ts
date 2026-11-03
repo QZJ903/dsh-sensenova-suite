@@ -95,8 +95,6 @@ export function createAdapterFactory(pool: PoolFacade) {
     const unavailable = Array.isArray(unavailableModelIds)
       ? unavailableModelIds.filter((id): id is string => typeof id === "string")
       : [];
-    const snapshot = orchestrator.snapshot();
-    const accountCount = Math.max(1, snapshot.running.length + snapshot.blocked.length);
 
     const adapter = new SensenovaAdapter({
       options: () => ({
@@ -154,12 +152,18 @@ export function createAdapterFactory(pool: PoolFacade) {
       // 专属池耗尽拦不住自己、反而误伤通用组的健康 key）。额度侧的主动记/清走
       // 发布链 reportQuotaPools（snapshot-aggregate 的 onQuotaPools 回调），
       // 两条路写同一份格子，此处注释不再假设另一条不存在。
-      rotateApiKey: async (rejectedKey, rejection, model) => {
+      rotateApiKey: async (rejectedKey, rejection, model, roundExclude) => {
         const group = orchestrator.groupOf(model);
-        const exclude = new Set([rejectedKey]);
+        // exclude = 本请求已试 key（适配器 tried，2026-11-04 他拍板下推为池的
+        // 选择条件）∪ 被拒 key。轮内恒遍历未试运行态 key——共享游标（lastPicked）
+        // 交回已试 key 不再截短轮长。borrow:false：阻塞 key 不进轮询（10min 时间
+        // 门专属），池空保底借用走 pickStart 路径不变。
+        const exclude = roundExclude !== undefined
+          ? new Set([...roundExclude, rejectedKey])
+          : new Set([rejectedKey]);
         if (rejection === "invalid-credential") {
           orchestrator.reportAuthRejected(rejectedKey);
-          return orchestrator.pickNext(exclude, group);
+          return orchestrator.pickNext(exclude, group, { borrow: false });
         }
         // 持续限流记账（2026-11-04 批 E）：**所有** 429 形状统一入账（tpm/rpm/
         // unknown/an 线——rpm 与 an 线的持续耗尽此前零隔离），判定与桶解耦。
@@ -172,7 +176,7 @@ export function createAdapterFactory(pool: PoolFacade) {
         if (orchestrator.sustainedLimited(rejectedKey)) {
           orchestrator.reportPoolExhausted(rejectedKey, group);
           if (orchestrator.groupFullyPoolMarked(group)) return undefined;
-          return orchestrator.pickNext(exclude, group);
+          return orchestrator.pickNext(exclude, group, { borrow: false });
         }
         if (rejection === "pool-exhausted") {
           orchestrator.reportPoolExhausted(rejectedKey, group);
@@ -180,14 +184,14 @@ export function createAdapterFactory(pool: PoolFacade) {
           // key（含阻塞态）都标着池耗尽时不再借阻塞 key 硬试，直接让本请求
           // 落「换无可换」——borrow 语义会无视格子，这里必须显式拦。
           if (orchestrator.groupFullyPoolMarked(group)) return undefined;
-          return orchestrator.pickNext(exclude, group);
+          return orchestrator.pickNext(exclude, group, { borrow: false });
         }
         // rate-unclassified（未知形状 429 / 402 / 403）：只换，不记 strike——
         // 一次未知形态不足以断定这把 key 坏了；真正的判断留给后续重复命中。
         // rate-soft（两个速率桶形态 code 8 / 429003，2026-10-31 他拍板）：rpm 桶
         // 14s 级自愈，计入踢出阈值会把贴线限流的健康 key 踢出池——同样只换不记。
         if (rejection !== "rate-unclassified" && rejection !== "rate-soft") orchestrator.reportRateLimited(rejectedKey);
-        return orchestrator.pickNext(exclude, group);
+        return orchestrator.pickNext(exclude, group, { borrow: false });
       },
       // 2xx 上报：清连续限流计数、救回被借用的阻塞 key。
       reportOutcome: (key) => orchestrator.reportSuccess(key),
@@ -213,8 +217,6 @@ export function createAdapterFactory(pool: PoolFacade) {
       // context.contextWindow——与面板「上下文」徽章同一判据。
       contextWindowOverrides: () => contextWindowOverrides ?? null,
     });
-    // accountCount 的初值只在构造期用一次（上面的 IIFE 每请求重读）。
-    void accountCount;
     return { adapter, providerIds: [LLM_PROVIDER_ID] };
   };
 }

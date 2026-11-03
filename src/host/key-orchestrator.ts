@@ -387,14 +387,17 @@ export class KeyOrchestrator {
   /**
    * 换下一把 key（适配器 rotateApiKey 的池侧实现）。候选 = 非 dead、本请求未试过、
    * 未被该组 pool 标记；全池轮询耗尽（PLAN §5.5）返回 undefined。
+   * options.borrow 透传池层：轮内换 key 传 false（不借阻塞 key——2026-11-04 他
+   * 拍板 tried 下推为选择条件，阻塞 key 只按时间门回运行态）；pickStart 路径
+   * 不传（保底借用语义不变）。
    */
-  async pickNext(exclude: ReadonlySet<string>, group: string): Promise<string | undefined> {
+  async pickNext(exclude: ReadonlySet<string>, group: string, options?: { borrow?: boolean }): Promise<string | undefined> {
     await this.ensureSeeded();
-    let candidate = this.pool.pickNext(exclude);
+    let candidate = this.pool.pickNext(exclude, options);
     while (candidate !== undefined && this.gridMarked(candidate, group)) {
       const wider = new Set(exclude);
       wider.add(candidate);
-      candidate = this.pool.pickNext(wider);
+      candidate = this.pool.pickNext(wider, options);
     }
     return candidate;
   }

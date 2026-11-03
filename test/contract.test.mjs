@@ -307,7 +307,8 @@ for (const model of contract.models) {
 
 // --- 三线 usage → TokenUsage 映射（U2 审计 T2/T3，2026-11-01：此前三线零钉）---
 // 减法口径的前提（input_tokens 已含 cached_tokens）是 glm /v1/responses 同 body
-// 三发实测（usage.ts 头注）；an 线为外推，真机未独立复核（U2 不可判 N1）。
+// 三发实测（usage.ts 头注）；an 线减法经 2026-11-01 真机探针判定 C 复核（直取
+// 不减），本段 318-321 的钉即其定论。
 {
   const { mapResponsesUsage, mapAnthropicUsage, mergeUsage } = await import("../src/host/wire/usage.ts");
 

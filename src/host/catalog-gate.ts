@@ -73,9 +73,13 @@ export type CatalogGateDecision =
 export function planCatalogFetch(state: CatalogGateState, input: CatalogGateInput): CatalogGateDecision {
   const credentialChanged = input.cacheCredential !== undefined && input.cacheCredential !== input.credential;
   const apiBaseChanged = input.cacheApiBase !== undefined && input.cacheApiBase !== input.apiBase;
-  const invalidateFailedModels = credentialChanged || apiBaseChanged;
+  // D1 层 2（2026-11-04 拍板修）：404 失败缓存只随端点失效——MODEL_NOT_FOUND 是
+  // 「模型 id 不被路由」的服务端状态，与用哪把 key 无关；旧判据含 credentialChanged
+  // 会让多 key 池换 key 重拉即清失败缓存（下线模型回列表 → 又 404 → 循环）。
+  // 缓存命中仍要求两者都没变：/models 列表按账号出线，换 key 的目录不可信。
+  const invalidateFailedModels = apiBaseChanged;
   // 缓存命中：同 key、同 base、未过期。
-  if (!invalidateFailedModels && state.fetchedAt > 0 && input.now - state.fetchedAt < CATALOG_TTL_MS) {
+  if (!credentialChanged && !apiBaseChanged && state.fetchedAt > 0 && input.now - state.fetchedAt < CATALOG_TTL_MS) {
     return { action: "serve-cache" };
   }
   // 失败退避期内：有缓存回缓存；缓存为空走两条降级路（模块头注释）。

@@ -5,7 +5,8 @@
  * ```
  * 面板覆盖（pool.json modelProtocols[model]）
  *   ?? wireProtocol 配置（强制值映射为单线链；auto = 档案默认）
- *   ?? 档案默认链（facts.defaultChain：全模型统一 re>an>chat，2026-10-31）
+ *   ?? 档案默认链（facts.defaultChain：全模型统一 an>re>chat，2026-11-04 倒序；
+ *      2026-10-31 曾定 re>an>chat）
  * ```
  *
  * 决策 = 沿生效链走查：第一条「模型声明支持（supportedWires 求交）且未命中
@@ -17,11 +18,13 @@
  * 命中降级条件同样落 chat 兜底——用户已拍板「不至于一直报错」。
  *
  * 各线降级条件（未变，链走查逐线调用）：
- * - Anthropic：模型不支持（supportedWires）/ 带图且档案不支持 / 关闭拼写在 an
- *   线无表达（forbidThinkingDisabled 模型勾 off——2026-11-01 拍板「用户选择
- *   大于协议」，显式跳过而非静默失效）/ 运行时 400 标记（anthropicUnsupported）。
- *   `stop` 不是 Anthropic 的降级条件
- *   （#api-compatibility-params 明确支持 stop_sequences）。
+ * - Anthropic：模型不支持（supportedWires）/ 关闭拼写在 an 线无表达
+ *   （forbidThinkingDisabled 模型勾 off——2026-11-01 拍板「用户选择大于协议」，
+ *   显式跳过而非静默失效）/ 运行时 400 标记（anthropicUnsupported）。
+ *   带图与 `stop` 都不是 Anthropic 的降级条件：stop 由文档背书
+ *   （#api-compatibility-params 明确支持 stop_sequences）；带图的静态预拦
+ *   （anthropicSupportsImages）2026-11-04 撤档——an 线收不收图由用户「可看图」
+ *   勾选（换图器边界）与运行时 400 探测决定，见 anthropicDegrade 注。
  * - Responses：stop 非空 / 模型不支持 / effort 偏离 Responses 默认档（非 none，
  *   off/minimal 归一为 none）/ 运行时 400 标记（responsesUnsupported）。
  * - Chat：无降级条件（参考方言）。
@@ -29,7 +32,6 @@
  */
 import { LlmError } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
-import { contentHasImage } from '@deepseek-ai/dsh-llm';
 import { canonicalThinkingEffort } from './effort.ts';
 import { effectiveChain, GLOBAL_FALLBACK_CHAIN } from './chain.ts';
 import type { ModelFacts, WireKind } from './types.ts';
@@ -44,7 +46,6 @@ export type WireReason =
   | 'chat-default'
   | 'chain-fallback'
   | 'downgrade-unsupported-model'
-  | 'downgrade-image'
   | 'downgrade-effort-unsupported'
   | 'downgrade-stop'
   | 'downgrade-effort'
@@ -80,21 +81,21 @@ function supportsResponses(facts: ModelFacts): boolean {
   return facts.supportedWires.includes('responses');
 }
 
-/** 请求是否携带图像（宿主检测，含 offloaded 块）。 */
-function hasImages(options: GenerateOptions): boolean {
-  return options.messages.some((message) => contentHasImage(message.content));
-}
-
 /**
  * Anthropic 段的降级判定（未命中为 undefined）。任一命中即放弃 Anthropic。
  * 链走查只消费命中/未命中——返回里的终点 wire 是旧自动链的遗形，不再被读。
- */
-/**
- * Anthropic 段的降级判定（未命中为 undefined）。任一命中即放弃 Anthropic。
  *
  * 注意：`stop` **不是** Anthropic 的降级条件——文档 #api-compatibility-params 明确
  * 支持 `stop_sequences`。stop 只是 Responses 的降级条件（§5.2 原第一条），在
  * Anthropic 优先后仅当 Anthropic 已被排除时才成为判据。
+ *
+ * 带图不再静态预拦（2026-11-04 他拍板「anthropicSupportsImages 撤档，由用户
+ * 手动配置和探测决定」）：该字段的历史就是文档口径被真机逐个推翻史——文档写
+ * 「仅 6.8-lite 支持图片块」，deepseek-flash/kimi-k3（10-27）与 6.8-flash
+ * （11-03）真机发图先后成功，档案三次被迫翻 true。撤档后 an 线收不收图由
+ * 「可看图」勾选（未勾模型在换图器边界就被转述/拦下，wire 层看不到图）与
+ * 运行时 400 探测（§5.3 invalid_request_error → anthropicUnsupported 标记换线）
+ * 决定；文档沉默不预填「不支持」。
  */
 function anthropicDegrade(
   options: GenerateOptions,
@@ -105,20 +106,15 @@ function anthropicDegrade(
     // 静态表未声明该模型支持 Anthropic wire（文档只对已知模型给出 Messages 参数）。
     return { wire: supportsResponses(facts) ? 'responses' : 'chat-completions', reason: 'downgrade-unsupported-model' };
   }
-  if (hasImages(options) && !facts.anthropicSupportsImages) {
-    // Anthropic 图片块按 api-compatibility-params 记录仅 6.8——但 2026-10-27
-    // 真机实测 deepseek-flash / kimi-k3 走 anthropic 发图同样成功（档案已翻
-    // true，不再进本分支）。Responses 的 input_image 支持按文档成立（base64
-    // /URL，png/jpeg/gif/webp）——本分支现仅剩未实测模型，降级目标按文档
-    // 回到 Responses。
-    return { wire: 'responses', reason: 'downgrade-image' };
-  }
-  // 用户拍板（2026-11-01「用户选择大于协议」）：禁 disabled 的模型（glm-5.2——
-  // 文档明写 thinking.type=disabled 传入即失败，output_config.effort 词表无 none，
-  // an 线没有可用的关闭表达）勾 off 时不留在 an 静默失效，显式跳过落下一线
-  // （responses/chat 都有合法关闭表达）。与 downgrade-image 同形状：线表达不了的
-  // 请求特征换线；钉链的语义本就是「优先且允许降级」。off 唯一触发——其余档位
-  // 在 an 词表内原样发。未选档位（undefined）归一后非 none，不跳。
+  // 用户拍板（2026-11-01「用户选择大于协议」）：an 线表达不了「关」的模型
+  // （forbidThinkingDisabled，现唯一载体 6.8-flash：thinking.type 仅 enabled、
+  // 梯子无 none。glm-5.2 曾按文档列此，2026-11-04 他真机 curl——
+  // thinking:{type:'disabled'} 打 /messages 得 200——推翻文档判据，档案翻 false）
+  // 勾 off 时不留在 an 静默失效，显式跳过落下一线（跳线落点 re/chat 对
+  // 6.8-flash 发的是他词表外的 none——off 可勾洞，待收口）。与其它线级换线同
+  // 形状：线表达不了的请求特征换线；钉链的语义本就是「优先且允许降级」。
+  // off 唯一触发——其余档位在 an 词表内原样发。未选档位（undefined）归一后
+  // 非 none，不跳。
   if (facts.forbidThinkingDisabled && canonicalThinkingEffort(options.reasoningEffort as string | undefined) === 'none') {
     return { wire: supportsResponses(facts) ? 'responses' : 'chat-completions', reason: 'downgrade-effort-unsupported' };
   }

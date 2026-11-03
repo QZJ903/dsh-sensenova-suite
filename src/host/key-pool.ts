@@ -186,9 +186,13 @@ export class SensenovaKeyPool {
    * `exclude` 的一把 —— 借用**不改变其相位**，仅本次使用。
    *
    * @param exclude - 本轮已试过的 key（适配器的 `tried` 集合）。
+   * @param options.borrow - 扫描耗尽是否借阻塞态 key。默认 true=保底借用（池空
+   *   /单 key 场景，pickStart 语义不变）；轮内换 key 传 false——阻塞 key 只按
+   *   10min 时间门回运行态，不进轮询（2026-11-04 他拍板：tried 下推为池的选择
+   *   条件，轮长=未试运行态数；借用若随轮耗尽例行触发，会破坏批 D 的驻留设计）。
    * @returns 下一把 key；池内已无可试者返回 undefined（调用方据此结束本轮）。
    */
-  pickNext(exclude: ReadonlySet<string>): string | undefined {
+  pickNext(exclude: ReadonlySet<string>, options?: { borrow?: boolean }): string | undefined {
     const count = this.running.length
     if (count > 0) {
       const anchor = this.lastPicked === undefined
@@ -201,6 +205,7 @@ export class SensenovaKeyPool {
         return entry.key
       }
     }
+    if (options?.borrow === false) return undefined
     const borrowed = this.oldestBlocked(exclude)
     if (borrowed !== undefined) this.lastPicked = borrowed.key
     return borrowed?.key

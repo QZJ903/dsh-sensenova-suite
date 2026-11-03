@@ -1,5 +1,28 @@
 # 更新日志（Changelog）
 
+## 0.1.49（2026-11-04）
+
+- **协议线档案三连修（文档口径被真机逐个推翻的收口，全部他拍板）**：
+  - **responses 线 input 条目恒带 `type:'message'`**：真机 400 实证——混入 function 项的数组里 role 条目缺 type 即 `missing input.type`（MissingParameter）；文档两套形状并存（基础示例不带/工具流带）且对「tools 在场但数组尚无 function 项」的第 1 轮沉默，**方案一无条件补齐**消除漏判窗口。re 线文本对话自此真机可用（此前自 10-31 re 首发以来带工具会话轮次 ≥2 必 400 → 运行时标记 → 滑向 an）。
+  - **glm-5.2 `forbidThinkingDisabled` 翻 false**：真机 curl `thinking:{type:'disabled'}` 打 /messages 得 200 推翻文档判据（11-01 时代一次真机 400 互证过、真因已不可对质）——an 线关闭表达恢复，an 优先链 glm+关直接服务；6.8-flash 不动（平台行为，档案唯一 true 载体）。
+  - **kimi `noneMapsToThinkingDisabled` 死分支整根拆除**：gate 全档案 false（10-27 实测 `thinking:'disabled'` 被平台 400 invalid arguments code 3 拒）从未触发，chat 线 `thinking` 字段出站 spread 随删——「从不构造 thinking 字段」的注释从此名副其实。
+  - **`anthropicSupportsImages` 整字段撤档**：文档「仅 6.8-lite 支持图片块」被 deepseek-flash/kimi-k3（10-27）与 6.8-flash（11-03）真机三度推翻、档案三次被迫翻 true——降级分支与字段全删，an 线收不收图由「可看图」勾选（换图器边界）与运行时 400 探测决定。
+  - **标准链倒序 `an→re→chat`**：re 线推理档位传入无效（文档称兼容 low/medium/high/xhigh，实际后台恒用 `reasoning.effort:"high"`）——推理档位保真优先走 an（`output_config.effort` 词表真实五值）；an 的空流/断尾由运行时降级兜底（ANTHROPIC_TRUNCATED/400 内存级标记换线）。10-31 曾定 re→an>chat。
+- **轮转与并发闸修复（真机 90s 静默挂起事故驱动）**：
+  - **轮界推进漏放并发槽**（`release` 变量被循环顶新 acquire 覆盖）：上一轮最后一把 key 槽位永久泄漏——limit=1 下第 7 发排队 90s 静默超时、宿主 10 次重试全数撞墙 ≈15min（真机 19:04 日志逐拍对齐）。轮界 `continue` 前补 `release`。
+  - **并发闸排队超时补 traceLog**（此前零痕迹——事故排查瞎掉的原因）：`并发闸排队超时 model=… key=… 等=90s`。
+  - **tried 下推为池的选择条件**：`pickNext` 加 `borrow` 选项、rotateApiKey 透传 `tried`——轮内恒遍历未试运行态 key，轮长=未试数（2026-11-03 真机 R2 只试 3 把缺 4R 的缺轮形态从结构消失：池共享游标 `lastPicked` 交回已试 key 不再截短轮长）；**阻塞 key 不进轮询**（borrow:false——10min 时间门专属，批 D「不因真实探测消耗 rpm」驻留设计不动），池空保底借用走 pickStart 路径不变。
+- **U3 台账拍板处置全清（8 项，D3/S1 等总审、顺带⑧ 拍板维持）**：
+  - **D1 两件套**：`listModels` keep 过滤加 failedModels 读侧兜底（下线模型不再被播种劫持 24h 续命）+ 404 失败缓存只随 apiBase 失效（换 key 不再清——下线是服务端路由状态与 key 无关）；缓存命中仍要求凭据+端点都没变。
+  - **D2a**：`status>=500` 与 529 overloaded 归 **SERVER 档**进宿主重试名单——SERVER 从零生产者变为 5xx 的家，「重试通常可恢复」从此是真话；4xx 维持不重试。
+  - **D4**：重试封顶单源（`QUOTA_RETRY_AFTER_CEILING_MS = PROVIDER_RETRY_AFTER_CAP_MS` 别名 + export 上钉）。
+  - **D5**：llm-adapter 死变量 `snapshot/accountCount` 与失实注释删除。
+  - **D6a**：`LLM_CODES` 完整码表单源化——adapter 14 处裸码全清（每码计数断言脚本），`QUOTA_CODES` 注释的假承诺（「peer 改名会在 adapter 浮出」——peer 构造器就是 string、不导出码表）改真话。
+  - **S2a**：抖动等待中 abort 原样透传（`throw signal.reason`）——用户按停止上屏取消原因，不再冒充「传输错误」。
+  - **S3**：目录响应非 JSON（网关 HTML）包 `PROVIDER_PROTOCOL_ERROR`——全文件最后一个裸抛点关门。
+  - **顺带①②**：concurrency.ts「60s」→「90s」、contract.test 头注改真机判定 C 定论。
+- **验证**：typecheck 0 错；provider 256（+D2a/D1/D4/S3/S2a 五钉，含轮界泄漏钉变异式验证红→绿）/ pool 124（+noBorrow 两钉）/ catalog-gate 17（D1 判据钉翻新）/ wire-chain 28（junction 重建后真跑，含 glm 翻案/链倒序/responses type 钉）/ contract 92 / vision-image 22 / retry 25 全绿。真机生效 = 完整重启 DSH（验收清单：轮次恒 4 把、排队超时可见、工具会话 re 线不再 400、下线模型从选择器消失）。
+
 ## 0.1.48（2026-11-04）
 
 - **429 池类误判全链翻修（真机事故驱动：4 账号 key 同秒连环被误判「池耗尽」→ 1 轮抛 ACCOUNT_QUOTA + 30min 拒服）**：

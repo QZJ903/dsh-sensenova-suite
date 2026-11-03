@@ -600,6 +600,33 @@ try {
     JSON.stringify(orchO.snapshot()));
 } catch (e) { fail("borrow-channel", e); }
 
+// ── O2. 轮内换 key 不借阻塞（2026-11-04 他拍板：tried 下推为池的选择条件）：
+//    borrow:false 时扫描耗尽返回 undefined（轮就此收束），阻塞 key 只按 10min
+//    时间门回运行态——借用保持池空/单 key 保底的触发条件，不随轮耗尽例行触发
+//    （否则阻塞 key 被每轮探测，破坏批 D「不因真实探测消耗 rpm」的驻留设计）。
+try {
+  const orchO2 = new KeyOrchestrator({
+    params: () => ({ ...DEFAULT_ORCHESTRATOR_PARAMS, globalConcurrency: 2 }),
+    resolveKeys: async () => [
+      { id: "c0", key: "sk-x" }, { id: "c1", key: "sk-y" }, { id: "c2", key: "sk-z" },
+    ],
+    now: () => nowO2,
+  });
+  let nowO2 = 9_500_000;
+  await orchO2.pickStart({ sessionId: "o2", model: "m" }); // seed
+  const bv2 = (await orchO2.pickStart({ sessionId: "o3", model: "m" })).key;
+  orchO2.reportRateLimited(bv2);
+  orchO2.reportRateLimited(bv2);
+  orchO2.reportRateLimited(bv2); // 第 3 次踢出（运行态剩 2 > 1，保底不拦）
+  const runningO2 = orchO2.snapshot().running;
+  const noBorrow = await orchO2.pickNext(new Set(runningO2), "general", { borrow: false });
+  check("轮内换 key 不借阻塞：运行态全试尽返回 undefined（不保底借用）", noBorrow === undefined,
+    JSON.stringify({ bv: bv2, running: runningO2, noBorrow }));
+  const stillBorrows = await orchO2.pickNext(new Set(runningO2), "general");
+  check("对照：默认 borrow 语义不变（同态仍可借）", stillBorrows === bv2,
+    JSON.stringify({ bv: bv2, stillBorrows }));
+} catch (e) { fail("no-borrow-rotate", e); }
+
 // ── P. 额度耗尽升级（2026-11-03 批 C 建、2026-11-04 批 E 断流重置式定稿）+
 //    summarize429Body（429 诊断行 body 摘要）────────────────────────────────
 // 判据：所有 429 记账（与桶解耦）；429 间隔超 30min 翻篇重记（闲置不算持续）；

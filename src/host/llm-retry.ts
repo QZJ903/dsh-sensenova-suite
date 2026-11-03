@@ -35,13 +35,15 @@
  * The failure-class codes this provider reasons about, in peer-canonical
  * spelling.
  *
- * The strings mirror the `@deepseek-ai/dsh-llm` peer's error-code constants
+ * The strings mirror the `@deepseek-ai/dsh-llm` peer's error-code vocabulary
  * (`QUOTA_EXCEEDED_CODE = "QUOTA"`, `ACCOUNT_QUOTA_EXCEEDED_CODE =
  * "ACCOUNT_QUOTA"`, `EMPTY_RESPONSE_CODE = "EMPTY_RESPONSE"`). They are stable
  * protocol codes, not implementation details, so pinning them here is what the
- * qoder route does too; `llm-adapter.ts` still imports the live constants from
- * the peer and passes them through `resolveRetryPolicy`, so a peer rename would
- * surface at the adapter, not silently drift here.
+ * qoder route does too. **手写镜像，无 import 防漂移**（2026-11-04 D6 定案）：
+ * peer 的 `LlmError` 构造器 code 参数就是 string、不导出码表常量（peer
+ * types/index.d.ts:71 实证），旧注释声称的「peer 改名会在 adapter 浮出」机制
+ * 不存在——漂移由 retry.test / contract.test 的钉兜住；升 peer 版本先跑这两个
+ * 套件。adapter 抛错面的完整码表见 {@link LLM_CODES}（quota 族经由本表展开）。
  */
 export const QUOTA_CODES = Object.freeze({
   /** Depleted Token Plan pool (per-pool quota). Not retried. */
@@ -58,6 +60,27 @@ export const QUOTA_CODES = Object.freeze({
   timeout: "TIMEOUT",
   /** Connection-level failure. Retried. */
   transport: "TRANSPORT"
+});
+
+/**
+ * 适配器抛错面的完整码表（2026-11-04 D6a 单源化）：adapter.ts 的抛错码全部从
+ * 这里取——同一个码在自家代码里不再有第二种写法（防内伤：string 码手滑写错
+ * 本无 typecheck 兜底）。仍是手抄 peer 词汇表（见 QUOTA_CODES 注），不防外伤
+ * （peer 改名），漂移靠钉。MODEL_NOT_FOUND 自造码与 ANTHROPIC_TRUNCATED 同理：
+ * 平台形状的稳定协议码，peer 词表外的自留位。
+ */
+export const LLM_CODES = Object.freeze({
+  ...QUOTA_CODES,
+  /** 401 / 密钥缺失或无效。Not retried. */
+  invalidCredential: "INVALID_CREDENTIAL",
+  /** 上游 HTTP 非 2xx、无更细分类（4xx 族）。Not retried. */
+  providerHttpError: "PROVIDER_HTTP_ERROR",
+  /** 上游响应形状无法解析（SSE/JSON 破损）。Not retried. */
+  providerProtocolError: "PROVIDER_PROTOCOL_ERROR",
+  /** 请求参数问题（客户端错，重试无用）。Not retried. */
+  invalidRequest: "INVALID_REQUEST",
+  /** 模型 id 不可路由（404 形）。Not retried. */
+  modelNotFound: "MODEL_NOT_FOUND",
 });
 
 /**

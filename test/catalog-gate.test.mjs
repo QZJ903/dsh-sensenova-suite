@@ -27,9 +27,9 @@ try {
   check("TTL 过期 → send（不清 404 失败缓存）",
     JSON.stringify(planCatalogFetch({ ...baseState, cachedEntries: 5, fetchedAt: NOW - CATALOG_TTL_MS - 1 }, baseInput)) ===
     JSON.stringify({ action: "send", invalidateFailedModels: false }));
-  check("凭据变 → send 且清 404 失败缓存（TTL 不护跨凭据）",
+  check("凭据变 → send 但不清 404 失败缓存（D1 层 2：下线是服务端路由状态，与 key 无关；TTL 仍不护跨凭据）",
     JSON.stringify(planCatalogFetch({ ...baseState, cachedEntries: 5, fetchedAt: NOW - 1_000 }, { ...baseInput, credential: "sk-b" })) ===
-    JSON.stringify({ action: "send", invalidateFailedModels: true }));
+    JSON.stringify({ action: "send", invalidateFailedModels: false }));
   check("apiBase 变 → send 且清 404 失败缓存",
     JSON.stringify(planCatalogFetch({ ...baseState, cachedEntries: 5, fetchedAt: NOW - 1_000 }, { ...baseInput, apiBase: "https://other.example/v1" })) ===
     JSON.stringify({ action: "send", invalidateFailedModels: true }));

@@ -162,10 +162,10 @@ function toAnthropicMessages(
  * effort 出站策略（2026-10-27 按平台词表收紧，判定在 wire/effort.ts）：
  * - 「关闭思考」的任何方言拼写（面板 off / chat 方言 none / 静态表 minimal）→
  *   `thinking: {type:'disabled'}`，不发 effort（文档：关闭思考的两种表达之一）；
- *   档案 forbidThinkingDisabled 的模型除外（glm-5.2——文档 GLM-5.2 段明写
- *   「thinking.type 不支持 disabled，传入该值将导致请求失败」）：an 线没有可用的
- *   关闭表达（output_config.effort 词表无 none，真机 400 原文），不发任何思考
- *   字段 = 保持平台默认开思考；
+ *   档案 forbidThinkingDisabled 的模型除外（现唯一载体 6.8-flash——thinking.type
+ *   仅 enabled，平台行为）：不发任何思考字段 = 保持平台默认开思考。glm-5.2 曾
+ *   按文档列此，2026-11-04 他真机 curl 推翻文档判据（disabled 打 /messages 得
+ *   200），档案翻 false——11-01 时代记录的真机 400（U2 D1）真因已不可对质；
  * - 其余档位 → `output_config: {effort}`，仅接受平台枚举的五个值，词表外
  *   一律不发（不发未知值，绝不上桌让平台打 400）；
  * - 未选档位 → 两者都不发（网关默认 enabled + effort=high，即「用模型默认」）。
@@ -185,11 +185,14 @@ export function buildAnthropicBody(
   }));
 
   const { thinkingDisabled, effortWire } = anthropicEffortOut(options.reasoningEffort as string | undefined);
-  // 禁 disabled 的模型（glm-5.2）：不发 thinking、也不发 effort（none 拼写下
-  // effortWire 本就 undefined）——此前无条件发 disabled，glm 勾 off 走 an 线必 400
-  // 并被误标 anthropicUnsupported（U2 审计 D1，2026-11-01）。2026-11-01 拍板后
-  // plan 走查已在该组合下显式跳过 an（downgrade-effort-unsupported），本判定退为
-  // 第二道防线（含未来新档案模型），两层语义一致：不发任何思考字段。
+  // 禁 disabled 的模型（现唯一载体 6.8-flash）：不发 thinking、也不发 effort
+  // （none 拼写下 effortWire 本就 undefined）。glm-5.2 曾按文档列此——此前无条件
+  // 发 disabled，glm 勾 off 走 an 线有过一次 400 并被误标 anthropicUnsupported
+  // （U2 审计 D1，2026-11-01；真因已不可对质）；2026-11-04 他真机 curl：
+  // thinking:{type:'disabled'} 打 glm-5.2 /messages 得 200，文档判据推翻、档案翻
+  // false，本判定对 glm 不再触发。plan 走查仍对该组合显式跳 an
+  // （downgrade-effort-unsupported），本判定退为第二道防线（含未来新档案模型），
+  // 两层语义一致：不发任何思考字段。
   const sendThinkingDisabled = thinkingDisabled && !facts.forbidThinkingDisabled;
 
   // temperature：显式设置才发；kimi-k3 固定 1，出站不发（与 Chat 路径同一纪律）。

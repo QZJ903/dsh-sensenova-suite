@@ -8,12 +8,13 @@ import type { FactsCatalogEntry, ModelFacts, WireKind } from './types.ts';
  * （交平台 API 自行裁决）。已知分支缺省与未知分支开图共用同一份（duplication 门）。 */
 const GENERIC_IMAGE_FORMATS = ['jpeg', 'png', 'webp', 'gif'];
 
-/** 全模型统一默认降级链（2026-10-31 用户拍板，两步：先加回 kimi/glm 的
- * anthropic 撤销分岔，再把顺序定为 re→an→chat——responses 线没出现过空流/断尾
- * 形态，anthropic 的时好时坏由运行时降级兜底：ANTHROPIC_TRUNCATED / 400 命中即
- * 内存级标记换线，重启清除）。策略层——链走查仍与 supportedWires 求交，能力外
- * 的线被跳过。 */
-const STANDARD_CHAIN: readonly WireKind[] = ['responses', 'anthropic', 'chat-completions'];
+/** 全模型统一默认降级链（2026-11-04 用户拍板，倒序重排：an>re>chat——responses
+ * 线推理档位传入无效（文档称兼容 low/medium/high/xhigh，实际后台恒用
+ * reasoning.effort:"high"），推理档位保真优先走 an（output_config.effort 词表
+ * 真实五值）；an 的时好时坏（空流/断尾）由运行时降级兜底：ANTHROPIC_TRUNCATED /
+ * 400 命中即内存级标记换线，重启清除。2026-10-31 曾定 re>an>chat。策略层——
+ * 链走查仍与 supportedWires 求交，能力外的线被跳过。 */
+const STANDARD_CHAIN: readonly WireKind[] = ['anthropic', 'responses', 'chat-completions'];
 
 /** 未收录模型 id 的通用兜底档案（不抛错；Chat 行为与迁移前「未知模型」路径一致）。 */
 const GENERIC_FACTS: ModelFacts = {
@@ -30,14 +31,12 @@ const GENERIC_FACTS: ModelFacts = {
   supportsStreamOptions: false, // 未知模型保守不发 stream_options（迁移前同）
   requiresReasoningReplay: false,
   forbidThinkingDisabled: false,
-  noneMapsToThinkingDisabled: false,
   fixedTemperature: null,
   fixedTopP: null,
   blockedSampling: [],
   supportsImages: false,
   imageFormats: [],
   imageRequiresBase64: false,
-  anthropicSupportsImages: false,
   responsesMaxOutputTokens: null,
   responsesSupportsJsonSchema: false,
 };
@@ -60,7 +59,6 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsStreamOptions: true,
     requiresReasoningReplay: false,
     forbidThinkingDisabled: false,
-    noneMapsToThinkingDisabled: false,
     fixedTemperature: null,
     fixedTopP: null,
     blockedSampling: [],
@@ -68,22 +66,22 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsImages: true,
     imageFormats: ['jpg', 'jpeg', 'png', 'webp'],
     imageRequiresBase64: false,
-    anthropicSupportsImages: true, // 文档 #api-compatibility-params：仅 6.8 支持图片块
     responsesMaxOutputTokens: 65536,
     responsesSupportsJsonSchema: false,
   }],
   ['sensenova-6.8-flash', {
     // 2026-11-03 收编（docs/sensenova-api-reference/2、SenseNova 6.8 Flash.md）。
     // 思考：默认开启且**不支持关闭**（thinking.type 仅 enabled）→ 档位梯无 none、
-    // forbidThinkingDisabled（同 glm 姿态：禁发 thinking disabled）；原生梯含
-    // minimal/xhigh（面板五档表达不了的不出现在勾选集，无 none → 面板默认无「关」）。
+    // forbidThinkingDisabled（档案唯一 true：平台行为，非文档单证——glm 曾同列，
+    // 2026-11-04 真机推翻其文档判据已翻 false）；原生梯含
+    // minimal/xhigh（面板五档表达不了的不出现在勾选集，无 none → 面板默认不勾
+    // 「关」；档位框恒渲染、关仍可勾可存——2026-11-04 发现的洞，待收口）。
     // 图像：image_url 公网 URL + Base64 均可，JPG/JPEG/PNG/WebP。
-    // Anthropic 线发图：兼容文档明写「仅 6.8-flash-lite 支持」→ false（deepseek-flash
-    // 先例：文档 false 被真机翻 true——上真机测一次，成了翻案）。Responses 线
-    // 输出上限文档无本模型行 → null 未申报（同 deepseek-flash 先例，须实测）。
-    // Anthropic 线发图：兼容文档明写「仅 6.8-flash-lite 支持」→ 曾按文档写
-    // false；2026-11-03 用户真机确认 an 线可以带图 → 翻 true（deepseek-flash
-    // 同款先例：文档口径被实测推翻，档案以实测为准）。
+    // Anthropic 线发图史：文档明写「仅 6.8-flash-lite 支持图片块」，档案曾按
+    // 文档写 false，2026-11-03 真机确认 an 线可以带图（deepseek-flash 同款先例：
+    // 文档口径被实测推翻）；该静态预拦已于 2026-11-04 随 anthropicSupportsImages
+    // 撤档整体删除（见 plan.ts anthropicDegrade 注）。
+    // Responses 线输出上限文档无本模型行 → null 未申报（同 deepseek-flash 先例，须实测）。
     id: 'sensenova-6.8-flash',
     supportedWires: ['chat-completions', 'responses', 'anthropic'],
     defaultChain: STANDARD_CHAIN,
@@ -96,7 +94,6 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsStreamOptions: true,
     requiresReasoningReplay: false, // 文档「通常无需回传 reasoning」
     forbidThinkingDisabled: true,
-    noneMapsToThinkingDisabled: false,
     fixedTemperature: null,
     fixedTopP: null,
     blockedSampling: [],
@@ -104,7 +101,6 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsImages: true,
     imageFormats: ['jpg', 'jpeg', 'png', 'webp'],
     imageRequiresBase64: false,
-    anthropicSupportsImages: true, // 2026-11-03 用户真机确认（文档「仅 lite」被实测推翻，deepseek-flash 同款先例）
     responsesMaxOutputTokens: null,
     responsesSupportsJsonSchema: false,
   }],
@@ -121,14 +117,12 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsStreamOptions: true,
     requiresReasoningReplay: true,
     forbidThinkingDisabled: false,
-    noneMapsToThinkingDisabled: false,
     fixedTemperature: null,
     fixedTopP: null,
     blockedSampling: [],
     supportsImages: false,
     imageFormats: [],
     imageRequiresBase64: false,
-    anthropicSupportsImages: false,
     responsesMaxOutputTokens: 384000,
     responsesSupportsJsonSchema: false,
   }],
@@ -147,17 +141,12 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsStreamOptions: true,
     requiresReasoningReplay: true,
     forbidThinkingDisabled: false,
-    noneMapsToThinkingDisabled: false,
     fixedTemperature: null,
     fixedTopP: null,
     blockedSampling: [],
     supportsImages: true,
     imageFormats: ['jpeg', 'png', 'gif', 'webp'],
     imageRequiresBase64: false,
-    // 2026-10-27 用户真机实测：deepseek-flash 走 anthropic wire 发图成功——
-    // 此前按文档 api-compatibility-params 写的 false（「仅 6.8 支持图片块」）
-    // 与实测不符，已翻 true；auto 模式带图不再降级离开 anthropic。
-    anthropicSupportsImages: true,
     responsesMaxOutputTokens: null, // §3.2 范围表漏列 deepseek-flash，须实测
     responsesSupportsJsonSchema: true,
   }],
@@ -176,15 +165,17 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     outputLimitMax: 131072,
     supportsStreamOptions: false,
     requiresReasoningReplay: false,
-    forbidThinkingDisabled: true,
-    noneMapsToThinkingDisabled: false,
+    // an 线关闭表达：文档曾称 thinking.type=disabled 传入即失败（11-01 时代一次
+    // 真机 400 互证，U2 D1，真因已不可对质）；2026-11-04 他真机 curl——
+    // thinking:{type:'disabled'} 打 glm-5.2 /messages 得 200 且被收下——文档判据
+    // 推翻，an 线可正常表达「关」。现档案唯一 true 载体是 6.8-flash（平台行为）。
+    forbidThinkingDisabled: false,
     fixedTemperature: null,
     fixedTopP: null,
     blockedSampling: [],
     supportsImages: false,
     imageFormats: [],
     imageRequiresBase64: false,
-    anthropicSupportsImages: false,
     responsesMaxOutputTokens: 131072,
     responsesSupportsJsonSchema: false,
   }],
@@ -196,6 +187,9 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     defaultChain: STANDARD_CHAIN,
     // none 入表依据：官方文档思考强度梯子明确列 `none`＝关闭推理；2026-09-29
     // 全模型探测口径 thinkingLevelMap off→none 同证（其余模型 efforts 均含 none）。
+    // 2026-10-27 真机定版：`thinking:'disabled'`（string）被平台 400 invalid
+    // arguments code 3 拒——关思考唯一合法走法 reasoning_effort:'none'；曾为文档
+    // 矛盾另一边留的 noneMapsToThinkingDisabled 特例分支 2026-11-04 整根拆除。
     efforts: ['low', 'medium', 'high', 'max', 'none'],
     defaultEffort: 'max',
     responsesDefaultEffort: 'max',
@@ -205,10 +199,6 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsStreamOptions: true,
     requiresReasoningReplay: false,
     forbidThinkingDisabled: false,
-    // 2026-10-27 真机实测修正（原注释「文档自相矛盾，待实测」的实测结果）：
-    // `thinking:'disabled'`（string）被平台 400 invalid arguments code 3 拒绝；
-    // 关闭思考走 reasoning_effort:'none'（efforts 已含 none，文档梯子表背书）。
-    noneMapsToThinkingDisabled: false,
     fixedTemperature: 1,
     fixedTopP: 0.95,
     blockedSampling: ['frequency_penalty', 'presence_penalty', 'temperature', 'top_p'],
@@ -216,9 +206,6 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     supportsImages: true,
     imageFormats: ['jpeg', 'png', 'webp', 'gif', 'bmp', 'heic', 'heif'],
     imageRequiresBase64: true, // 不支持公网 URL，仅 base64
-    // 2026-10-27 用户真机实测：kimi-k3 走 anthropic 发图成功（与 deepseek-flash
-    // 同批确认），档案从文档口径的 false 翻 true。
-    anthropicSupportsImages: true,
     responsesMaxOutputTokens: 1048576,
     responsesSupportsJsonSchema: true,
   }],

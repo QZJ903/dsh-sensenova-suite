@@ -96,31 +96,45 @@ const { toResponsesInput } = await import("../src/host/wire/body-responses.ts");
       JSON.stringify(ciOutput));
     check("合规短 id 原样透传", ciShortCall !== undefined && ciShortCall.call_id === "short_ok", JSON.stringify(ciShortCall));
 
+    // role 条目恒带 type:'message'（2026-11-04 真机 400：混入 function 项的数组
+    // 缺 type 即 "missing input.type"；方案一=无条件补齐，工具会话第 1 轮也覆盖）。
+    const roleItems = toResponsesInput({
+      model: "m",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "你好" }] },
+        { role: "assistant", content: [{ type: "text", text: "答" }] },
+      ],
+    }).input;
+    check("role 条目恒带 type:'message'（2026-11-04 真机 400 修正）",
+      roleItems.length === 2 && roleItems.every((i) => i.type === "message"),
+      JSON.stringify(roleItems));
+
     const opts = (extra = {}) => ({ model: "m", messages: [], ...extra });
     const resolve = (options, config = {}, modelChain, runtime = {}, model = "m") =>
       plan.resolveWirePlan(options, config, factsFor(model), runtime, modelChain);
     const shape = (wire, reason, chain) =>
       JSON.stringify([wire, reason, chain]);
 
-    // 档案默认链：全模型统一 re>an>chat（2026-10-31 他拍板）起步即 responses。
-    // 须传已知模型（factsFor("m") 是未知模型、能力面只有 chat，恒落兜底）——
-    // 此钉此前未传，出生即红，被 call_id 块的 TypeError 挡住从未暴露。
-    check("a standard model walks its re>an>chat default and serves responses",
+    // 档案默认链：全模型统一 an>re>chat（2026-11-04 他拍板倒序——re 推理档位
+    // 传入无效）起步即 anthropic。须传已知模型（factsFor("m") 是未知模型、能力
+    // 面只有 chat，恒落兜底）——此钉此前未传，出生即红，被 call_id 块的
+    // TypeError 挡住从未暴露。
+    check("a standard model walks its an>re>chat default and serves anthropic",
       shape(resolve(opts(), {}, undefined, {}, "deepseek-flash").wire, resolve(opts(), {}, undefined, {}, "deepseek-flash").reason, resolve(opts(), {}, undefined, {}, "deepseek-flash").chain)
-        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"]),
+        === shape("anthropic", "anthropic-default", ["anthropic", "responses", "chat-completions"]),
       JSON.stringify(resolve(opts(), {}, undefined, {}, "deepseek-flash")));
 
-    // kimi/glm 档案默认链与标准链同形（2026-10-31 他拍板：加回 anthropic 撤销分岔，
-    // 再统一为 re>an>chat）。钉「不分岔」本身。
+    // kimi/glm 档案默认链与标准链同形（2026-10-31 加回 anthropic 撤销分岔；
+    // 2026-11-04 随标准链倒序为 an>re>chat）。钉「不分岔」本身。
     const kimi = resolve(opts(), {}, undefined, {}, "kimi-k3");
     check("kimi's facts default chain is the standard (anthropic restored, no fork)",
       shape(kimi.wire, kimi.reason, kimi.chain)
-        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"]),
+        === shape("anthropic", "anthropic-default", ["anthropic", "responses", "chat-completions"]),
       JSON.stringify(kimi));
     const glm = resolve(opts(), {}, undefined, {}, "glm-5.2");
     check("glm's facts default chain is the standard too (no fork)",
       shape(glm.wire, glm.reason, glm.chain)
-        === shape("responses", "responses-default", ["responses", "anthropic", "chat-completions"]),
+        === shape("anthropic", "anthropic-default", ["anthropic", "responses", "chat-completions"]),
       JSON.stringify(glm));
 
     // 面板覆盖三层之首：单线链钉死；显式加回 anthropic 也照走。
@@ -155,20 +169,18 @@ const { toResponsesInput } = await import("../src/host/wire/body-responses.ts");
       effort.wire === "chat-completions" && effort.reason === "chain-fallback",
       JSON.stringify(effort));
 
-    // 用户拍板（2026-11-01「用户选择大于协议」）：禁 disabled 的模型（glm）勾 off
-    // 时不留在 an 静默失效——显式跳过落下一线（responses 有合法关闭表达）。
-    const offSkipsAn = resolve(opts({ reasoningEffort: "off" }), {}, ["anthropic", "responses"], {}, "glm-5.2");
-    // 跳过行为由 wire+chain 断言；reason 断言服务线实值——走查只消费 hit 的
-    // 命中/未命中，downgrade 词不入返回（服务 reason 恒 servedReason，见 plan.ts）。
-    check("off on a forbid-disabled model skips anthropic entirely (user intent over pinned order)",
-      shape(offSkipsAn.wire, offSkipsAn.reason, offSkipsAn.chain)
-        === shape("responses", "responses-default", ["anthropic", "responses"]),
-      JSON.stringify(offSkipsAn));
-    // 对照：单线钉 an 一样被跳过，兜底 chat——chat 线 glm 的 off 走 reasoning_effort
-    // none（文档背书），关闭意图仍兑现。
+    // 2026-11-04 他真机 curl（thinking:{type:'disabled'} 打 glm-5.2 /messages 得
+    // 200）推翻文档判据，档案 forbidThinkingDisabled 翻 false——glm+off 不再跳线，
+    // an 线直接服务（体层发 disabled，curl 同形状）。「用户选择大于协议」的跳线
+    // 机制现唯一载体是 6.8-flash。
+    const offServesAn = resolve(opts({ reasoningEffort: "off" }), {}, ["anthropic", "responses"], {}, "glm-5.2");
+    check("off on glm serves anthropic after the 2026-11-04 real-machine flip (was skip-to-responses)",
+      shape(offServesAn.wire, offServesAn.reason, offServesAn.chain)
+        === shape("anthropic", "anthropic-default", ["anthropic", "responses"]),
+      JSON.stringify(offServesAn));
     const offSingleAn = resolve(opts({ reasoningEffort: "off" }), {}, ["anthropic"], {}, "glm-5.2");
-    check("off with a single-anthropic chain on a forbid-disabled model falls through to chat",
-      offSingleAn.wire === "chat-completions" && offSingleAn.reason === "chain-fallback",
+    check("off with a single-anthropic chain on glm serves anthropic too (post-flip)",
+      offSingleAn.wire === "anthropic" && offSingleAn.reason === "anthropic-default",
       JSON.stringify(offSingleAn));
     // 对照：不勾 off 时同一条链照走 an——跳过只绑定 off 拼写，不影响其他档位与未选。
     const noEffort = resolve(opts(), {}, ["anthropic", "responses"], {}, "glm-5.2");
@@ -212,10 +224,10 @@ const { toResponsesInput } = await import("../src/host/wire/body-responses.ts");
       JSON.stringify(mixedBody.messages));
 
     // 非法覆盖回落档案默认；能力门跳过链上能力外的线后兜底。
-    // 期望三线 = 2026-10-31 拍板（kimi 的 anthropic 加回，全模型统一 re>an>chat）。
+    // 期望三线 = 2026-11-04 拍板（全模型统一 an>re>chat）。
     const junk = resolve(opts(), {}, ["nope", 42], {}, "kimi-k3");
     check("a junk override falls through to the facts default chain",
-      junk.wire === "responses" && JSON.stringify(junk.chain) === JSON.stringify(["responses", "anthropic", "chat-completions"]),
+      junk.wire === "anthropic" && JSON.stringify(junk.chain) === JSON.stringify(["anthropic", "responses", "chat-completions"]),
       JSON.stringify(junk));
     const gated = resolve(opts(), {}, ["anthropic"], {}, "unknown-model-x");
     check("a wire outside supportedWires is skipped, then the chat fallback serves",

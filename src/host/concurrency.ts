@@ -59,7 +59,7 @@ interface KeyState {
  * 按 key 隔离的并发闸：`acquire(key, limit, signal?, queueTimeoutMs?)` 在额度
  * 允许时立即返回 `release()`；达到上限时按 FIFO 排队，前序释放后唤起队首。
  * 排队期间 signal 中止则 reject 取消错误且不占额度；排队超过 `queueTimeoutMs`
- * （非法值回退默认 60s）则以可重试 TimeoutError reject，同样不占额度、从队列
+ * （非法值回退默认 90s，2026-11-02 定版）则以可重试 TimeoutError reject，同样不占额度、从队列
  * 移除并清 abort listener。release 幂等，排空后惰性删除 key 条目。
  */
 export class KeyedConcurrencyGate {

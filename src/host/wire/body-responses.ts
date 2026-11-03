@@ -37,10 +37,16 @@ type ResponsesInputItem = Record<string, unknown>;
 /**
  * 把宿主消息历史映射为 Responses input 数组（§6.5）：
  * - system 消息与 options.system 合并为顶层 instructions；
- * - user 文本 → {role:'user',content:[{type:'input_text',text}]}；
- * - assistant 文本 → {role:'assistant',content:[{type:'output_text',text}]}；
+ * - user 文本 → {type:'message',role:'user',content:[{type:'input_text',text}]}；
+ * - assistant 文本 → {type:'message',role:'assistant',content:[{type:'output_text',text}]}；
  * - assistant tool-call → {type:'function_call',call_id,name,arguments}；
  * - tool-result → {type:'function_call_output',call_id,output}。
+ *
+ * role 条目恒带 type:'message'（2026-11-04 他拍板方案一）：真机 400 实证——
+ * 混入 function 项的数组里 role 条目缺 type 即 "missing input.type"（param=
+ * input.type，code=MissingParameter）。文档两套形状并存（基础/多轮/图像示例
+ * 不带，工具流示例全带）且对「tools 在场但数组尚无 function 项」的第 1 轮
+ * 沉默——无条件补齐消除漏判窗口。
  *
  * 坏历史 tool_call 四防御与 Chat 路径一致（tasks 2.1）：空 name 丢弃（含孤立
  * tool-result）、arguments 空串补 '{}'、id 空串/超长（平台限 1–64，2026-10-31
@@ -83,7 +89,7 @@ export function toResponsesInput(options: GenerateOptions, images?: Map<string, 
         emitted = true;
       }
       if (text !== '') {
-        input.push({ role: 'assistant', content: [{ type: 'output_text', text }] });
+        input.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
         emitted = true;
       }
       if (!emitted) continue; // 空壳 assistant 消息
@@ -103,9 +109,9 @@ export function toResponsesInput(options: GenerateOptions, images?: Map<string, 
     // user 角色：无图像保持纯文本现状；有图像经 blocks.ts 翻译（input_image 扁平形态）。
     const content = translateUserContent(message.content, 'responses', images);
     if (typeof content === 'string') {
-      if (content !== '') input.push({ role: 'user', content: [{ type: 'input_text', text: content }] });
+      if (content !== '') input.push({ type: 'message', role: 'user', content: [{ type: 'input_text', text: content }] });
     } else if (content.length > 0) {
-      input.push({ role: 'user', content });
+      input.push({ type: 'message', role: 'user', content });
     }
   }
   return { instructions: instructions !== '' ? instructions : undefined, input };

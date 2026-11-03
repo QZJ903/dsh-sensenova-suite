@@ -100,9 +100,9 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       JSON.stringify(defaultThinkingLevels("sensenova-6.8-flash")) === JSON.stringify(["low", "medium", "high", "max"]),
       JSON.stringify(defaultThinkingLevels("sensenova-6.8-flash")));
     const flash68 = factsFor("sensenova-6.8-flash", undefined);
-    check("the 6.8-flash facts row: no thinking-off, image in (an line too — 真机 2026-11-03), doc ceiling 128K",
+    check("the 6.8-flash facts row: no thinking-off, image in, doc ceiling 128K",
       flash68.forbidThinkingDisabled === true && flash68.supportsImages === true &&
-      flash68.imageRequiresBase64 === false && flash68.anthropicSupportsImages === true &&
+      flash68.imageRequiresBase64 === false &&
       flash68.outputLimitMax === 131072 && flash68.requiresReasoningReplay === false &&
       flash68.responsesMaxOutputTokens === null,
       JSON.stringify(flash68));
@@ -1437,7 +1437,7 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
   if (adapterMod !== null) {
     try {
-      const { SensenovaAdapter } = adapterMod;
+      const { SensenovaAdapter, QUOTA_RETRY_AFTER_CEILING_MS } = adapterMod;
       const mk = (overrides) => new SensenovaAdapter({
         options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1 }),
         resolveApiKey: async () => "sk-test",
@@ -1464,6 +1464,200 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       const noOverride = await bare.resolveModel("sensenova-suite", "deepseek-flash");
       check("T3 without overrides the catalogue figure rides through",
         noOverride.defaultMaxTokens === 65536, String(noOverride.defaultMaxTokens));
+
+      // 轮界推进不漏并发槽（2026-11-03 真机事故钉）：轮界 continue 曾覆盖 release
+      // 变量，上一轮最后一把 key 的槽位永久泄漏——真机形态第 4 发泄漏、第 7 发
+      // 排队 90s 静默超时、宿主 10 次重试全数撞墙 ≈15min。单 key 池跨轮界二次
+      // acquire 必须即时成功：泄漏形态下第 2 发排队 100ms（缩尺）即超时，
+      // 第 3 发拿到 200 后按空流收场（断尾/空响应皆可，唯独不能是排队超时）。
+      const gateAttempts = [];
+      const gateAdapter = new SensenovaAdapter({
+        options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1 }),
+        resolveApiKey: async () => "sk-test",
+        resolveApiKeyForRequest: async () => "sk-test",
+        requestSlot: async () => () => {},
+        rotateApiKey: async () => undefined,
+        pickStartKeyForRequest: async () => "sk-test",
+        timeouts: { queueMs: 100 },
+        fetchImpl: (async (_url, init) => {
+          gateAttempts.push(String(init?.headers?.authorization ?? ""));
+          if (gateAttempts.length <= 2) {
+            return new Response(JSON.stringify({ error: { code: "Throttling.AllocationQuota", message: "Workspace allocated quota exceeded" } }),
+              { status: 429, headers: { "content-type": "application/json" } });
+          }
+          return new Response("", { status: 200, headers: { "content-type": "text/event-stream" } });
+        }),
+      });
+      let gateError = "";
+      try {
+        for await (const chunk of gateAdapter.stream({
+          model: "deepseek-flash",
+          sessionId: "sess-gate-pin",
+          messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        })) { void chunk; }
+      } catch (error) { gateError = String(error?.message ?? error); }
+      check("轮界推进不漏并发槽（跨轮界二次 acquire 即时成功，2026-11-03 真机事故钉）",
+        gateAttempts.length === 3 && !gateError.includes("queued behind"),
+        JSON.stringify({ attempts: gateAttempts.length, error: gateError.slice(0, 140) }));
+
+      // 轮内恒遍历未试运行态 key（2026-11-04 他拍板：tried 下推为池的选择条件）：
+      // 4 key 池全 429，四轮各 4 发、每轮内 4 发互不相同（轮起点逐轮推进）——
+      // 轮长不再被共享游标截短（2026-11-03 真机 R2 只试 3 把缺 4R 的形态）。
+      const ringKeys = ["sk-1", "sk-2", "sk-3", "sk-4"];
+      let ringLast;
+      const ringPick = (exclude) => {
+        const n = ringKeys.length;
+        const anchor = ringLast === undefined ? -1 : ringKeys.indexOf(ringLast);
+        for (let step = 1; step <= n; step += 1) {
+          const k = ringKeys[(anchor + step + n) % n];
+          if (exclude.has(k)) continue;
+          ringLast = k;
+          return k;
+        }
+        return undefined;
+      };
+      const ringAttempts = [];
+      const ringAdapter = new SensenovaAdapter({
+        options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1, quotaRotation: true }),
+        resolveApiKey: async () => ringKeys[0],
+        resolveApiKeyForRequest: async () => ringKeys[0],
+        requestSlot: async () => () => {},
+        pickStartKeyForRequest: async ({ excludeStart }) => {
+          const k = ringPick(new Set(excludeStart !== undefined ? [excludeStart] : []));
+          if (k === undefined) throw new Error("ring empty");
+          return k;
+        },
+        rotateApiKey: async (rejectedKey, _rejection, _model, roundExclude) =>
+          ringPick(new Set([...(roundExclude ?? []), rejectedKey])),
+        timeouts: { queueMs: 100 },
+        fetchImpl: (async (_url, init) => {
+          ringAttempts.push(String(init?.headers?.authorization ?? "").replace("Bearer ", ""));
+          return new Response(JSON.stringify({ error: { code: "Throttling.AllocationQuota", message: "Workspace allocated quota exceeded" } }),
+            { status: 429, headers: { "content-type": "application/json" } });
+        }),
+      });
+      let ringError = "";
+      try {
+        for await (const chunk of ringAdapter.stream({
+          model: "deepseek-v4-flash",
+          sessionId: "sess-ring-pin",
+          messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        })) { void chunk; }
+      } catch (error) { ringError = String(error?.message ?? error); }
+      const ringRounds = [];
+      for (let i = 0; i < 4; i += 1) ringRounds.push([...new Set(ringAttempts.slice(i * 4, i * 4 + 4))]);
+      check("轮内恒遍历未试运行态 key（4 轮×4 发互不重复，游标不再截短轮长）",
+        ringAttempts.length === 16 && ringError.includes("429") && ringRounds.every((r) => r.length === 4),
+        JSON.stringify({ attempts: ringAttempts.length, rounds: ringRounds, error: ringError.slice(0, 90) }));
+
+      // D2a（2026-11-04 拍板）：5xx 归 SERVER 档进宿主重试名单——此前 SERVER
+      // 零生产者，5xx 一次失败直接上屏、10 次重试预算一次不用。
+      const d2aAttempts = [];
+      const d2a = new SensenovaAdapter({
+        options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1 }),
+        resolveApiKey: async () => "sk-test",
+        resolveApiKeyForRequest: async () => "sk-test",
+        requestSlot: async () => () => {},
+        timeouts: { queueMs: 100 },
+        fetchImpl: (async () => { d2aAttempts.push(1); return new Response("boom", { status: 500 }); }),
+      });
+      let d2aCode = "";
+      try {
+        for await (const chunk of d2a.stream({
+          model: "deepseek-flash", sessionId: "sess-d2a",
+          messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        })) { void chunk; }
+      } catch (error) { d2aCode = String(error?.code ?? error); }
+      check("D2a：5xx 归 SERVER 档（宿主重试名单内，不再一次上屏）",
+        d2aCode === "SERVER" && d2aAttempts.length === 1,
+        JSON.stringify({ d2aCode, attempts: d2aAttempts.length }));
+
+      // D1 层 1（2026-11-04 拍板修）：404 失败名单读侧兜底——serve-cache 旧目录
+      // 里被 404 标记的模型不再出线（旧实现被播种劫持：fetchedAt=0 双语义让
+      // TTL 内旧目录续命，下线模型 24h 不消失）。
+      const d1 = mk(null);
+      d1.catalog = [
+        { id: "deepseek-flash", name: "deepseek-flash" },
+        { id: "deepseek-v4-pro", name: "deepseek-v4-pro" },
+      ];
+      d1.catalogFetchedAt = Date.now();
+      d1.catalogCredential = "sk-test";
+      d1.catalogApiBase = "https://token.sensenova.cn/v1";
+      d1.failedModels.add("deepseek-v4-pro");
+      const d1List = await d1.listModels("sensenova-suite");
+      check("D1 层 1：404 失败名单的模型在目录出线处被过滤（读侧兜底）",
+        d1List.length === 1 && d1List[0]?.id === "deepseek-flash",
+        JSON.stringify(d1List));
+
+      // D4（2026-11-04 拍板修）：重试封顶单源——ceiling 是 CAP 的别名而非第二份
+      // 字面量，cap 调值时 ceiling 跟随（否则「宿主按指导延迟重试」的承诺静默破裂）。
+      const { PROVIDER_RETRY_AFTER_CAP_MS } = await import("../src/host/rate-classify.ts");
+      check("D4：重试封顶单源（ceiling 即 CAP 别名）",
+        QUOTA_RETRY_AFTER_CEILING_MS === PROVIDER_RETRY_AFTER_CAP_MS,
+        JSON.stringify({ ceiling: QUOTA_RETRY_AFTER_CEILING_MS, cap: PROVIDER_RETRY_AFTER_CAP_MS }));
+
+      // S3（2026-11-04 拍板修）：目录 body 非 JSON（网关 HTML）包成
+      // PROVIDER_PROTOCOL_ERROR LlmError——全文件最后一个裸抛点关门。
+      const s3 = new SensenovaAdapter({
+        options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1 }),
+        resolveApiKey: async () => "sk-test",
+        requestSlot: async () => () => {},
+        timeouts: { queueMs: 100 },
+        fetchImpl: (async () => new Response("<html>502 gateway</html>", { status: 200, headers: { "content-type": "text/html" } })),
+      });
+      let s3Code = "";
+      try { await s3.listModels("sensenova-suite"); } catch (error) { s3Code = String(error?.code ?? error); }
+      check("S3：目录非 JSON 包 LlmError（不再裸抛 SyntaxError）",
+        s3Code === "PROVIDER_PROTOCOL_ERROR", JSON.stringify({ s3Code }));
+
+      // S2a（2026-11-04 拍板修）：抖动等待中的 abort 原样透传——不再映射
+      // TRANSPORT 冒充「传输错误」。确定性触发：R3 末发（第 12 attempt）的 fetch
+      // 里中止信号 → 429 → 轮界 → 抖动 sleep 对预中止信号即时返回 → 抛 reason。
+      const s2aKeys = ["sk-a", "sk-b", "sk-c", "sk-d"];
+      let s2aLast;
+      const s2aPick = (exclude) => {
+        const n = s2aKeys.length;
+        const anchor = s2aLast === undefined ? -1 : s2aKeys.indexOf(s2aLast);
+        for (let step = 1; step <= n; step += 1) {
+          const k = s2aKeys[(anchor + step + n) % n];
+          if (exclude.has(k)) continue;
+          s2aLast = k;
+          return k;
+        }
+        return undefined;
+      };
+      const s2aController = new AbortController();
+      const s2aAttempts = [];
+      const s2a = new SensenovaAdapter({
+        options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1, quotaRotation: true }),
+        resolveApiKey: async () => s2aKeys[0],
+        resolveApiKeyForRequest: async () => s2aKeys[0],
+        requestSlot: async () => () => {},
+        pickStartKeyForRequest: async ({ excludeStart }) => {
+          const k = s2aPick(new Set(excludeStart !== undefined ? [excludeStart] : []));
+          if (k === undefined) throw new Error("ring empty");
+          return k;
+        },
+        rotateApiKey: async (rejectedKey, _rejection, _model, roundExclude) =>
+          s2aPick(new Set([...(roundExclude ?? []), rejectedKey])),
+        timeouts: { queueMs: 100 },
+        fetchImpl: (async (_url, init) => {
+          s2aAttempts.push(String(init?.headers?.authorization ?? "").replace("Bearer ", ""));
+          if (s2aAttempts.length === 12) s2aController.abort(new Error("用户停止"));
+          return new Response(JSON.stringify({ error: { code: "Throttling.AllocationQuota", message: "Workspace allocated quota exceeded" } }),
+            { status: 429, headers: { "content-type": "application/json" } });
+        }),
+      });
+      let s2aError = "";
+      try {
+        for await (const chunk of s2a.stream({
+          model: "deepseek-v4-flash", sessionId: "sess-s2a", signal: s2aController.signal,
+          messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        })) { void chunk; }
+      } catch (error) { s2aError = String(error?.message ?? error); }
+      check("S2a：抖动等待中 abort 透传（上屏取消原因，不再冒充传输错误）",
+        s2aAttempts.length === 12 && s2aError === "用户停止",
+        JSON.stringify({ attempts: s2aAttempts.length, error: s2aError.slice(0, 90) }));
     } catch (error) {
       fail("T3 resolveModel runtime pin", error);
     }

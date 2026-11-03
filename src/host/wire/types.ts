@@ -14,8 +14,9 @@ export interface ModelFacts {
   supportedWires: readonly WireKind[];
   /**
    * 本模型的默认降级链（协议策略层）：面板覆盖缺席时的生效链。全模型统一
-   * re>an>chat（2026-10-31 用户拍板：kimi/glm 的 anthropic 加回、顺序定为
-   * responses 优先；anthropic 线的空流/断尾由运行时降级兜底，不再档案层预防）。
+   * an>re>chat（2026-11-04 用户拍板：responses 线推理档位传入无效——文档称
+   * 兼容 low/medium/high/xhigh，实际后台恒用 high——档位保真优先走 an；an 的
+   * 空流/断尾由运行时降级兜底，不档案层预防。2026-10-31 曾定 re>an>chat）。
    * 能力面（supportedWires）不受影响。链走查仍与 supportedWires 求交：链上
    * 声明了能力不存在的线会被跳过。
    */
@@ -40,8 +41,6 @@ export interface ModelFacts {
   requiresReasoningReplay: boolean;
   /** 禁用 thinking:"disabled" 表达关思考（glm-5.2 传 disabled 直接失败）。 */
   forbidThinkingDisabled: boolean;
-  /** kimi-k3 特例：effort none → thinking:"disabled"（文档自相矛盾，待实测修正）。 */
-  noneMapsToThinkingDisabled: boolean;
   /** 固定 temperature（kimi-k3 = 1，传了也不变）；null = 可调。 */
   fixedTemperature: number | null;
   /** 固定 top_p（kimi-k3 = 0.95）；null = 可调。 */
@@ -57,8 +56,6 @@ export interface ModelFacts {
   imageFormats: readonly string[];
   /** 仅接受 base64 data URL、不支持公网 URL（kimi-k3）。 */
   imageRequiresBase64: boolean;
-  /** Anthropic 协议是否支持图像输入（文档：仅 sensenova-6.8-flash-lite 支持图片块）。 */
-  anthropicSupportsImages: boolean;
   /** Responses max_output_tokens 上限（§3.2 范围表；deepseek-flash 文档未列 = null 待实测）。 */
   responsesMaxOutputTokens: number | null;
   /** Responses text.format.type 支持 json_schema（deepseek-flash/kimi-k3）。 */

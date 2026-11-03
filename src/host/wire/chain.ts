@@ -9,7 +9,8 @@
  * ```
  * 面板覆盖（pool.json modelProtocols[model]，有序子集 ≤3）
  *   ?? wireProtocol 配置（auto 之外的值映射为单线链）
- *   ?? 档案默认链（facts.defaultChain：全模型统一 re>an>chat，2026-10-31）
+ *   ?? 档案默认链（facts.defaultChain：全模型统一 an>re>chat，2026-11-04 倒序；
+ *      2026-10-31 曾定 re>an>chat）
  * ```
  * @module dsh-sensenova-suite/wire/chain
  */

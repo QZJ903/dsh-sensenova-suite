@@ -128,9 +128,6 @@ interface ChatFieldPlan {
   effortCompat: Readonly<Record<string, string>> | undefined;
   /** 已知 effort 值域（静态表或目录词表）；未知模型 undefined（无从判定则原样发送）。 */
   effortDomain: readonly string[] | undefined;
-  /** kimi-k3 特例：effort none → thinking:"disabled" + 不发 reasoning_effort。
-   * 前提假设（design Risks）：文档 §八·1 对 kimi none 自相矛盾，按 thinking 可关落地，待实测修正。 */
-  noneMapsToThinkingDisabled: boolean;
 }
 
 /** 计算模型的 Chat 字段分派计划（add-model-facts 2.2：数据驱动自 wire/facts，
@@ -149,7 +146,6 @@ function chatFieldPlan(model: string, entry: ChatCatalogEntry | undefined): Chat
     blockedSampling: new Set(facts.blockedSampling),
     effortCompat: facts.effortCompat,
     effortDomain: catalogEfforts ?? staticDomain,
-    noneMapsToThinkingDisabled: facts.noneMapsToThinkingDisabled,
     // 注：glm-5.2 不发 thinking——本适配器从不构造 thinking 字段，glm 的 none 经
     // reasoning_effort:"none" 表达（glm thinking 不支持 disabled，:2143）。
   };
@@ -182,15 +178,16 @@ export function buildChatBody(
   };
 
   // reasoning_effort 出站策略（design D5）：档位拼写先归一（off/minimal→none，
-  // wire/effort.ts——对话界面发的是面板 off，kimi 特判与映射表只认 none，2026-10-27）；
-  // 值域内原样；命中兼容映射改写；均不在（含 kimi none 特例）不发送未知值。
+  // wire/effort.ts——对话界面发的是面板 off，映射表只认 none，2026-10-27）；
+  // 值域内原样；命中兼容映射改写；均不在不发送未知值。chat 线从不构造 thinking
+  // 字段——2026-10-27 真机：kimi 的 thinking:'disabled'（string）被平台 400
+  // invalid arguments code 3 拒，关思考唯一合法走法 reasoning_effort:'none'；
+  // 曾为文档矛盾另一边留的 noneMapsToThinkingDisabled 特例分支（gate 全档案
+  // false、从未触发）已于 2026-11-04 整根拆除。
   let reasoningEffortWire: string | undefined;
-  let thinkingDisabled = false;
   if (options.reasoningEffort !== undefined) {
     const effort = canonicalThinkingEffort(options.reasoningEffort as string);
-    if (plan.noneMapsToThinkingDisabled && effort === 'none') {
-      thinkingDisabled = true; // kimi-k3：不发 reasoning_effort，改发 thinking:"disabled"（待实测修正）
-    } else if (effort !== undefined) {
+    if (effort !== undefined) {
       const mapped = plan.effortCompat?.[effort];
       const inDomain = plan.effortDomain?.includes(effort) ?? true;
       reasoningEffortWire = mapped !== undefined
@@ -213,6 +210,5 @@ export function buildChatBody(
     ...(tools.length > 0 ? { tools } : {}),
     ...(plan.streamOptionsUsage ? { stream_options: { include_usage: true } } : {}),
     ...(reasoningEffortWire !== undefined ? { reasoning_effort: reasoningEffortWire } : {}),
-    ...(thinkingDisabled ? { thinking: 'disabled' } : {}),
   };
 }

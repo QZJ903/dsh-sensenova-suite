@@ -37,7 +37,7 @@ import type {
 } from '@deepseek-ai/dsh-llm';
 import { parseRetryAfterMs, classify429Body, classify429Full, bucketCountsStrike, probeFloorFor, summarize429Body, PROVIDER_RETRY_AFTER_CAP_MS } from './rate-classify.ts';
 import { shouldRotateUnclassified } from './key-health.ts';
-import { retryableCodes, ANTHROPIC_TRUNCATED_CODE, QUOTA_CODES } from './llm-retry.ts';
+import { retryableCodes, ANTHROPIC_TRUNCATED_CODE, QUOTA_CODES, LLM_CODES } from './llm-retry.ts';
 import { MODELS_TIMEOUT_MS, CATALOG_FAILURE_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
 import { KNOWN_UNROUTABLE_MODELS, CONTEXT_WINDOW_FIELDS, MAX_OUTPUT_FIELDS, maxTokensForId, contextWindowForId } from './llm-models.ts';
@@ -56,7 +56,7 @@ import { maskKey } from './util.ts';
  * （normal 模式）在 providerRetryAfterMs 超过单次延迟上限时会直接放弃重试，封顶
  * 对齐后保证任何采用值都会被宿主按指导延迟重试；不影响统一退避梯（3–30s）
  * 各档的正常取值。 */
-const QUOTA_RETRY_AFTER_CEILING_MS = 60_000;
+export const QUOTA_RETRY_AFTER_CEILING_MS = PROVIDER_RETRY_AFTER_CAP_MS;
 /** 轮间抖动等待窗口（毫秒）：3 轮全 429 之后、第 4 轮之前等一次，每请求独立算。
  * 目的是避免多个并发请求同时结束等待、造成第二波请求洪峰（2026-11-02 他拍板）。 */
 const JITTER_WAIT_MIN_MS = 5_000;
@@ -89,7 +89,7 @@ export const CONNECT_TIMEOUT_MS = 45_000;
 /** SSE 流空闲看门狗（毫秒）：距上一事件 ≥ 该值无任何 chunk/事件即按停摆结束。2026-09-04 实测：思考期渠道有空事件/心跳自然重置计时（design D4/D6）。 */
 export const STREAM_IDLE_TIMEOUT_MS = 60_000;
 /** 明确的模型不可用错误码（不在默认可重试集合内，故不触发 provider 重试）。 */
-const MODEL_NOT_FOUND_CODE = 'MODEL_NOT_FOUND';
+const MODEL_NOT_FOUND_CODE = LLM_CODES.modelNotFound;
 /** 模型 id → 标准显示名的显式品牌映射。 */
 const DISPLAY_NAME_OVERRIDES: ReadonlyMap<string, string> = new Map([
   ['sensenova-6.7-flash-lite', 'Sensenova 6.7 Flash Lite'],
@@ -116,8 +116,8 @@ export interface SensenovaConnection {
   concurrency?: number;
   /** 配额类 429 粘性换 key 开关（默认关；开启后仅配额类 429 触发切换，design D5）。 */
   quotaRotation?: boolean;
-  /** wire 协议模式（make-responses-default-wire-protocol §5.1；缺省 auto：优先 Responses，
-   * 语义会丢失时按决策表降级 Chat）。 */
+  /** wire 协议模式（make-responses-default-wire-protocol §5.1；缺省 auto：优先 Anthropic
+   * （2026-11-04 标准链倒序，re 的推理档位传入无效），语义会丢失时按决策表降级 Chat）。 */
   wireProtocol?: WireProtocol;
   /** Responses 推理摘要（reasoning.summary；缺省 auto）。 */
   reasoningSummary?: ReasoningSummary;
@@ -145,11 +145,14 @@ export interface SensenovaAdapterDeps {
    * 第三参 model：本次请求的模型 id——拒绝类型不带组信息，池格的组由实现侧
    * groupOf(model) 现算（2026-10-31 起，写读同组；此前硬编码 general 是错位源）。
    * 返回 undefined 表示无更多 key（含全池格子标记的快速失败）。
+   * roundExclude：本请求已试 key 全集（tried），池侧选择条件——轮内恒遍历未试
+   * 运行态 key、不借阻塞（2026-11-04 他拍板；池空保底借用仍走 pickStart）。
    */
   rotateApiKey: (
     rejectedKey: string,
     rejection: 'invalid-credential' | 'quota-exhausted' | 'pool-exhausted' | 'rate-unclassified' | 'rate-soft',
     model: string | undefined,
+    roundExclude?: ReadonlySet<string>,
   ) => Promise<string | undefined>;
   /**
    * 该模型所属积分组是否「每把 key（含阻塞态）都被池格标记」——4 轮轮询里
@@ -444,7 +447,7 @@ function withUserThinking(
  * 若掺了用户配置，改配置不会失效缓存（2026-10-27「思考档位要重启才生效」根因）。 */
 function parseCatalog(value: unknown, failedModels: ReadonlySet<string>) {
   if (!isRecord(value) || !Array.isArray(value.data)) {
-    throw new LlmError('llm-sensenova: unexpected models response shape', 'PROVIDER_PROTOCOL_ERROR');
+    throw new LlmError('llm-sensenova: unexpected models response shape', LLM_CODES.providerProtocolError);
   }
   const out: CatalogEntry[] = [];
   for (const raw of value.data) {
@@ -822,7 +825,7 @@ async function* parseOpenAiSse(
       const trailing = [...closeText(state), ...closeReasoning(state), ...closeToolCalls(state)];
       for (const chunk of trailing) yield chunk;
       if (!state.sawContent) {
-        throw new LlmError('llm-sensenova: SenseNova returned an empty response；SenseNova 返回了空响应，重试通常可恢复', 'EMPTY_RESPONSE');
+        throw new LlmError('llm-sensenova: SenseNova returned an empty response；SenseNova 返回了空响应，重试通常可恢复', LLM_CODES.emptyResponse);
       }
       if (state.pendingUsage !== undefined) yield { type: 'usage', usage: state.pendingUsage };
       yield { type: 'finish', reason: { kind: 'stop' } };
@@ -836,7 +839,7 @@ async function* parseOpenAiSse(
       traceLog(`[dsh-sensenova-suite] chat-completions 流停摆/超时 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B → TIMEOUT`);
       throw new LlmError(
         `llm-sensenova: SenseNova stream stalled or timed out；SenseNova 流式响应停摆或超时（空闲/首字节超时，已释放并发额度），交宿主重试层处理`,
-        'TIMEOUT',
+        LLM_CODES.timeout,
         { cause: error },
       );
     }
@@ -847,7 +850,7 @@ async function* parseOpenAiSse(
       throw error;
     }
     traceLog(`[dsh-sensenova-suite] chat-completions 流中途失败 sid=${sessionId ?? "-"} model=${model ?? "?"} 已收 ${bytes}B: ${errorChain(error)} → TRANSPORT`);
-    throw new LlmError(`llm-sensenova: SenseNova stream failed: ${errorChain(error)}；SenseNova 流式响应中途失败`, 'TRANSPORT', { cause: error });
+    throw new LlmError(`llm-sensenova: SenseNova stream failed: ${errorChain(error)}；SenseNova 流式响应中途失败`, LLM_CODES.transport, { cause: error });
   } finally {
     disarmWatchdog();
     await reader.cancel().catch(() => void 0);
@@ -905,7 +908,7 @@ function httpError(status: number, errText: string, retryAfterMs: number | undef
   if (status === 401) {
     return new LlmError(
       'llm-sensenova: SenseNova API error 401 — the API key is missing or invalid；SenseNova API 返回 401：密钥缺失或无效',
-      'INVALID_CREDENTIAL',
+      LLM_CODES.invalidCredential,
       { status: 401 },
     );
   }
@@ -956,7 +959,7 @@ function httpError(status: number, errText: string, retryAfterMs: number | undef
         ? retryAfterMs
         : undefined;
     }
-    return new LlmError('llm-sensenova: SenseNova API error 429 — rate limited；SenseNova API 返回 429：请求被限流', 'RATE_LIMIT', {
+    return new LlmError('llm-sensenova: SenseNova API error 429 — rate limited；SenseNova API 返回 429：请求被限流', LLM_CODES.rateLimit, {
       status: 429,
       ...(providerRetryAfterMs !== undefined ? { providerRetryAfterMs } : {}),
     });
@@ -964,18 +967,25 @@ function httpError(status: number, errText: string, retryAfterMs: number | undef
   if (anthropicType === ANTHROPIC_OVERLOADED) {
     return new LlmError(
       `llm-sensenova: SenseNova API error 529 overloaded；SenseNova 返回 overloaded_error：服务端过载，重试通常可恢复`,
-      'PROVIDER_HTTP_ERROR',
+      // D2a（2026-11-04 拍板）：过载是瞬态，归 SERVER 档进宿主重试名单——
+      // 与 429 同哲学，这句「重试通常可恢复」从此是真话。
+      QUOTA_CODES.server,
       { status },
     );
   }
   if (anthropicType !== undefined && ANTHROPIC_AUTH.has(anthropicType)) {
     return new LlmError(
       'llm-sensenova: SenseNova API error 401 — the API key is missing or invalid；SenseNova API 返回 401：密钥缺失或无效',
-      'INVALID_CREDENTIAL',
+      LLM_CODES.invalidCredential,
       { status },
     );
   }
-  return new LlmError(`llm-sensenova: SenseNova API error ${status}: ${errText.slice(0, 500)}`, 'PROVIDER_HTTP_ERROR', { status });
+  // D2a（2026-11-04 拍板）：5xx 与过载同为瞬态，归 SERVER 档进宿主重试名单；
+  // 4xx（400/401/402/403/404）维持 PROVIDER_HTTP_ERROR 不重试。
+  if (status >= 500) {
+    return new LlmError(`llm-sensenova: SenseNova API error ${status}: ${errText.slice(0, 500)}`, QUOTA_CODES.server, { status });
+  }
+  return new LlmError(`llm-sensenova: SenseNova API error ${status}: ${errText.slice(0, 500)}`, LLM_CODES.providerHttpError, { status });
 }
 
 /**
@@ -1076,6 +1086,10 @@ export class SensenovaAdapter extends LlmAdapter {
     const filter = this.deps.catalogFilter?.();
     const allowed = (set: Set<string>) => (m: CatalogEntry) => set.size === 0 || set.has(m.id);
     const keep = (m: CatalogEntry) => {
+      // D1 层 1（2026-11-04 拍板修）：404 失败名单读侧兜底——serve-cache 的旧
+      // 目录与 filter 缺席两路统一生效，「下线模型从选择器稳定消失」不再依赖
+      // 重拉成功（旧实现被播种劫持：fetchedAt=0 双语义让 TTL 内旧目录续命）。
+      if (this.failedModels.has(m.id)) return false;
       if (filter === undefined) return true;
       return allowed(new Set(filter.enabledIds))(m) && !filter.unavailableIds.includes(m.id);
     };
@@ -1187,12 +1201,24 @@ export class SensenovaAdapter extends LlmAdapter {
       signal: AbortSignal.timeout(MODELS_TIMEOUT_MS),
     });
     if (response.status === 401) {
-      throw new LlmError('llm-sensenova: SenseNova API rejected the API key (401)', 'INVALID_CREDENTIAL', { status: 401 });
+      throw new LlmError('llm-sensenova: SenseNova API rejected the API key (401)', LLM_CODES.invalidCredential, { status: 401 });
     }
     if (!response.ok) {
-      throw new LlmError(`llm-sensenova: models endpoint returned HTTP ${response.status}`, 'PROVIDER_HTTP_ERROR', { status: response.status });
+      throw new LlmError(`llm-sensenova: models endpoint returned HTTP ${response.status}`, LLM_CODES.providerHttpError, { status: response.status });
     }
-    const parsed: unknown = await response.json();
+    // S3（2026-11-04 拍板修）：目录 body 非 JSON（代理错误页/网关 HTML）此前裸抛
+    // SyntaxError——全文件唯一不包 LlmError 的错误路径。包成协议码让宿主按
+    // 已知形态接住（PROVIDER_PROTOCOL_ERROR 不在重试名单，快速失败可诊断）。
+    let parsed: unknown;
+    try {
+      parsed = await response.json();
+    } catch (error) {
+      throw new LlmError(
+        `llm-sensenova: models endpoint returned non-JSON body（代理错误页/网关 HTML？）；SenseNova 目录响应不是合法 JSON`,
+        LLM_CODES.providerProtocolError,
+        { cause: error },
+      );
+    }
     // 失败缓存只对同一凭据和 API 地址成立；换 key 或切换端点后，旧 404 不应继续隐藏新目录。
     if (invalidateFailedModels) this.failedModels.clear();
     // 以新快照原子替换缓存，避免 listModels 新目录与 resolveModel 旧能力不一致。
@@ -1386,9 +1412,12 @@ export class SensenovaAdapter extends LlmAdapter {
           release = await this.gate.acquire(apiKey, limit, options.signal, queueMs);
         } catch (error) {
           if (!isTimeoutReason(error)) throw error;
+          // 排队超时此前全程静默（2026-11-03 真机事故：宿主 10 次重试循环全部
+          // 停在这里，插件日志零痕迹——本次事故的排查盲区）——每次超时一行。
+          traceLog(`[dsh-sensenova-suite] 并发闸排队超时 model=${options.model} key=${maskKey(apiKey)} 等=${Math.round((queueMs ?? DEFAULT_QUEUE_TIMEOUT_MS) / 1000)}s——交宿主重试层退避后重试`);
           throw new LlmError(
             `llm-sensenova: request queued behind the per-key concurrency limit for over ${queueMs ?? DEFAULT_QUEUE_TIMEOUT_MS}ms；SenseNova 请求排队超时（未占用并发额度），交宿主重试层退避后重试`,
-            'TIMEOUT',
+            LLM_CODES.timeout,
             { cause: error },
           );
         }
@@ -1431,11 +1460,11 @@ export class SensenovaAdapter extends LlmAdapter {
           if (isTimeoutReason(error)) {
             throw new LlmError(
               `llm-sensenova: request to ${connection.apiBase} timed out after ${connectMs}ms；SenseNova 请求建连或首包超时（已释放并发额度），交宿主重试层处理`,
-              'TIMEOUT',
+              LLM_CODES.timeout,
               { cause: error },
             );
           }
-          throw new LlmError(`llm-sensenova: request to ${connection.apiBase} failed: ${errorChain(error)}；连接 SenseNova API 失败，通常是网络或代理问题`, 'TRANSPORT', { cause: error });
+          throw new LlmError(`llm-sensenova: request to ${connection.apiBase} failed: ${errorChain(error)}；连接 SenseNova API 失败，通常是网络或代理问题`, LLM_CODES.transport, { cause: error });
         }
         if (attempt.ok) {
           response = attempt;
@@ -1557,6 +1586,7 @@ export class SensenovaAdapter extends LlmAdapter {
               // 仍是按桶的正判据，不随退避策略变化。
               : pool429 ? 'pool-exhausted' : bucketCountsStrike(full.bucket) ? 'quota-exhausted' : 'rate-soft',
             options.model,
+            tried,
           );
           if (next !== undefined && !tried.has(next)) {
             // 预流轮换：先释放旧 key 额度，下一轮为新 key 重新获取。
@@ -1592,7 +1622,7 @@ export class SensenovaAdapter extends LlmAdapter {
         if (shouldRotateUnclassified(attempt.status, quota429 || pool429)
           && options.signal?.aborted !== true
           && (attempt.status === 429 || !unclassifiedFallbackUsed)) {
-          const next = await this.deps.rotateApiKey(apiKey, 'rate-unclassified', options.model);
+          const next = await this.deps.rotateApiKey(apiKey, 'rate-unclassified', options.model, tried);
           if (next !== undefined && !tried.has(next)) {
             release();
             release = undefined;
@@ -1624,10 +1654,20 @@ export class SensenovaAdapter extends LlmAdapter {
             release?.();
             release = undefined;
             await abortableSleep(waitMs, options.signal);
-            if (options.signal?.aborted === true) throw new LlmError('llm-sensenova: aborted during retry wait', 'TRANSPORT');
+            // S2a（2026-11-04 拍板）：用户按停止 = 原样透传 abort（与 fetch catch
+            // 的 :1418 姿态一致）——不再映射 TRANSPORT 冒充「传输错误」。宿主
+            // 重试层零危害不变（backoff 首行查 abort，aborted 零安排）。
+            if (options.signal?.aborted === true) throw options.signal.reason;
           }
           round += 1;
           tried.clear();
+          // 轮界换 key 与预流轮换同一纪律：先释放旧 key 额度再取新起点。漏放 =
+          // release 变量在循环顶被新 acquire 覆盖，上一轮最后一把 key 的槽位
+          // 永久泄漏——limit=1 下该 key 此后每次 acquire 都排队到超时（2026-11-03
+          // 真机实录：第 4 发泄漏、第 7 发撞死、宿主 10 次重试全数静默超时 ≈15min）。
+          // 第 3→4 轮的抖动分支已先放，此处 no-op 安全。
+          release?.();
+          release = undefined;
           // 新一轮起点重新解析（商汤组=亲和 key 恒第一；通用组=游标推进）。
           // 起点轮换：把上一轮起点排除（裸轮转组从它的下一位环回）。
           const nextStart = await this.pickRoundStart(options, roundStartKey);
@@ -1662,10 +1702,10 @@ export class SensenovaAdapter extends LlmAdapter {
 
       if (response === undefined) {
         // 不可达：循环要么 break（成功）要么 throw；仅用于满足明确赋值分析。
-        throw new LlmError('llm-sensenova: SenseNova API returned no response', 'PROVIDER_PROTOCOL_ERROR');
+        throw new LlmError('llm-sensenova: SenseNova API returned no response', LLM_CODES.providerProtocolError);
       }
       if (response.body === null) {
-        throw new LlmError('llm-sensenova: SenseNova API returned no response body', 'PROVIDER_PROTOCOL_ERROR');
+        throw new LlmError('llm-sensenova: SenseNova API returned no response body', LLM_CODES.providerProtocolError);
       }
       if (wire === 'anthropic') {
         // 流断尾（无 message_stop）命中即内存级换线降级（2026-10-31 他拍板）：
