@@ -1,5 +1,17 @@
 # 更新日志（Changelog）
 
+## 0.1.53（2026-11-05）
+
+- **U10 面板骨架与共享件审计处置全清（12 文件 1941 行全读；U11 先审后的补审，消费面机器核对）**：
+  - **D1 styles.ts 15 个死 style token 整删**：details 族+grant+models+modelTag（PoolCard 详情折叠块 2026-10-27 删除后的遗骸）+ stat* 六件（浣熊余额卡族）+ pillNewTag/pillPopoverParts/pillPopoverPartsLabel（胶囊浣熊分支与「1 新模型」chip 残件）——全仓零消费（裸名/`S.`/`S[` 三形态三面查），随批改真话三处活 token 注释（modelPanel 论证子句 / pillPopoverNote 语义 / pillTierExhaustedText 交叉引用）。
+  - **D2 三处「route 不稳定会重启轮询」注释改真话**：use-remote-read 头注+@param、use-snapshot-polling 路由 doc——runRef 机制早已吸收闭包身份变化（effect deps 只有 [effective]），稳定只是免 churn 的卫生，声称的风险不存在。
+  - **D3 cadenceMs 死暴露面删**：RemoteReadState.cadenceMs 全链零终端消费（面板/胶囊解构均弃、面板引用的是 body 的 cacheSeconds）——字段+JSDoc+wrapper 转手全拆，内部 cadence 状态机（interval 驱动）原样保留；use-snapshot-polling「exactly the five values」注释删后成真。
+  - **顺带① client/wire.ts 死再导出删**：TrendRowData/VisionModelData 零导入（host 侧直接 import shared/wire）。
+  - **顺带② raccoon 失实注释改真话**：use-remote-read（「two routes/Raccoon balance reader」→ 胶囊与面板同 core 同路由、RemoteRead 例子换快照真实形状、loadedOnce (…)/(—) 死显示形状 → composer.quotaUnknown）、use-snapshot-polling 三处、format.ts:79 RaccoonTab → 真实消费面；史述保留族（use-polling-interval 头注等）一字未动。
+  - **S1 销号（POST 无超时）**：复核实证宿主侧慢路径全带 AbortSignal.timeout（登录链 20s/跳、console 15s、models 探测）→ POST handler 恒自结；webserver 零响应侧超时但剩余场景=事件循环僵死面板已整体不可用；客户端固定超时反掐合法慢登录（多跳×20s 无客户端上界）——维持现状。
+  - **测试：render 174→196（+22 钉，均变异验红）**：新节 I 15 钉 = useRemoteRead 生命周期首次有行为级验证（有状态微 React：每 hook 槽持久 cell + setState 同步写 + effect deps 感知重跑；fetch 桩）——成功落地+时戳+stated cadence 采纳（interval 重建 5s+补发一读）/ 败读保旧值+时戳冻结 / 代际守卫（新 load abort 旧请求、迟到答全弃）/ unmount 拆除 / 抛错 fetch（error+保值+退避梯）/ 非 2xx 透传+失败首读 loadedOnce 仍置位；新节 J 7 钉 = statedCadenceMs 门（整数透传/亚秒上取整/小数 floor/字符串/NaN/零负/缺失）——宿主口径到 setInterval 的唯一上游闸。变异验红：败读清 data+NaN 门两处突变 → 2/196 红正是新钉 → 还原全绿。
+  - typecheck 0 错（3 配置）/ panel 78 / duplication 14 全绿；真机生效 = 完整重启 DSH。
+
 ## 0.1.52（2026-11-04）
 
 - **U12 入口装配与生命周期审计处置全清（纯装配单元，台账代码侧零挂账）**：

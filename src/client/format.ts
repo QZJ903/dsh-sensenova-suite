@@ -76,9 +76,11 @@ export function format(template: string, vars?: Record<string, unknown> | null):
 /**
  * A caught value as the one error string the panel shows.
  *
- * Every mutation surface (`ModelPicker`, `ProviderControls`, `RaccoonTab`)
- * ends a `catch` with the same `why instanceof Error ? why.message : String(why)`
- * template, and there were eight copies of it. That is the same drift the HTTP
+ * Every surface that renders a caught value (`ModelPicker`, `ProviderControls`,
+ * and the polling core's thrown-fetch path) funnels its `catch` through this
+ * one helper — eight copies of the
+ * `why instanceof Error ? why.message : String(why)` template used to drift.
+ * That is the same drift the HTTP
  * seam in `http.ts` was extracted to stop: a copy that handles a thrown string
  * but not a rejected `{code}` object prints `[object Object]` in the panel's
  * one error line, and no test catches it because each copy is trivial. One

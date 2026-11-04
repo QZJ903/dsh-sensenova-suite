@@ -56,7 +56,7 @@ export function PanelPage({ onClose, tt, localeSubscribe }: {
   localeSubscribe?: unknown;
 }): unknown {
   // Polling state lives in the hook: `data`/`error`/`loadedOnce`/`updatedAt`/
-  // `cadenceMs`/`load` are returned there (see ./use-snapshot-polling.ts).
+  // `load` are returned there (see ./use-snapshot-polling.ts).
   const { data, error, loadedOnce, updatedAt, load } = useSnapshotPolling();
   const [, setLocaleRevision] = useState(0);
   // The content sections start expanded — the panel opens showing

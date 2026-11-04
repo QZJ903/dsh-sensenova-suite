@@ -1194,6 +1194,292 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
   }
 }
 
+// === I. the polling CORE: generation guard, kept value, stated cadence ======
+// `use-remote-read.ts` is the lifecycle the loop serves, and none of it was
+// executed anywhere: panel.test scans its SOURCE, the loop group above drives
+// only the stateless interval. The core is five pieces of state plus two refs,
+// so the loop group's stateless stand-in cannot drive it — this group mounts
+// it with cells that PERSIST across renders, `setState` writing synchronously,
+// and effects that re-run with real deps diffing (cleanup first, React's
+// order). Re-renders are explicit `render()` calls; nothing schedules them.
+{
+  const runtime = await import("../src/client/runtime.ts");
+  const { useRemoteRead } = await import("../src/client/use-remote-read.ts");
+  const { ERROR_BACKOFF_MS } = await import("../src/client/use-polling-interval.ts");
+
+  // A stateful micro React: one persistent cell per hook slot (the core's hook
+  // order is fixed, so the index is the identity), refs included.
+  const makeStatefulReact = () => {
+    const cells = [];
+    const installed = [];
+    const queued = [];
+    let ptr = 0;
+    return {
+      react: {
+        createElement: h,
+        useState: (initial) => {
+          const i = ptr++;
+          if (cells[i] === undefined) cells[i] = { value: typeof initial === "function" ? initial() : initial };
+          const set = (value) => {
+            cells[i].value = typeof value === "function" ? value(cells[i].value) : value;
+          };
+          return [cells[i].value, set];
+        },
+        useEffect: (effect, deps) => { queued.push({ effect, deps }); },
+        useCallback: (callback) => callback,
+        useMemo: (factory) => factory(),
+        useRef: (initial) => {
+          const i = ptr++;
+          if (cells[i] === undefined) cells[i] = { value: { current: initial } };
+          return cells[i].value;
+        }
+      },
+      render: () => {
+        ptr = 0;
+        const effects = queued.splice(0);
+        const nextInstalled = [];
+        for (let i = 0; i < effects.length; i++) {
+          const { effect, deps } = effects[i];
+          const prev = installed[i];
+          const changed = deps === undefined || prev === undefined || prev.deps === undefined
+            || prev.deps.length !== deps.length
+            || deps.some((d, j) => !Object.is(prev.deps[j], d));
+          if (changed) {
+            if (prev && typeof prev.cleanup === "function") prev.cleanup();
+            nextInstalled.push({ deps, cleanup: effect() });
+          } else {
+            nextInstalled.push(prev);
+          }
+        }
+        installed.length = 0;
+        installed.push(...nextInstalled);
+      },
+      unmount: () => {
+        for (const entry of installed) if (entry && typeof entry.cleanup === "function") entry.cleanup();
+        installed.length = 0;
+      },
+      reset: () => { cells.length = 0; installed.length = 0; queued.length = 0; }
+    };
+  };
+
+  // The route is the module-scope shape the two real readers use; `parse` and
+  // `fetch` are swapped per scenario through these two slots.
+  const route = { path: "/api/dsh-sensenova-suite/snapshot", parse: (body, status) => parseImpl(body, status) };
+  let parseImpl = null;
+  let fetchImpl = null;
+  const fetchCalls = [];
+  const fakeFetch = (path, init) => { fetchCalls.push({ path, init }); return fetchImpl(path, init); };
+  // One setImmediate drains every pending microtask; three covers the longest
+  // await chain inside `load` (fetch → response.json() → state writes).
+  const flush = async () => {
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
+  };
+
+  const realFetch = globalThis.fetch;
+  const realDocument2 = globalThis.document;
+  const realSetInterval2 = globalThis.setInterval;
+  const realClearInterval2 = globalThis.clearInterval;
+  let scheduled = null;
+  globalThis.document = {
+    visibilityState: "visible",
+    addEventListener() {},
+    removeEventListener() {}
+  };
+  globalThis.setInterval = (fn, ms) => { scheduled = { fn, ms }; return { fake: true }; };
+  globalThis.clearInterval = () => { scheduled = null; };
+  globalThis.fetch = fakeFetch;
+
+  try {
+    // 1. happy path: the value lands, the clock is stamped, the stated cadence
+    //    is adopted (the interval is rebuilt at 5 s and fires one fresh read).
+    {
+      const io = makeStatefulReact();
+      runtime.provideClientReact(io.react);
+      io.reset();
+      fetchCalls.length = 0;
+      parseImpl = (body) => ({ value: body.v, failure: null, cadenceSeconds: body.pollSeconds });
+      fetchImpl = async () => ({ ok: true, status: 200, json: async () => ({ v: "one", pollSeconds: 5 }) });
+      let api = null;
+      const renderReader = () => { api = useRemoteRead(route, 30_000); io.render(); };
+      renderReader();
+      await flush();
+      renderReader();
+      check("a successful read lands the value and stamps the clock",
+        api.data === "one" && api.error === null && api.loadedOnce === true && api.updatedAt > 0,
+        `data=${String(api.data)} updatedAt=${api.updatedAt}`);
+      check("a stated cadence is adopted: the interval rebuilds at 5 s",
+        scheduled?.ms === 5_000, `interval=${scheduled?.ms}`);
+      check("a cadence rebuild fires one fresh read",
+        fetchCalls.length === 2, `calls=${fetchCalls.length}`);
+      io.unmount();
+    }
+
+    // 2. a failed read keeps the PREVIOUS reading and never moves the clock —
+    //    the guarantee the pill's "stale data" mark and the panel's setup-form
+    //    suppression both stand on.
+    {
+      const io = makeStatefulReact();
+      runtime.provideClientReact(io.react);
+      io.reset();
+      parseImpl = (body) => (body !== null && body.v !== undefined
+        ? { value: body.v, failure: null }
+        : { value: null, failure: "console unreadable" });
+      let phase = 0;
+      fetchImpl = async () => ({ ok: true, status: 200, json: async () => (phase === 0 ? { v: "kept" } : {}) });
+      let api = null;
+      const renderReader = () => { api = useRemoteRead(route, 30_000); io.render(); };
+      renderReader();
+      await flush();
+      renderReader();
+      const stampedAt = api.updatedAt;
+      check("the first successful read is on screen",
+        api.data === "kept" && api.error === null && api.updatedAt > 0,
+        `data=${String(api.data)} updatedAt=${api.updatedAt}`);
+      phase = 1;
+      await api.load();
+      renderReader();
+      check("a failed read keeps the previous reading",
+        api.data === "kept" && api.error === "console unreadable" && api.loadedOnce === true,
+        `data=${String(api.data)} error=${String(api.error)}`);
+      check("a failed read does not move the freshness stamp",
+        api.updatedAt === stampedAt, `${api.updatedAt} vs ${stampedAt}`);
+      io.unmount();
+    }
+
+    // 3. supersession: only the newest load may write, and starting it aborts
+    //    the request it supersedes; a late answer from the old generation is
+    //    skipped whole (no value write, no error write).
+    {
+      const io = makeStatefulReact();
+      runtime.provideClientReact(io.react);
+      io.reset();
+      fetchCalls.length = 0;
+      parseImpl = (body) => ({ value: body?.v ?? null, failure: null });
+      const pendings = [];
+      fetchImpl = () => new Promise((resolve, reject) => { pendings.push({ resolve, reject }); });
+      let api = null;
+      const renderReader = () => { api = useRemoteRead(route, 30_000); io.render(); };
+      renderReader();
+      const refresh = api.load;
+      const second = refresh();
+      check("a newer load aborts the request it supersedes",
+        fetchCalls[0]?.init?.signal?.aborted === true, String(fetchCalls[0]?.init?.signal?.aborted));
+      pendings[1].resolve({ ok: true, status: 200, json: async () => ({ v: "newest" }) });
+      await second;
+      renderReader();
+      check("the newest read is the one on screen",
+        api.data === "newest" && api.error === null, `data=${String(api.data)}`);
+      pendings[0].resolve({ ok: true, status: 200, json: async () => ({ v: "late" }) });
+      await flush();
+      renderReader();
+      check("a late superseded answer cannot clobber the newer reading",
+        api.data === "newest" && api.error === null, `data=${String(api.data)}`);
+      io.unmount();
+    }
+
+    // 4. unmount ONLY (not a cadence rebuild) supersedes an in-flight poll:
+    //    the generation is bumped and the connection is released.
+    {
+      const io = makeStatefulReact();
+      runtime.provideClientReact(io.react);
+      io.reset();
+      fetchCalls.length = 0;
+      fetchImpl = () => new Promise(() => {});
+      let api = null;
+      const renderReader = () => { api = useRemoteRead(route, 30_000); io.render(); };
+      renderReader();
+      const inFlightSignal = fetchCalls[0]?.init?.signal;
+      io.unmount();
+      check("unmount aborts the in-flight poll",
+        inFlightSignal?.aborted === true, String(inFlightSignal?.aborted));
+      check("unmount stops the loop", scheduled === null);
+    }
+
+    // 5. a thrown fetch becomes the error line, keeps the value, and flips the
+    //    loop into the back-off cadence.
+    {
+      const io = makeStatefulReact();
+      runtime.provideClientReact(io.react);
+      io.reset();
+      parseImpl = (body) => ({ value: body?.v ?? null, failure: null });
+      let fail = false;
+      fetchImpl = async () => {
+        if (fail) throw new Error("net down");
+        return { ok: true, status: 200, json: async () => ({ v: "pre" }) };
+      };
+      let api = null;
+      const renderReader = () => { api = useRemoteRead(route, 30_000); io.render(); };
+      renderReader();
+      await flush();
+      renderReader();
+      fail = true;
+      await api.load();
+      renderReader();
+      check("a thrown fetch sets the error and keeps the previous value",
+        api.data === "pre" && typeof api.error === "string" && api.error.includes("net down"),
+        `data=${String(api.data)} error=${String(api.error)}`);
+      check("the failure flips the loop into the back-off cadence",
+        scheduled?.ms === ERROR_BACKOFF_MS, `interval=${scheduled?.ms}`);
+      io.unmount();
+    }
+
+    // 6. a non-2xx carries no body but IS handed to the route's parse with its
+    //    status (401 keeps the sign-in form on screen); the attempt still
+    //    concludes — loadedOnce lands even on a failed FIRST read.
+    {
+      const io = makeStatefulReact();
+      runtime.provideClientReact(io.react);
+      io.reset();
+      let seenStatus = null;
+      parseImpl = (body, status) => { seenStatus = status; return { value: null, failure: "unauthorized" }; };
+      fetchImpl = async () => ({ ok: false, status: 401, json: async () => ({}) });
+      let api = null;
+      const renderReader = () => { api = useRemoteRead(route, 30_000); io.render(); };
+      renderReader();
+      await flush();
+      renderReader();
+      check("a non-2xx is handed to the route's parse with its status",
+        seenStatus === 401 && api.error === "unauthorized",
+        `status=${String(seenStatus)} error=${String(api.error)}`);
+      check("a failed FIRST read still concludes (loadedOnce lands)",
+        api.loadedOnce === true && api.data === null,
+        `loadedOnce=${String(api.loadedOnce)} data=${String(api.data)}`);
+      io.unmount();
+    }
+  } finally {
+    runtime.provideClientReact(reactStandin);
+    globalThis.fetch = realFetch;
+    if (realDocument2 === undefined) delete globalThis.document;
+    else globalThis.document = realDocument2;
+    globalThis.setInterval = realSetInterval2;
+    globalThis.clearInterval = realClearInterval2;
+  }
+}
+
+// === J. statedCadenceMs: the gate between a Host-stated rate and the timer ==
+// The loop clamps at 1 ms, but the honest gate sits upstream: whatever reaches
+// `usePollingInterval` must already be a finite positive whole-second rate in
+// ms. The helper is the ONE thing standing between a hostile snapshot field
+// and a setInterval busy loop, so its rejections are pinned here.
+{
+  const { statedCadenceMs } = await import("../src/client/format.ts");
+  check("an integer stated rate passes through as milliseconds",
+    statedCadenceMs(2, 30_000) === 2_000, String(statedCadenceMs(2, 30_000)));
+  check("a sub-second stated rate rounds UP to one second, never 0",
+    statedCadenceMs(0.5, 30_000) === 1_000, String(statedCadenceMs(0.5, 30_000)));
+  check("a fractional rate floors to its whole seconds",
+    statedCadenceMs(1.9, 30_000) === 1_000, String(statedCadenceMs(1.9, 30_000)));
+  check("a string is not a usable rate",
+    statedCadenceMs("2", 30_000) === 30_000, String(statedCadenceMs("2", 30_000)));
+  check("NaN is not a usable rate",
+    statedCadenceMs(NaN, 30_000) === 30_000, String(statedCadenceMs(NaN, 30_000)));
+  check("zero and negative stated rates fall back",
+    statedCadenceMs(0, 30_000) === 30_000 && statedCadenceMs(-3, 30_000) === 30_000,
+    `${statedCadenceMs(0, 30_000)}/${statedCadenceMs(-3, 30_000)}`);
+  check("a missing rate falls back",
+    statedCadenceMs(undefined, 30_000) === 30_000, String(statedCadenceMs(undefined, 30_000)));
+}
+
 // The ledger MUST be reported. This suite ran silent for its whole life —
 // checks recorded into `results`, nothing printed, exit 0 — so a failed pin
 // (the registered-status fall-through, 2026-10-27) never reached the runner

@@ -97,40 +97,6 @@ export const S = {
   // the one part of the line that must never be clipped.
   quotaTop: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" },
   quotaLabel: { fontSize: 12, fontWeight: 500, color: "var(--dsw-alias-label-secondary)" },
-  // The second upstream's balance is the same KIND of fact a quota headline is
-  // — the number the user came to read — so it borrows the quota headline's
-  // weight (18 / 650 / tabular) rather than the run-on meta line it used to
-  // ride in. The Raccoon tab is a SEPARATE credential and data source, so it
-  // owns its own card; that independence was never a licence to skip the type
-  // scale, and a headline spelled in 12px secondary text is how a tab reads as
-  // unfinished next to its siblings.
-  statHeadline: { fontSize: 18, lineHeight: "22px", fontWeight: 650, letterSpacing: "-0.02em", fontVariantNumeric: "tabular-nums" },
-  // A quiet secondary label for a headline's own caption line (the declared
-  // split, the credential clocks). It is the same stop `quotaLabel` uses, so a
-  // number and its caption read as one unit across both upstreams.
-  statCaption: { fontSize: 11, lineHeight: "15px", color: "var(--dsw-alias-label-secondary)", fontVariantNumeric: "tabular-nums" },
-  // A headline figure that IS the alarm, not decoration: a balance at zero
-  // must say so at the same weight the bar's error tone does. There is no warn
-  // band here on purpose — the quota headline has one because a PERCENTAGE has
-  // honest thresholds, while an absolute credit figure's normal magnitude is
-  // not something this client is told, so any "low" cut would be a number
-  // invented below the wire.
-  statError: { color: "var(--dsw-alias-state-error-primary)" },
-  // The gateway's split of the raccoon balance, as a deck of min-width cards:
-  // the same responsive rule `poolsGrid` and `quotas` own (auto-fit, each
-  // column at least N px, row reflows instead of overflowing). 110px is the
-  // floor that fits the longest label ("奖励") beside its figure without
-  // dropping it to a second line, and it stacks to 2×2 or a single column on a
-  // narrow panel. One run-on `每日 600 · 奖励 8344 · 月度 0 · 充值 0` line read as
-  // a comma list of four different facts with no place to separate them.
-  statGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 110px), 1fr))", gap: 10, marginTop: 12 },
-  // A grid card rides on the card's own step — the raccoon balance card gives
-  // the deck the same layer-2 the quota twin gets, so a part reads by
-  // background alone rather than as a fourth nested border.
-  statCard: { display: "flex", flexDirection: "column", gap: 4, minWidth: 0, padding: "10px 12px", borderRadius: 10, background: "var(--dsw-alias-bg-layer-2)" },
-  // The part's figure is the point of the card; the name under it is the label,
-  // so the big number leads and the label never competes with it.
-  statValue: { fontSize: 16, fontWeight: 600, lineHeight: "20px", fontVariantNumeric: "tabular-nums" },
   quotaReset: { fontSize: 11, color: "var(--dsw-alias-label-secondary)" },
   // The usage PERCENTAGE is the headline — the same number the bar below
   // draws, so the pair can never point in opposite directions. Tabular
@@ -143,14 +109,6 @@ export const S = {
   barFill: { height: "100%", borderRadius: 3, background: BRAND },
   barFillWarn: { background: "var(--dsw-alias-state-warn-primary)" },
   barFillError: { background: "var(--dsw-alias-state-error-primary)" },
-  // Secondary bookkeeping (grant expiry, model coverage) folds away so a
-  // card's open state is just its name, the twin quotas, and nothing else.
-  details: { marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--dsw-alias-border-l1)" },
-  detailsSummary: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", cursor: "pointer", userSelect: "none" },
-  detailsBody: { display: "flex", flexDirection: "column", gap: 10, marginTop: 10 },
-  grant: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" },
-  models: { display: "flex", flexWrap: "wrap", gap: 6 },
-  modelTag: { fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace", fontSize: 11, padding: "2px 6px", borderRadius: 6, background: "var(--dsw-alias-bg-layer-2)", border: "1px solid var(--dsw-alias-border-l1)" },
   // The per-model consumption card: a label row over one horizontal-bar
   // row per model. The bar is relative to the LARGEST consumer — the
   // chart answers "which model is burning credits" — so the top model
@@ -233,9 +191,9 @@ export const S = {
   // A roster's own frame — one step INSIDE the section card. The rule above
   // still holds (rows draw no box of their own; the divider separates them),
   // but "one frame per level" is about not repeating the SAME frame, not about
-  // leaving a whole list adrift: the Raccoon tab pairs its roster with a login
-  // block that already wears a card, and an unframed list beside a framed one
-  // read as an unfinished half rather than as a deliberate hierarchy.
+  // leaving a whole list adrift: the search box and bulk toolbar above it sit
+  // inside the section card's frame, and an unframed list under them read as
+  // an unfinished half rather than as a deliberate hierarchy.
   modelPanel: { border: "1px solid var(--dsw-alias-border-l1)", borderRadius: 12, background: "var(--dsw-alias-bg-layer-1)", padding: "12px 14px" },
   // === the composer pill: a different surface, borrowed metrics ============
   // Every token above draws INSIDE this plugin's own card — 13px type, framed
@@ -290,12 +248,6 @@ export const S = {
   // The stale mark is a footnote, not a reading — the dot and the numbers
   // already say the data is old; this only says WHY the numbers may lag.
   pillStale: { color: "var(--dsw-alias-label-tertiary)" },
-  // The "new model" marker rides BESIDE the reading as a third segment, so it
-  // gets the plan label's weight: this is a fact about the roster, not about
-  // the balance, and tinting it like the balance would make a toolbar count
-  // read as a quota figure. No chip background either — the pill's own row is
-  // 28px tall and a filled chip here would compete with the tier dot.
-  pillNewTag: { color: "var(--dsw-alias-label-secondary)", flexShrink: 0 },
   // Tier ink from the shell's own state tokens (`--dsw-alias-state-*`), not
   // plugin hexes: a retheme or a light/dark switch recolours the pill with the
   // rest of the window. The hexes are fallbacks for a shell that defines
@@ -307,8 +259,8 @@ export const S = {
   // the tertiary label ink rather than inventing a fourth state colour.
   pillTierUnknown: "var(--dsw-alias-label-tertiary, #9ca3af)",
   // A window that is actually spent is an alarm, not a meter, so it is the one
-  // tier that tints the reading as well as the dot — same ruling as
-  // `statError` above: an exhausted quota must not read as a calm 100%.
+  // tier that tints the reading as well as the dot — the same ruling the quota
+  // headline's error tone holds: an exhausted quota must not read as a calm 100%.
   pillTierExhaustedText: { color: "var(--dsw-alias-state-error-primary)" },
   // === the pill's expand panel: the SAME guest, one size up ================
   // The 28px pill can carry a reading but not the figures behind it, so the
@@ -362,13 +314,8 @@ export const S = {
   pillPopoverFill: { height: "100%", borderRadius: 2 },
   pillPopoverFoot: { display: "flex", alignItems: "baseline", gap: 8, color: "var(--dsw-alias-label-tertiary)" },
   pillPopoverReset: { marginLeft: "auto", fontVariantNumeric: "tabular-nums" },
-  // The Raccoon branch's split of its balance: a quiet deck under the total,
-  // one label+figure per line. Its own border-top separates "the total" from
-  // "what the total is made of" without spending a row on the distinction.
-  pillPopoverParts: { borderTop: "1px solid var(--dsw-alias-border-l1)", marginTop: 6, paddingTop: 6 },
-  pillPopoverPartsLabel: { color: "var(--dsw-alias-label-tertiary)", marginBottom: 2 },
-  // The Raccoon branch's single "window" is a stock, not a window: one figure,
-  // no bar, and the signed-in/signed-out fact beside it. Drawn as a row anyway
-  // so the two branches share one panel frame and one set of metrics.
+  // The quiet tertiary lines under the window rows — the state note and the
+  // footnote (the popover body's call site owns that distinction). Space alone
+  // sets them off; every other line in the panel carries a figure.
   pillPopoverNote: { marginTop: 8, color: "var(--dsw-alias-label-tertiary)" }
 };

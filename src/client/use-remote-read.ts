@@ -2,26 +2,28 @@
  * The polling core every Host-route read shares: one generation guard, one abort
  * handle, one back-off switch, and the unmount teardown.
  *
- * Why it exists: the panel's snapshot poller and the composer pill's Raccoon
- * balance reader are the same machine pointed at two routes. Written twice they
- * drift, and they drifted the moment they were written twice — the pill's copy
- * arrived with a bare status string where the snapshot's carried the structured
+ * Why it exists: the panel's snapshot poller and the composer pill's poller are
+ * the same machine — the pill drives `useSnapshotPolling`, which is this core
+ * pointed at the one snapshot route. Written twice they drift, and they drifted
+ * the moment they were written twice — the pill's first private copy arrived
+ * with a bare status string where the snapshot's carried the structured
  * `errorOfStatus`, and its request forgot the `cache` line. `duplication-gate.mjs`
  * caught it at import time: two unregistered clones of one body, the same §343
  * shape as the Token Plan ↔ raccoon publish pair that PITFALLS.md §343 records.
  * The copies are never the real problem; the copies are how two quota universes
  * end up sharing a bug fix by accident and a behaviour change by drift.
  *
- * What is shared is the LIFECYCLE, not the interpretation. Each route still owns
- * how its own body is read — the snapshot goes through `interpretSnapshot`, the
- * balance through its own `ok:false` envelope — and each still owns what its
- * failures MEAN. Only the guards, the request, the cadence follow, and the
- * teardown are one implementation.
+ * What is shared is the LIFECYCLE, not the interpretation. The route still owns
+ * how its body is read (the snapshot goes through `interpretSnapshot`) and what
+ * its failures MEAN; the guards, the request, the cadence, and the teardown are
+ * one implementation.
  *
  * Not a hook in its own right: `useRemoteRead` is called FROM a hook, so it obeys
  * that hook's discipline (fixed hook count, fixed order, one call site per
- * reader). Its `route` argument MUST be stable — a fresh object each render would
- * rebuild `load` on every render and restart the loop with it.
+ * reader). Its `route` argument closes over `load`, so pass it module-scope or
+ * from a `useMemo` — a fresh literal per render rebuilds `load` every render.
+ * That no longer restarts the loop (the shared loop reads the latest `load`
+ * through a ref), but the churn buys nothing and blurs what changed.
  * @module dsh-sensenova-suite/use-remote-read
  */
 import { useCallback, useEffect, useRef, useState } from "./runtime.ts";
@@ -32,15 +34,16 @@ import { errorText, statedCadenceMs } from "./format.ts";
  * How one route's body becomes a reading.
  *
  * `value` and `failure` are independent on purpose: a route may declare a value
- * that only partially answers (the Raccoon state arrives while `balance` is
- * absent), which is not a failure, and a read that times out keeps the PREVIOUS
- * value on screen alongside the failure — the reading a surface shows is never
- * worse than the one it already had.
+ * that only partially answers (the snapshot's `pools` block can arrive while its
+ * `trend` block is absent), which is not a failure, and a read that times out
+ * keeps the PREVIOUS value on screen alongside the failure — the reading a
+ * surface shows is never worse than the one it already had.
  *
- * `F` is the failure's type parameter rather than a fixed string because the
- * snapshot's failure is structured (`{ message, code, auth }`) and the panel
- * renders those fields, while the pill's is plain text. The core stays agnostic
- * and carries whatever the route produces.
+ * `F` is the failure's type parameter rather than a fixed string because a
+ * route's failure can be structured (the snapshot's `{ message, code, auth }`,
+ * whose fields the panel renders), while a thrown fetch has no structure to
+ * read and can only contribute text (`errorText`). The core stays agnostic and
+ * carries whatever the route produces.
  */
 export interface RemoteRead<T, F = string> {
   /** What this body says, or `null` when it says nothing usable. */
@@ -91,18 +94,12 @@ export interface RemoteReadState<T, F = string> {
    * The snapshot panel needs this to keep "loading" apart from "needs setup":
    * `viewOf` reads a null/null pair as "nothing says you are configured", and
    * the setup form would then flash for a frame on every mount. The pill needs
-   * it to tell "not answered yet" (… ) apart from "answered, and the answer was
-   * nothing" (—).
+   * it to tell "not answered yet" apart from "answered, and the answer was
+   * nothing usable" (`composer.quotaUnknown`).
    */
   loadedOnce: boolean;
   /** Epoch ms of the newest successful read. */
   updatedAt: number;
-  /**
-   * The live poll interval in ms — the stated one once a body has stated it,
-   * the caller's default until then. Exposed because the panel quotes its own
-   * freshness ("每 N 秒") and that number has to be the one actually in use.
-   */
-  cadenceMs: number;
   /** The manual refresher. */
   load: () => Promise<void>;
 }
@@ -110,9 +107,9 @@ export interface RemoteReadState<T, F = string> {
 /**
  * Poll one Host route on the cadence its own answers state.
  *
- * @param route - The route to read and how to read it. MUST be stable across
- *   renders — module scope or a `useMemo`, never a fresh literal, because the
- *   loop is built from `load` and a rebuilt `load` restarts the interval.
+ * @param route - The route to read and how to read it. Pass it module-scope or
+ *   from a `useMemo`: a fresh literal rebuilds `load` every render — harmless
+ *   to the loop (it reads the latest closure through a ref) but pointless churn.
  * @param defaultCadenceMs - The interval before any body has stated one.
  */
 export function useRemoteRead<T, F = string>(
@@ -219,5 +216,5 @@ export function useRemoteRead<T, F = string>(
     inFlight.current?.abort?.();
   }, []);
 
-  return { data, error, loadedOnce, updatedAt, cadenceMs, load };
+  return { data, error, loadedOnce, updatedAt, load };
 }

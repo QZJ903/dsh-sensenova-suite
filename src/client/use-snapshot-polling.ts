@@ -6,11 +6,11 @@
  * lives in one testable seam instead of inside the `PanelPage` component. That
  * machinery lives one level down, in `use-remote-read.ts`: the generation guard,
  * the abort handle, the request, the stated cadence and the teardown are shared
- * with the composer pill's Raccoon balance reader, because a hand-kept second
- * copy of that body is exactly the drift `duplication-gate.mjs` exists to refuse.
- * The loop
+ * with the composer pill's poller (the pill drives this same hook), because a
+ * hand-kept second copy of that body is exactly the drift `duplication-gate.mjs`
+ * exists to refuse. The loop
  * itself — the interval, the hidden-tab pause, the error back-off — is the
- * shared one in `use-polling-interval.ts`, which the Raccoon tab drives too.
+ * shared one in `use-polling-interval.ts`.
  * The hook returns exactly the five values the rest of the panel renders from;
  * it owns no JSX.
  *
@@ -35,9 +35,9 @@ import type { SnapshotData } from "./wire.ts";
  * The snapshot route, read through the shared polling core.
  *
  * Module scope on purpose: the core's `load` closes over this route, so a fresh
- * literal per render would rebuild the callback on every render and restart the
- * poll interval with it. The same reason the Raccoon pill's route is
- * module-scoped.
+ * literal per render would rebuild the callback on every render — the loop
+ * survives that (it reads the latest closure through a ref), but module scope
+ * keeps the churn at zero.
  *
  * `parse` is PURE — it runs inside the core's load, and a reader that keeps
  * state here would write state during another hook's callback. The structured
@@ -69,11 +69,11 @@ const SNAPSHOT_ROUTE: RemoteRoute<SnapshotData, SnapshotFailure | string> = {
 /**
  * Poll the Host snapshot, following its stated cadence and pausing when hidden.
  * @param {number} [defaultCadenceMs] - poll interval before the first answer arrives.
- * @returns {{ data: SnapshotData | null, error: SnapshotFailure | string | null, loadedOnce: boolean, updatedAt: number, cadenceMs: number, load: () => Promise<void> }}
+ * @returns {{ data: SnapshotData | null, error: SnapshotFailure | string | null, loadedOnce: boolean, updatedAt: number, load: () => Promise<void> }}
  *   `data`/`error` are the latest interpreted snapshot; `loadedOnce` gates the
  *   first-frame "loading" vs "needs setup" decision; `updatedAt` stamps the
- *   last successful read; `cadenceMs` is the live poll interval; `load` is the
- *   manual refresher (also wired to the header's 刷新 button).
+ *   last successful read; `load` is the manual refresher (also wired to the
+ *   header's 刷新 button).
  */
 export function useSnapshotPolling(defaultCadenceMs = 30_000) {
   // `error` is read on the SAME state that carries `data`, so the two can never
@@ -82,7 +82,7 @@ export function useSnapshotPolling(defaultCadenceMs = 30_000) {
   // from a mix. That is also why the core keeps `data` on a failure instead of
   // clearing it: a panel whose read times out must keep the last pools it
   // actually received rather than flashing the setup form.
-  const { data, error, loadedOnce, updatedAt, cadenceMs, load } =
+  const { data, error, loadedOnce, updatedAt, load } =
     useRemoteRead<SnapshotData, SnapshotFailure | string>(SNAPSHOT_ROUTE, defaultCadenceMs);
-  return { data, error, loadedOnce, updatedAt, cadenceMs, load };
+  return { data, error, loadedOnce, updatedAt, load };
 }

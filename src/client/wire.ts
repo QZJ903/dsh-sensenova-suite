@@ -29,7 +29,5 @@ export type {
   QuotaWindowData,
   ShapeWarningData,
   SnapshotData,
-  TrendData,
-  TrendRowData,
-  VisionModelData
+  TrendData
 } from "../shared/wire.ts";

@@ -433,9 +433,11 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	/**
 	* A caught value as the one error string the panel shows.
 	*
-	* Every mutation surface (`ModelPicker`, `ProviderControls`, `RaccoonTab`)
-	* ends a `catch` with the same `why instanceof Error ? why.message : String(why)`
-	* template, and there were eight copies of it. That is the same drift the HTTP
+	* Every surface that renders a caught value (`ModelPicker`, `ProviderControls`,
+	* and the polling core's thrown-fetch path) funnels its `catch` through this
+	* one helper — eight copies of the
+	* `why instanceof Error ? why.message : String(why)` template used to drift.
+	* That is the same drift the HTTP
 	* seam in `http.ts` was extracted to stop: a copy that handles a thrown string
 	* but not a rejected `{code}` object prints `[object Object]` in the panel's
 	* one error line, and no test catches it because each copy is trivial. One
@@ -872,41 +874,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				fontWeight: 500,
 				color: "var(--dsw-alias-label-secondary)"
 			},
-			statHeadline: {
-				fontSize: 18,
-				lineHeight: "22px",
-				fontWeight: 650,
-				letterSpacing: "-0.02em",
-				fontVariantNumeric: "tabular-nums"
-			},
-			statCaption: {
-				fontSize: 11,
-				lineHeight: "15px",
-				color: "var(--dsw-alias-label-secondary)",
-				fontVariantNumeric: "tabular-nums"
-			},
-			statError: { color: "var(--dsw-alias-state-error-primary)" },
-			statGrid: {
-				display: "grid",
-				gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 110px), 1fr))",
-				gap: 10,
-				marginTop: 12
-			},
-			statCard: {
-				display: "flex",
-				flexDirection: "column",
-				gap: 4,
-				minWidth: 0,
-				padding: "10px 12px",
-				borderRadius: 10,
-				background: "var(--dsw-alias-bg-layer-2)"
-			},
-			statValue: {
-				fontSize: 16,
-				fontWeight: 600,
-				lineHeight: "20px",
-				fontVariantNumeric: "tabular-nums"
-			},
 			quotaReset: {
 				fontSize: 11,
 				color: "var(--dsw-alias-label-secondary)"
@@ -937,40 +904,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			},
 			barFillWarn: { background: "var(--dsw-alias-state-warn-primary)" },
 			barFillError: { background: "var(--dsw-alias-state-error-primary)" },
-			details: {
-				marginTop: 12,
-				paddingTop: 10,
-				borderTop: "1px solid var(--dsw-alias-border-l1)"
-			},
-			detailsSummary: {
-				fontSize: 12,
-				color: "var(--dsw-alias-label-secondary)",
-				cursor: "pointer",
-				userSelect: "none"
-			},
-			detailsBody: {
-				display: "flex",
-				flexDirection: "column",
-				gap: 10,
-				marginTop: 10
-			},
-			grant: {
-				fontSize: 12,
-				color: "var(--dsw-alias-label-secondary)"
-			},
-			models: {
-				display: "flex",
-				flexWrap: "wrap",
-				gap: 6
-			},
-			modelTag: {
-				fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-				fontSize: 11,
-				padding: "2px 6px",
-				borderRadius: 6,
-				background: "var(--dsw-alias-bg-layer-2)",
-				border: "1px solid var(--dsw-alias-border-l1)"
-			},
 			trendHead: {
 				display: "flex",
 				alignItems: "baseline",
@@ -1213,10 +1146,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				flexShrink: 0
 			},
 			pillStale: { color: "var(--dsw-alias-label-tertiary)" },
-			pillNewTag: {
-				color: "var(--dsw-alias-label-secondary)",
-				flexShrink: 0
-			},
 			pillTierOk: "var(--dsw-alias-state-success-primary, #22c55e)",
 			pillTierWarn: "var(--dsw-alias-state-warn-primary, #eab308)",
 			pillTierExhausted: "var(--dsw-alias-state-error-primary, #ef4444)",
@@ -1294,15 +1223,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			pillPopoverReset: {
 				marginLeft: "auto",
 				fontVariantNumeric: "tabular-nums"
-			},
-			pillPopoverParts: {
-				borderTop: "1px solid var(--dsw-alias-border-l1)",
-				marginTop: 6,
-				paddingTop: 6
-			},
-			pillPopoverPartsLabel: {
-				color: "var(--dsw-alias-label-tertiary)",
-				marginBottom: 2
 			},
 			pillPopoverNote: {
 				marginTop: 8,
@@ -2911,9 +2831,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 /**
 	* Poll one Host route on the cadence its own answers state.
 	*
-	* @param route - The route to read and how to read it. MUST be stable across
-	*   renders — module scope or a `useMemo`, never a fresh literal, because the
-	*   loop is built from `load` and a rebuilt `load` restarts the interval.
+	* @param route - The route to read and how to read it. Pass it module-scope or
+	*   from a `useMemo`: a fresh literal rebuilds `load` every render — harmless
+	*   to the loop (it reads the latest closure through a ref) but pointless churn.
 	* @param defaultCadenceMs - The interval before any body has stated one.
 	*/
 	function useRemoteRead(route, defaultCadenceMs) {
@@ -2963,7 +2883,6 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			error,
 			loadedOnce,
 			updatedAt,
-			cadenceMs,
 			load
 		};
 	}
@@ -2978,20 +2897,19 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 /**
 	* Poll the Host snapshot, following its stated cadence and pausing when hidden.
 	* @param {number} [defaultCadenceMs] - poll interval before the first answer arrives.
-	* @returns {{ data: SnapshotData | null, error: SnapshotFailure | string | null, loadedOnce: boolean, updatedAt: number, cadenceMs: number, load: () => Promise<void> }}
+	* @returns {{ data: SnapshotData | null, error: SnapshotFailure | string | null, loadedOnce: boolean, updatedAt: number, load: () => Promise<void> }}
 	*   `data`/`error` are the latest interpreted snapshot; `loadedOnce` gates the
 	*   first-frame "loading" vs "needs setup" decision; `updatedAt` stamps the
-	*   last successful read; `cadenceMs` is the live poll interval; `load` is the
-	*   manual refresher (also wired to the header's 刷新 button).
+	*   last successful read; `load` is the manual refresher (also wired to the
+	*   header's 刷新 button).
 	*/
 	function useSnapshotPolling(defaultCadenceMs = 3e4) {
-		const { data, error, loadedOnce, updatedAt, cadenceMs, load } = useRemoteRead(SNAPSHOT_ROUTE, defaultCadenceMs);
+		const { data, error, loadedOnce, updatedAt, load } = useRemoteRead(SNAPSHOT_ROUTE, defaultCadenceMs);
 		return {
 			data,
 			error,
 			loadedOnce,
 			updatedAt,
-			cadenceMs,
 			load
 		};
 	}
@@ -4313,7 +4231,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-11-04T23:06";
+		const CLIENT_BUILD = "2026-11-05T00:20";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			try {
