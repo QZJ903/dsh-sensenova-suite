@@ -167,9 +167,19 @@ export function classify429Body(bodyText: string): RateLimit429Classification {
   }
   if (!isRecord(parsed) || !isRecord(parsed.error)) return none;
   const code = parsed.error.code;
-  if (typeof code !== "number" && typeof code !== "string") return none;
   // 退避值统一：所有配额类都给梯子第 0 档，实际档位由 adapter 的入口快照决定。
   const floor = probeFloorFor(0);
+  if (typeof code !== "number" && typeof code !== "string") {
+    // Anthropic 线（/v1/messages）的限流用 error.type 表达、无数字 code（2026-11-05
+    // 真机样本：type=rate_limit_error + message "inference exceeds tpm/rpm limit"，
+    // 用户口径实测 rpm 形态）——与 chat 线 insufficient_quota（同一条 message，批 A
+    // 拍板 rpm 不计踢）同桶同待遇：换 key、不记 strike。协议结构化字段，非 message
+    // 子串匹配（POOL_EXHAUSTED_MARKERS 的教训）。type 不是 rate_limit_error 的 an
+    // 线形状 → unknown 兜底轮池（有样本再收编）。数字 code 优先于此分支：万一
+    // 未来带 code 的体也带同 type，code 的桶判定（如 429001=tpm）不被劫持。
+    if (parsed.error.type === "rate_limit_error") return { quota: true, retryFloorMs: floor, kind: "rate-soft", bucket: "rpm" };
+    return none;
+  }
   if (code === 8 || code === "8") return { quota: true, retryFloorMs: floor, kind: "rate", bucket: "rpm" };
   // 429003 → rate-soft（2026-10-31 他拍板）：样本 message 与 429001 全同、type 与
   // Endpoint 族全同（内容上区分不了），归速率桶是观测推断；后续实测它多呈 rpm 形态

@@ -44,7 +44,7 @@ export const MOUNT_EFFECT_DRAIN_TIMEOUT_MS = 5000;
 export interface EffectRegistry {
   /**
    * Run and track one mount-time effect. `run` is called immediately.
-   * @param {string} label - a short stable name ("raccoon-seed", "vision").
+   * @param {string} label - a short stable name ("catalog-seed", "provider-refresh").
    * @param {() => Promise<unknown>} run - the effect body.
    * @returns {void}
    */

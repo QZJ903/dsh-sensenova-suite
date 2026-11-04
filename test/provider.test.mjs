@@ -1165,8 +1165,9 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     // needs a quote to anchor the value, so this slipped through them all — and
     // it is exactly what `util.inspect` / `String(obj)` produce when something
     // interpolates the credential record it was handed, i.e. precisely what a
-    // failed `saveCredential` throws. Reached the panel intact via
-    // `raccoon-walk.ts` → `takeEvent()` → `loginError`.
+    // failed `saveCredential` throws. This shape reached the panel intact
+    // through the login chain's credential-save failure path (observed on the
+    // raccoon-walk route of that era).
     check("an UNQUOTED secret value (util.inspect shape) is redacted",
       !/eyJhbGciOi/.test(redactSecrets("failed to store { accessToken: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig, refreshToken: rt-abcdef123456 }")),
       redactSecrets("failed to store { accessToken: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig, refreshToken: rt-abcdef123456 }"));
@@ -1571,6 +1572,39 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       check("D2a：5xx 归 SERVER 档（宿主重试名单内，不再一次上屏）",
         d2aCode === "SERVER" && d2aAttempts.length === 1,
         JSON.stringify({ d2aCode, attempts: d2aAttempts.length }));
+
+      // 0B 空流断尾 → 本请求内换下一线重发（2026-11-05 他拍板）：an 线 200 后
+      // 零字节 EOF（TRUNCATED receivedBytes=0）→ 标记 + 同请求内切下一线重拉，
+      // 不抛宿主（真机特殊场景实测宿主不接=体感卡死；正常对话可达但等曲线慢）。
+      // 强制单线 an 链（wireProtocol）下链耗尽落全局兜底 chat——正是真机形态。
+      const zeroBEndpoints = [];
+      const zeroB = new SensenovaAdapter({
+        options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1, quotaRotation: true, wireProtocol: "anthropic" }),
+        resolveApiKey: async () => "sk-zero-b",
+        resolveApiKeyForRequest: async () => "sk-zero-b",
+        requestSlot: async () => () => {},
+        timeouts: { queueMs: 100 },
+        fetchImpl: (async (url) => {
+          zeroBEndpoints.push(String(url).endsWith("/messages") ? "an" : "chat");
+          if (String(url).includes("/messages")) {
+            return new Response("", { status: 200, headers: { "content-type": "text/event-stream" } });
+          }
+          return new Response(
+            'data: {"choices":[{"delta":{"content":"从chat线来"}}]}\n\n' +
+              'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+              "data: [DONE]\n\n",
+            { status: 200, headers: { "content-type": "text/event-stream" } });
+        }),
+      });
+      const zeroBChunks = [];
+      for await (const chunk of zeroB.stream({
+        model: "glm-5.2", sessionId: "sess-zero-b",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      })) { zeroBChunks.push(chunk); }
+      const zeroBText = zeroBChunks.filter((c) => c.type === "text-delta").map((c) => c.text).join("");
+      check("0B 空流断尾 → 标记 + 本请求内换线重发（不抛宿主，chat 线服务）",
+        zeroBEndpoints.join(",") === "an,chat" && zeroBText === "从chat线来",
+        JSON.stringify({ endpoints: zeroBEndpoints, text: zeroBText, chunks: zeroBChunks.length }));
 
       // D1 层 1（2026-11-04 拍板修）：404 失败名单读侧兜底——serve-cache 旧目录
       // 里被 404 标记的模型不再出线（旧实现被播种劫持：fetchedAt=0 双语义让

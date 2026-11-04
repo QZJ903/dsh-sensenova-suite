@@ -57,6 +57,21 @@ const grant = (accessToken, refreshToken, expiresIn) => ({
 
 const fakeCredentials = (initial, opts = {}) => fakes.fakeCredentials({ key: KEY, delayMs: 5, ...opts, initial });
 
+/** 方案 C（2026-10-29）后的密码通道：账号清单（env 密码通道同日退役）。
+ * 种子=预置一个账号的清单存储；username 仍走 env/refs（readUsername 现役通道）。
+ * read() 直接回 StoredAccountRecord[]（记录包裹是 createFileAccountsStore 的
+ * 文件层形状——readVault 收窄的就是数组）。 */
+function seededAccountsStore(username, password) {
+  const state = { data: null };
+  if (username !== undefined) {
+    state.data = [{ username, password: password ?? "" }];
+  }
+  return {
+    async read() { return state.data; },
+    async write(accounts) { state.data = accounts; }
+  };
+}
+
 /** A token-endpoint stub issuing a distinct pair per exchange. */
 /** The state the last authorization request issued, echoed into a success redirect. */
 let issuedState = "";
@@ -334,7 +349,7 @@ async function withNetwork(stub, body) {
   }), { status: 400, headers: { "content-type": "application/json" } });
   const stub = await makeTokenStub(locked);
   await withNetwork(stub, async () => {
-    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv });
+    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, accountsStore: seededAccountsStore("u", "wrong") });
     let first = null;
     try { await store.getToken(); } catch (error) { first = error; }
     check("a locked account is classified as such", first?.code === "account_locked", String(first?.code));
@@ -387,7 +402,7 @@ async function withNetwork(stub, body) {
   }), { status: 400, headers: { "content-type": "application/json" } });
   const stub = await makeTokenStub(vague);
   await withNetwork(stub, async () => {
-    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv });
+    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, accountsStore: seededAccountsStore("u", "wrong") });
     let first = null;
     try { await store.getToken(); } catch (error) { first = error; }
     check("a wrong password still reports itself", first?.code === "login_rejected", String(first?.code));
@@ -431,7 +446,7 @@ async function withNetwork(stub, body) {
   // expiry, but a tiny fake epoch would make any JWT in play look unexpired.
   let clock = Date.now();
   await withNetwork(stub, async () => {
-    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, now: () => clock });
+    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, accountsStore: seededAccountsStore("u", "wrong"), now: () => clock });
     try { await store.getToken(); } catch { /* expected */ }
     const afterFirst = stub.log.logins;
 
@@ -479,7 +494,8 @@ async function withNetwork(stub, body) {
   await withNetwork(stub, async () => {
     const store = createTokenStore({
       credentials, credentialKey: credentialKeyFn, env: accountEnv,
-      throttleStore: createMemoryThrottleStore(() => clock), now: () => clock
+      throttleStore: createMemoryThrottleStore(), now: () => clock,
+      accountsStore: seededAccountsStore("u", "p")
     });
     let first = null;
     try { await store.getToken(); } catch (error) { first = error; }
@@ -518,7 +534,7 @@ async function withNetwork(stub, body) {
   await withNetwork(stub, async () => {
     // Process A takes the refusal.
     const first = createTokenStore({
-      credentials, credentialKey: credentialKeyFn, env: accountEnv, throttleStore: shared
+      credentials, credentialKey: credentialKeyFn, env: accountEnv, throttleStore: shared, accountsStore: seededAccountsStore("u", "p")
     });
     try { await first.getToken(); } catch { /* expected */ }
     const afterA = stub.log.logins;
@@ -526,7 +542,7 @@ async function withNetwork(stub, body) {
 
     // Process B starts fresh, as it would after a Host restart.
     const second = createTokenStore({
-      credentials, credentialKey: credentialKeyFn, env: accountEnv, throttleStore: shared
+      credentials, credentialKey: credentialKeyFn, env: accountEnv, throttleStore: shared, accountsStore: seededAccountsStore("u", "p")
     });
     for (let i = 0; i < 3; i += 1) {
       try { await second.getToken(); } catch { /* expected */ }
@@ -592,7 +608,7 @@ async function withNetwork(stub, body) {
     if (String(url).includes("oauth2/token")) return refused();
     return stub(url);
   }, async () => {
-    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, skewMs: 120_000, now: () => clock });
+    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, accountsStore: seededAccountsStore("u", "p"), skewMs: 120_000, now: () => clock });
     try { await store.getToken(); } catch { /* expected */ }
     const afterFirst = stub.log.logins;
     check("the fallback to the password path happened once", afterFirst === 1, `logins=${afterFirst}`);
@@ -688,22 +704,23 @@ async function withNetwork(stub, body) {
   }).catch((error) => fail("a rejected password leaves no grant", error));
 }
 
-// --- 10c. a password left by a previous version is swept, not kept --------
-// The remediation: earlier builds stored SENSENOVA_PASSWORD in the credentials
-// service, so a plaintext password sat at rest in `~/.dsh/.credentials.yaml`.
-// On first contact the store removes a legacy value; the environment remains
-// the only durable password source.
+// --- 10c. a password left by a previous version is INERT (no reader) ------
+// The remediation era swept a legacy SENSENOVA_PASSWORD ref on first contact
+// because the env/refs channel was then the only durable password source.
+// 方案 C（2026-10-29）把 env 密码通道整体退役后，SENSENOVA_PASSWORD 在 store
+// 里已经零读者——遗留 ref 只是惰性垃圾：不被读、不被用，sweep 也随通道一并
+// 拆除（迁移代码是纯负债，同 LEGACY_SCOPE 拍板）。唯一密码通道=账号清单。
 {
   const credentials = fakeCredentials(null, {
     refs: { SENSENOVA_USERNAME: "u", SENSENOVA_PASSWORD: "legacy-secret" }
   });
-  const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: {} });
+  const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: {}, accountsStore: seededAccountsStore() });
   const state = await store.state();
-  check("a legacy stored password is swept on first contact",
-    credentials.refs.get("SENSENOVA_PASSWORD") === undefined,
+  check("a legacy stored password is not read (no sweep, no use)",
+    credentials.refs.get("SENSENOVA_PASSWORD") === "legacy-secret",
     JSON.stringify(credentials.refs.get("SENSENOVA_PASSWORD")));
-  check("the username survives the sweep", credentials.refs.get("SENSENOVA_USERNAME") === "u");
-  check("with no env password the store cannot auto-recover",
+  check("the username survives untouched", credentials.refs.get("SENSENOVA_USERNAME") === "u");
+  check("without a vault password the store cannot auto-recover",
     state.configured === false && state.hasAccount === true && state.needsAccount === true,
     JSON.stringify(state));
 }
@@ -760,14 +777,25 @@ async function withNetwork(stub, body) {
   check("the panel is not asked for setup", state.needsAccount === false);
 }
 
-// --- 12. the environment alone still configures the account -------------
+// --- 12. an env username plus a vault password configures the account -----
+// 方案 C 后：username 仍可来自 env（readUsername 回退），但密码只查清单——
+// env 用户名 + 空清单 = 面板仍要账号（env 密码通道已退役）。
 {
-  const env = { SENSENOVA_USERNAME: "env-user", SENSENOVA_PASSWORD: "env-pass" };
+  const env = { SENSENOVA_USERNAME: "env-user" };
   const credentials = fakeCredentials(null, { env });
-  const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env });
-  const state = await store.state();
-  check("an env account is recognised", state.hasAccount === true, JSON.stringify(state));
-  check("an env account needs no setup", state.needsAccount === false);
+  const bare = createTokenStore({ credentials, credentialKey: credentialKeyFn, env, accountsStore: seededAccountsStore() });
+  const bareState = await bare.state();
+  check("an env username alone still asks for setup (env password channel retired)",
+    bareState.hasAccount === true && bareState.needsAccount === true, JSON.stringify(bareState));
+
+  const armed = createTokenStore({
+    credentials: fakeCredentials(null, { env }),
+    credentialKey: credentialKeyFn, env,
+    accountsStore: seededAccountsStore("env-user", "env-pass")
+  });
+  const state = await armed.state();
+  check("an env username with a vault password needs no setup",
+    state.hasAccount === true && state.needsAccount === false, JSON.stringify(state));
 }
 
 // --- 13. NO credentials service: the panel still signs in ----------------
@@ -832,7 +860,7 @@ async function withNetwork(stub, body) {
   const stub = await makeTokenStub(locked);
   const own = createMemoryThrottleStore();
   await withNetwork(stub, async () => {
-    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, throttleStore: own });
+    const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, accountsStore: seededAccountsStore("u", "wrong"), throttleStore: own });
     try { await store.getToken(); } catch { /* the expected refusal */ }
 
     // The point of the move: a refusal is this plugin's business, and nothing
@@ -841,7 +869,7 @@ async function withNetwork(stub, body) {
       (await credentials.readRecord(THROTTLE_KEY)) === undefined,
       JSON.stringify(await credentials.readRecord(THROTTLE_KEY)));
     check("it lands in the plugin's own store instead",
-      (await own.read())?.code === "account_locked", JSON.stringify(await own.read()));
+      (await own.read("u"))?.code === "account_locked", JSON.stringify(await own.read("u")));
 
     // What IS still written there — the grant — has to survive the parser.
     const document = {
@@ -877,7 +905,7 @@ async function withNetwork(stub, body) {
     check("a private kind is still rejected by the parser (the original bug)",
       poisonRejected);
 
-    const second = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, throttleStore: own });
+    const second = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: accountEnv, accountsStore: seededAccountsStore("u", "wrong"), throttleStore: own });
     try { await second.getToken(); } catch { /* refused again, fast */ }
     check("a second store reads the persisted throttle instead of re-attempting",
       stub.log.logins === 1, `logins=${stub.log.logins}`);
@@ -886,11 +914,13 @@ async function withNetwork(stub, body) {
   }).catch((error) => fail("the written records parse under the real service", error));
 }
 
-// --- 16. a throttle parked by the previous version is adopted, not lost ===
-// A parked refusal has no deadline. Losing one across an upgrade means the next
-// poll retries a password the user has not changed, which is how one wrong
-// password becomes a locked account — the exact thing the throttle exists to
-// prevent. So the old record is read once and taken over.
+// --- 16. the credentials-record throttle channel is retired ---------------
+// The throttle once lived as a credentials-service record beside the grant and
+// was adopted into the plugin's own store on first contact. That channel is
+// RETIRED（2026-10-29「无存量用户，迁移代码是纯负债」拍板整体退役，constants.ts
+// 头注；U5-D1 同批核死 THROTTLE_KEY 零消费者）——the throttle now lives only in
+// the throttle store (throttle.json / injected), keyed per account. A leftover
+// record of that shape must be INERT: no reader, no adoption, no sweep.
 {
   const legacy = {
     kind: "grant",
@@ -902,81 +932,45 @@ async function withNetwork(stub, body) {
   const credentials = fakeCredentials(null, {
     refs: { SENSENOVA_USERNAME: "u", SENSENOVA_PASSWORD: "wrong" }
   });
-  // Planted by hand: this is the shape the PREVIOUS version left on disk, and
-  // no code path writes it any more.
   credentials.records.set(THROTTLE_KEY, legacy);
   const own = createMemoryThrottleStore();
   const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: {}, throttleStore: own });
   const state = await store.state();
-  check("a parked refusal from the previous version still holds",
-    state.needsUserAction === true, JSON.stringify(state));
-  check("it is adopted into the plugin's own store",
-    (await own.read())?.parked === true, JSON.stringify(await own.read()));
-  check("the old record is deleted, so this happens once",
-    (await credentials.readRecord(THROTTLE_KEY)) === undefined);
-}
-
-// --- 16a. a legacy parked refusal is NOT deleted when the copy fails ---------
-// The legacy record is the ONLY copy of a parked refusal. The adoption path
-// used to write the new copy and delete the old one unconditionally, so a
-// write that never landed (an unwritable Home, a read-only disk) destroyed the
-// only copy: the next start found nothing to adopt and retried the password
-// the user has not changed — the exact outcome the throttle exists to prevent.
-// The store now reports whether the record reached the disk, and the old copy
-// is only swept once the new one is there.
-{
-  const legacy = {
-    kind: "grant",
-    payload: {
-      version: 1, marker: "signin-throttle", code: "login_rejected",
-      parked: true, until: null, attempt: 1
-    }
-  };
-  const credentials = fakeCredentials(null, {
-    refs: { SENSENOVA_USERNAME: "u", SENSENOVA_PASSWORD: "wrong" }
-  });
-  credentials.records.set(THROTTLE_KEY, legacy);
-  // A store whose write never lands — the failure this check is about.
-  const failing = {
-    read: async () => null,
-    write: async () => false,
-    clear: async () => true
-  };
-  const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: {}, throttleStore: failing });
-  await store.state();
-  check("a legacy parked refusal survives a failed adoption write",
+  check("a leftover credentials-record throttle is not adopted",
+    (await own.read("u")) === null, JSON.stringify(await own.read("u")));
+  check("it does not park the panel",
+    state.needsUserAction === false, JSON.stringify(state));
+  check("it is left untouched (no reader, no sweep)",
     (await credentials.readRecord(THROTTLE_KEY)) !== undefined,
     `records=${[...credentials.records.keys()].join(",") || "(empty)"}`);
 }
 
-// --- 16b. a grant saved under the pre-rename namespace is adopted ----------
-// Renaming the plugin must not log the user out: a console grant (and its
-// refresh token) saved under the old namespace is moved to the current one
-// exactly once, and the old record deleted.
+// --- 16b. a grant under the pre-rename namespace is inert -----------------
+// The rename-era adoption（LEGACY_SCOPE）已随 2026-10-29「无存量用户，迁移代码
+// 是纯负债」拍板整体退役（constants.ts 头注）：旧名字空间的记录不再被读、
+// 被收编、被清扫。遗留 grant 的现行为=面板视同未配置、记录原样留在盘上。
 {
   const legacyKey = credentialKey("dsh-llm-rate-panel", "sensenova-console");
   const credentials = fakeCredentials(null);
   credentials.records.set(legacyKey, grant(jwtExpiring(120), "keep-me", 7200));
   const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: {} });
   const state = await store.state();
-  check("a grant from the pre-rename namespace still configures the panel",
-    state.configured === true && state.hasRefreshToken === true, JSON.stringify(state));
-  check("it was moved to the current namespace",
-    (await credentials.readRecord(KEY))?.payload?.refreshToken === "keep-me",
-    JSON.stringify(await credentials.readRecord(KEY)));
-  check("the legacy record is deleted, so this runs once",
-    (await credentials.readRecord(legacyKey)) === undefined);
-  // The adopted grant is live, not just visible: a fresh grant is returned
-  // without any network call, so this needs no stub.
-  const token = await store.getToken();
-  check("the adopted grant serves tokens",
-    typeof token === "string" && token !== "", String(token).slice(0, 20));
+  check("a pre-rename grant does not configure the panel",
+    state.configured === false && state.hasRefreshToken === false, JSON.stringify(state));
+  check("it is left untouched (no adoption, no sweep)",
+    (await credentials.readRecord(legacyKey))?.payload?.refreshToken === "keep-me",
+    JSON.stringify(await credentials.readRecord(legacyKey)));
+  // getToken 走到登录兜底：无账号 → not_configured（acquire 的登录兜底门），
+  // 套件不被未捕获抛错炸掉。
+  let code = "";
+  try { await store.getToken(); } catch (error) { code = String(error?.code ?? ""); }
+  check("getToken reports not_configured, not a crash",
+    code === "not_configured", `code=${code}`);
 }
 
-// --- 16c. a parked refusal under the pre-rename namespace is adopted --------
-// Same guarantee as 16, for a record a previous version left under the OLD
-// namespace: the rename must not turn a parked wrong-password into a timer
-// that retries it.
+// --- 16c. a parked refusal under the pre-rename namespace is inert --------
+// 与 16b 同拍板：旧名字空间的 throttle 记录不再被收编——它既不让面板显示
+// 「等待中」，也不被搬进本插件的 throttle store，更不被清扫。
 {
   const legacyKey = credentialKey("dsh-llm-rate-panel", THROTTLE_ID);
   const credentials = fakeCredentials(null, {
@@ -992,18 +986,19 @@ async function withNetwork(stub, body) {
   const own = createMemoryThrottleStore();
   const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: {}, throttleStore: own });
   const state = await store.state();
-  check("a parked refusal from the pre-rename namespace still holds",
-    state.needsUserAction === true, JSON.stringify(state));
-  check("it is adopted into the plugin's own store",
-    (await own.read())?.parked === true, JSON.stringify(await own.read()));
-  check("the legacy record is deleted, so this happens once",
-    (await credentials.readRecord(legacyKey)) === undefined);
+  check("a pre-rename parked refusal does not hold the panel",
+    state.needsUserAction === false, JSON.stringify(state));
+  check("it is not adopted into the plugin's own store",
+    (await own.read("u")) === null, JSON.stringify(await own.read("u")));
+  check("it is left untouched",
+    (await credentials.readRecord(legacyKey)) !== undefined,
+    JSON.stringify(await credentials.readRecord(legacyKey)));
 }
 
-// --- 16d. a throttle file under the pre-rename state directory is adopted ---
-// The file-backed store moved directories with the rename. A parked refusal in
-// the OLD directory must be moved over on first contact — and a cleared
-// throttle must stay cleared under both names.
+// --- 16d. a throttle file under the pre-rename state directory is inert ----
+// 文件版 throttle 的旧目录迁移（state/dsh-llm-rate-panel/ → 现目录）与
+// LEGACY_SCOPE 同批退役：store 只认自己的目录——旧目录里的 throttle.json
+// 不被读、不被搬，clear() 也不出界去扫别人的目录。
 {
   const home = mkdtempSync(join(tmpdir(), "dsh-rename-home-"));
   const saved = process.env.DSH_HOME;
@@ -1016,21 +1011,14 @@ async function withNetwork(stub, body) {
       { encoding: "utf8" });
     // Default dir resolves under the (temporarily re-pointed) Home.
     const store = createFileThrottleStore();
-    check("a parked refusal from the pre-rename state dir still holds",
-      (await store.read())?.parked === true, JSON.stringify(await store.read()));
-    const newFile = join(home, "state", "dsh-sensenova-suite", "throttle.json");
-    check("it was moved to the current state dir", existsSync(newFile), newFile);
-    check("the legacy file is gone", !existsSync(join(legacyDir, "throttle.json")));
-    // clear() must also sweep a legacy file that was never adopted: a cleared
-    // throttle under the new name must not resurrect under the old one.
-    mkdirSync(legacyDir, { recursive: true });
-    writeFileSync(join(legacyDir, "throttle.json"),
-      JSON.stringify({ version: 1, code: "account_locked", parked: false, until: 9_999_999_999, attempt: 1 }) + "\n",
-      { encoding: "utf8" });
-    const clearing = createFileThrottleStore();
-    await clearing.clear();
-    check("clear() sweeps an unadopted legacy file",
-      !existsSync(join(legacyDir, "throttle.json")));
+    check("a throttle file in the pre-rename state dir is not read",
+      (await store.read()) === null, JSON.stringify(await store.read()));
+    check("it is not moved into the current state dir",
+      !existsSync(join(home, "state", "dsh-sensenova-suite", "throttle.json")),
+      join(home, "state", "dsh-sensenova-suite", "throttle.json"));
+    await store.clear();
+    check("clear() stays inside its own directory",
+      existsSync(join(legacyDir, "throttle.json")));
   } finally {
     if (saved === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = saved;
@@ -1040,20 +1028,21 @@ async function withNetwork(stub, body) {
 
 // --- 17. the file-backed store survives a second process -----------------
 // The throttle exists so that another Host process sees a lock this one is
-// waiting out, which an in-memory store cannot do. This is the whole reason it
-// is on disk at all.
+// waiting out, which an in-memory store cannot do. 多账号分钥签名：write/read/
+// clear 都带 username；时间过滤在 token-store 层（U5-D2：本层把过期窗原样
+// 保留喂倍增梯，旧「测试注时钟」选项随之退役）。
 {
   const dir = mkdtempSync(join(tmpdir(), "dsh-throttle-"));
-  const first = createFileThrottleStore({ dir, now: () => 1_000 });
-  await first.write({ code: "account_locked", parked: false, until: 2_000, attempt: 1 });
-  const second = createFileThrottleStore({ dir, now: () => 1_500 });
+  const first = createFileThrottleStore({ dir });
+  await first.write("u", { code: "account_locked", parked: false, until: 2_000, attempt: 1 });
+  const second = createFileThrottleStore({ dir });
   check("a second process reads the throttle the first wrote",
-    (await second.read())?.code === "account_locked", JSON.stringify(await second.read()));
-  const later = createFileThrottleStore({ dir, now: () => 2_500 });
-  check("a window that has closed reads as no throttle", (await later.read()) === null,
-    JSON.stringify(await later.read()));
-  await second.clear();
-  check("clearing it removes it for everyone", (await first.read()) === null);
+    (await second.read("u"))?.code === "account_locked", JSON.stringify(await second.read("u")));
+  // U5-D2：关闭的窗口条目原样保留（「是否生效」由读侧判），不是 null。
+  check("an expired window entry is preserved for the caller",
+    (await second.read("u"))?.until === 2_000, JSON.stringify(await second.read("u")));
+  await second.clear("u");
+  check("clearing it removes it for everyone", (await first.read("u")) === null);
   rmSync(dir, { recursive: true, force: true });
 }
 
@@ -1077,34 +1066,37 @@ async function withNetwork(stub, body) {
 }
 
 // --- 19. autoRecoverArmed: 只报布尔，不回显值 -------------------------------
-// `state()` 报告环境里有没有自动恢复密码（`SENSENOVA_PASSWORD`），供面板显示
-// "refresh 失效后自动重登 / 需手动重登"。红线：值本身绝不能出 store——
-// 断言序列化后的 state 不含密码文本，也没有 password/secret 键。
+// `state()` 报告自动恢复是否可用。方案 C 后判据=活动用户的清单密码在位
+// （token-store.ts:478 vaultPasswordFor(...) !== ""），env 密码通道已退役。
+// 红线不变：值本身绝不能出 store——断言序列化后的 state 不含密码文本。
 {
-  const plainStore = createTokenStore({ credentials: fakeCredentials(null), credentialKey: credentialKeyFn, env: {} });
-  const armedStore = createTokenStore({
-    credentials: fakeCredentials(null),
+  const env = { SENSENOVA_USERNAME: "u" };
+  const plainStore = createTokenStore({
+    credentials: fakeCredentials(null, { env }),
     credentialKey: credentialKeyFn,
-    env: { SENSENOVA_PASSWORD: "hunter2-秘密" }
+    env,
+    accountsStore: seededAccountsStore()
   });
-  const blankStore = createTokenStore({
-    credentials: fakeCredentials(null),
+  const armedStore = createTokenStore({
+    credentials: fakeCredentials(null, { env }),
     credentialKey: credentialKeyFn,
-    env: { SENSENOVA_PASSWORD: "   " }
+    env,
+    accountsStore: seededAccountsStore("u", "hunter2-秘密")
   });
 
   const plain = await plainStore.state();
   const armed = await armedStore.state();
-  check("no env password -> auto-recover is not armed", plain.autoRecoverArmed === false, JSON.stringify(plain));
-  check("env password present -> armed", armed.autoRecoverArmed === true);
-  check("a blank env password is not armed", (await blankStore.state()).autoRecoverArmed === false);
+  check("no vault password -> auto-recover is not armed", plain.vaultPasswordArmed === false, JSON.stringify(plain));
+  check("a vault password for the active user -> armed", armed.vaultPasswordArmed === true);
 
   const serialized = JSON.stringify(armed);
   const keys = Object.keys(armed);
-  check("the password value is never echoed (boolean only)",
+  check("the password value is never echoed (boolean field only)",
     !serialized.includes("hunter2") && !serialized.includes("秘密") &&
-      !serialized.includes("SENSENOVA_PASSWORD") && !keys.some((k) => /password|secret/i.test(k)),
-    `${serialized.slice(0, 100)} keys=${keys.join(",")}`);
+      !serialized.includes("SENSENOVA_PASSWORD") &&
+      !keys.some((k) => /password|secret/i.test(k) && k !== "vaultPasswordArmed") &&
+      typeof armed.vaultPasswordArmed === "boolean",
+    `${serialized.slice(0, 120)} keys=${keys.join(",")}`);
 }
 
 // --- purgeGrant: a read failure must not be read as "safe to delete" -------
@@ -1204,9 +1196,9 @@ async function withNetwork(stub, body) {
   const blocked = mkdtempSync(join(tmpdir(), "throttle-blocked-"));
   try {
     const warnings = [];
-    const store = createFileThrottleStore({ dir, now: () => 1_000, logger: { warn: (m) => warnings.push(m) } });
+    const store = createFileThrottleStore({ dir, logger: { warn: (m) => warnings.push(m) } });
 
-    const landed = await store.write({ code: "account_locked", parked: false, until: 2_000, attempt: 1 });
+    const landed = await store.write("u", { code: "account_locked", parked: false, until: 2_000, attempt: 1 });
     check("throttle: a write that reached the disk reports true", landed === true, `write()=${landed}`);
     check("throttle: a write that reached the disk says nothing",
       warnings.length === 0, warnings.join(" | "));
@@ -1215,7 +1207,7 @@ async function withNetwork(stub, body) {
     // be clobbered, and the refusal must be REPORTED, not just computed.
     const file = join(dir, "throttle.json");
     writeFileSync(file, JSON.stringify({ version: 99, code: "x" }), "utf8");
-    const refused = await store.write({ code: "account_locked", parked: true, until: null, attempt: 2 });
+    const refused = await store.write("u", { code: "account_locked", parked: true, until: null, attempt: 2 });
     check("throttle: a refused write reports false", refused === false, `write()=${refused}`);
     check("throttle: a refused write says why",
       warnings.length === 1 && warnings[0].includes("refusing to overwrite"),
@@ -1226,10 +1218,10 @@ async function withNetwork(stub, body) {
     // A write that cannot happen at all: the "directory" is a plain file.
     const blockedWarnings = [];
     const unwritable = createFileThrottleStore({
-      dir: join(blocked, "blocker", "no"), now: () => 1_000, logger: { warn: (m) => blockedWarnings.push(m) }
+      dir: join(blocked, "blocker", "no"), logger: { warn: (m) => blockedWarnings.push(m) }
     });
     writeFileSync(join(blocked, "blocker"), "x", "utf8");
-    const failed = await unwritable.write({ code: "account_locked", parked: true, until: null, attempt: 1 });
+    const failed = await unwritable.write("u", { code: "account_locked", parked: true, until: null, attempt: 1 });
     check("throttle: a write that could not happen reports false", failed === false, `write()=${failed}`);
     check("throttle: a failed write says why",
       blockedWarnings.length >= 1, blockedWarnings.join(" | "));

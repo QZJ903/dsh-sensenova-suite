@@ -324,6 +324,10 @@ export async function* parseAnthropicSse(
         throw new LlmError(
           'llm-sensenova: SenseNova Anthropic stream ended before message_stop；SenseNova 流式响应在 message_stop 之前中断，重试通常可恢复',
           ANTHROPIC_TRUNCATED_CODE,
+          // receivedBytes 随 cause 外传（LlmError details 形状封闭，cause 是合法键）：
+          // adapter 据此分派——0B=本请求内换下一线重发（2026-11-05 他拍板：特殊场景
+          // 实测宿主不接、体感卡死），bytes>0=抛宿主（内容已流出，原地重发会重复）。
+          { cause: { receivedBytes: bytes } },
         );
       }
       for (const chunk of closeAllOpen(state)) yield chunk;

@@ -94,7 +94,8 @@ export function applyTrendMultipliers(trend: { models: Array<{ model: string; cr
  * unreachable console still leaves the llm block and the model catalog —
  * neither of which needs the console token — deliverable. The failed source
  * is named in `quotaError`; the panel says why instead of showing nothing,
- * and the API / Raccoon tabs stay fully usable without a console login.
+ * and every tab (quota / api / multimodal) stays fully usable without a
+ * console login.
  * @param {() => Promise<unknown>} fn - the fetch.
  * @returns {Promise<{value: unknown, error: unknown}>} `value` or `error`, never both.
  */
@@ -243,8 +244,8 @@ export async function buildSnapshotBody({
     // The two console sources are SOFT, not fatal: a signed-out or unreachable
     // console must not blank the whole snapshot. The quota section says why it
     // is empty (`quotaError`), while the llm block and the model catalog —
-    // neither of which needs the console token — still arrive, so the API and
-    // Raccoon tabs stay usable without a console login.
+    // neither of which needs the console token — still arrive, so every tab
+    // stays usable without a console login.
     soft(() => fetchConsole(settings, "/lite/console/v1/tokenplan/pool-usage", undefined, settings.cacheSeconds * 1000, cache, inflight, tokenStore)),
     soft(() => fetchConsole(
       settings,

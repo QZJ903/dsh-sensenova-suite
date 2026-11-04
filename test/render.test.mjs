@@ -17,6 +17,7 @@ import { render, styles as S, texts, findElement, findAll } from "./panel-render
 import { h, surface, reactStandin } from "./client-surface.js";
 import { applyChainSlotEdit, lastLevelGuard } from "../src/client/model-picker.ts";
 import { poolFor } from "../src/client/composer-usage-pill.ts";
+import { errorMessageFrom, concurrencyEnterAction } from "../src/client/api-key-form.ts";
 import { results, check, finish } from "./harness.mjs";
 
 
@@ -595,6 +596,22 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
           && poolFor([{ ...liveGeneral, window5h: { limit: 0, used: 0 } }], "m", "sensenova-suite")?.id === "pg-live";
       })(),
       "满表让位给有余额池（活性先于专属）；limit 0 是 unknown 不算耗尽——pill 与 picker 不得对同一事实各执一词");
+    // U11-T3（2026-11-05）：saveConcurrency/act 的错误文案判定与并发框回车
+    // 动作抽成导出纯函数后的回归钉——D2（「无法连接本机 Host」吞宿主内部错）
+    // 与 D3（回车隐式提交误报 sk- 红字）都曾各漂一次，无钉即会再漂。组件内
+    // 的 JSX 接线（preventDefault/save 调用）仍由 render-dom 在构建轮验证。
+    check("errorMessageFrom: non-JSON 4xx 给换路由文案、其余原文上屏、空/非 Error 回落网络文案 (D2)",
+      errorMessageFrom(new Error("POST /pool → non-JSON HTTP 404"), "网络文案", "换路由文案") === "换路由文案"
+        && errorMessageFrom(new Error("宿主内部错误原文"), "网络文案", "换路由文案") === "宿主内部错误原文"
+        && errorMessageFrom(new Error(""), "网络文案", "换路由文案") === "网络文案"
+        && errorMessageFrom(undefined, "网络文案", "换路由文案") === "网络文案",
+      "act() 与 saveConcurrency 共用此判定——对偶由单源保证，不再各自手写正则");
+    check("concurrencyEnterAction: Enter 一律吞掉（防外层 form 隐式提交）、dirty 才保存 (D3)",
+      concurrencyEnterAction("Enter", true) === "save"
+        && concurrencyEnterAction("Enter", false) === "swallow"
+        && concurrencyEnterAction("Escape", true) === "none"
+        && concurrencyEnterAction("Escape", false) === "none",
+      "swallow=只 preventDefault 不保存——非 dirty 的 Enter 也不许冒泡成 sk- 误报");
     const unopened = treeOf(render.ModelRoster, {
       models: rich, enabledIds: [], tt: ttZh,
       thinkingById: { "deepseek-v4-flash": ["off"] },
@@ -852,7 +869,7 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
   // only driving the mounted page proves the gate is wired. The stand-in
   // returns useState's INITIAL value, so this is the true first frame. The
   // tab bar is part of it: the loading / error / setup states live INSIDE the
-  // quota tab, so the api and raccoon tabs (both independent of the Token
+  // quota tab, so the api and multimodal tabs (both independent of the Token
   // Plan console) stay reachable before a snapshot lands.
   {
     const firstFrame = rendered(render.PanelPage, {
@@ -874,16 +891,17 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
       firstFrame.join("\n"));
   }
 
-  // === H2b. quota-only copy never leaks into the api/raccoon header =========
+  // === H2b. quota-only copy never leaks into the api/multimodal header ======
   // The pinned header is now a SHELL: its right cluster is produced by
   // `HeaderStatus`, which each tab feeds with its own facts. The renewal chip
   // ("令牌自动续期中") and the stale-data banner ("读取失败") describe the
-  // console login token, which the api tab (an API key) and the raccoon tab (a
-  // separate gateway credential) have nothing to say about. This pin guards the
+  // console login token, which the api tab (an API key) and the multimodal tab
+  // (its own credential line) have nothing to say about. This pin guards the
   // exact regression the demotion was meant to prevent: a quota-only chip
   // growing back into a "global" header. It mirrors the raccoon-leak pin at
-  // group J (render.test.mjs:~837) that keeps the second upstream from borrowing
-  // the Token Plan's rate tooltip.
+  // group J (render.test.mjs:~837) — the guard that stopped the second
+  // upstream borrowing the Token Plan's rate tooltip, kept so the shape cannot
+  // re-form.
   {
     const quotaChip = h("span", { style: {}, title: "x" }, "auth.selfRenew");
     const quotaFailure = { message: "boom" };
@@ -1150,7 +1168,7 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
 
     // 5. There is no "off" switch, and that is deliberate. An earlier version
     // of this suite pinned `enabled: false` meaning "no loop"; the flag is gone
-    // because the invariant behind it was never true — the Raccoon switch gates
+    // because the invariant behind it was never true — the Raccoon switch gated
     // registration, not reading, and a login scan reports its `scanUrl` and its
     // settled outcome through GET alone. A loop that could be switched off was
     // one `enabled={state?.enabled}` away from deadlocking the QR login. So the

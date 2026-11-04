@@ -15,13 +15,16 @@
  * say which side is in charge. `test/switch-precedence.test.mjs` pins the
  * dialect so a new caller copying the shape is the odd one out.
  *
- * One switch has NO config default: the Raccoon provider switch, where a
- * profile without a saved value falls to `off` with nothing to fall back on.
- * That case has no precedence to adjudicate, so it is served by
- * {@link resolveSwitchOff} (a bare `panel === true`) rather than the default
- * dialect above — keeping the no-default read as its own named call is what
- * stops the next author from re-introducing a hand-rolled comparison. Its
- * detail lives in that function's JSDoc; this is only the pointer.
+ * One switch HAD no config default: the Raccoon provider switch, removed with
+ * the second upstream in the 2026-10 consolidation. While it lived, a profile
+ * without a saved value fell to `off` with nothing to fall back on — no
+ * precedence to adjudicate — so it was served by {@link resolveSwitchOff} (a
+ * bare `panel === true`) rather than the default dialect above. Every switch
+ * alive today has a config default (the panel tool switches adjudicate in
+ * pool-store's `effectiveToolEnabled`, panel-first tri-state), so
+ * `resolveSwitchOff` currently has no production caller; it stays as the named
+ * primitive for the day a default-less switch returns, with
+ * `test/switch-precedence.test.mjs` pinning its dialect.
  *
  * @module dsh-sensenova-suite/switch-precedence
  */
@@ -38,13 +41,17 @@ export function resolveSwitchEnabled(panel: boolean | null, config: boolean): bo
 }
 
 /**
- * Resolve a boolean switch that has NO config default (the Raccoon provider
- * switch): a saved `true` turns it on, and any other value — including a
- * never-saved `null` — leaves it off. There is no config fallback to consult,
- * so the caller must not pass one; use {@link resolveSwitchEnabled} when a
- * config default exists. Keeping this as its own named call (instead of a bare
- * `panelValue === true`) is what makes "this switch has no default" a fact in
- * the API surface rather than a comment the next author has to remember.
+ * Resolve a boolean switch that has NO config default: a saved `true` turns
+ * it on, and any other value — including a never-saved `null` — leaves it
+ * off. There is no config fallback to consult, so the caller must not pass
+ * one; use {@link resolveSwitchEnabled} when a config default exists. The
+ * Raccoon provider switch was the only such caller and left with the 2026-10
+ * consolidation, so this currently has no production use — it stays as the
+ * named primitive (dialect pinned by `test/switch-precedence.test.mjs`) for
+ * the day a default-less switch returns. Keeping this as its own named call
+ * (instead of a bare `panelValue === true`) is what makes "this switch has no
+ * default" a fact in the API surface rather than a comment the next author
+ * has to remember.
  * @param {boolean|null} panel - the panel-saved value (`null` = never saved).
  * @returns {boolean} the effective switch.
  */

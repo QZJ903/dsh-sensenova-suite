@@ -359,7 +359,7 @@ async function seedPoolKey(credentials, key) {
 // === C. a persistent rejection degrades the quota block ==================
 // A console that keeps refusing the token no longer blanks the whole
 // snapshot: the body answers `ok:true` with an in-body `quotaError`, so the
-// API and Raccoon tabs (independent of the console) stay usable while the
+// api and multimodal tabs (independent of the console) stay usable while the
 // quota tab asks for a re-login.
 {
   const dead = jwtExpiring(120);
@@ -475,7 +475,7 @@ async function seedPoolKey(credentials, key) {
 // rendered as plain text with no way to sign in, and a response with no
 // `auth` field at all left `auth === null` and so never reached the form.
 // The signed-out host now answers `ok:true` with an in-body `quotaError`: the
-// quota tab offers the sign-in form, while the API/Raccoon tabs stay usable.
+// quota tab offers the sign-in form, while the api/multimodal tabs stay usable.
 {
   const net = await loginNetwork();
   await withNetwork(net, async () => {
@@ -575,17 +575,23 @@ async function seedPoolKey(credentials, key) {
   check("no account was written by the cross-origin post", credentials.refs.size === 0);
 }
 
-// === J. forget keeps the grant ==========================================
+// === J. the retired forget flag is not an action ========================
+// `forget` 分支已随清除按钮退役（2026-10-29 拍板：多账号下移除走
+// switch/remove，身份清除会废掉 vault 自动重登——account.ts 头注）。
+// 遗留的 {forget:true} 体不带 action 字段，按 U8-顺带2 的封闭白名单
+// 落进登录兜底：本块无网络桩 → 守卫打断登录 → 家庭 200 ok:false
+// （U8-D1 形状），存量 grant 不被破坏——原「forget 不动 grant」的
+// 安全意图在现行契约下仍然成立。
 {
   const credentials = makeCredentials(storedGrant(jwtExpiring(120), "keep-me", 7200), {
     refs: { SENSENOVA_USERNAME: "u", SENSENOVA_PASSWORD: "p" }
   });
   const call = await mount(credentials);
   const response = await call(ACCOUNT_PATH, makePost({ forget: true }));
-  check("forget succeeds", response.payload.ok === true);
-  check("the account is gone", response.payload.hasAccount === false);
-  check("the grant survives", response.payload.hasRefreshToken === true);
-  check("the panel is not asked for setup", response.payload.needsAccount === false);
+  check("the retired forget flag is not an action (falls through to login)", response.payload.ok === false,
+    JSON.stringify(response.payload).slice(0, 140));
+  check("the failed attempt leaves the stored grant intact", response.payload.hasRefreshToken === true,
+    JSON.stringify(response.payload.hasRefreshToken));
 }
 
 // === L2. the snapshot's contract fields are present and correct ===========
@@ -758,12 +764,10 @@ async function seedPoolKey(credentials, key) {
       String(snapshot.statusCode));
     check("the poll reports ok", snapshot.payload.ok === true,
       JSON.stringify(snapshot.payload).slice(0, 120));
-    // The vision identification reached the snapshot as before.
-    check("the snapshot still carries visionModels",
-      Array.isArray(snapshot.payload.visionModels) &&
-      snapshot.payload.visionModels.length === 1 &&
-      snapshot.payload.visionModels[0].id === "sensenova-6.8-flash-lite",
-      JSON.stringify(snapshot.payload.visionModels));
+    // Vision identification no longer rides a top-level `visionModels` field —
+    // it never existed in the split wire contract (git -S: zero hits), and the
+    // verdict now travels as the roster rows' per-model `vision` plus
+    // `llm.visionCount`, both pinned below and in Q2.
     // Step three status rides the same poll: the pool key feeds the catalog,
     // the counts follow it, and the opt-in defaults to off.
     const llm = snapshot.payload.llm;
@@ -1124,21 +1128,29 @@ async function seedPoolKey(credentials, key) {
         enableSwitch.statusCode === 200 && enableSwitch.payload.ok === true &&
           enableSwitch.payload.registerProvider === true, JSON.stringify(enableSwitch.payload));
 
+      // The curation an earlier group saved (M's ["m-a"]) is still on disk —
+      // curation persists by design (Q4 pins it), so establish the
+      // no-curation precondition the way a panel would: save an empty list.
+      const clear = await call(MODELS_PATH, makePost({ enabledModelIds: [] }));
+      check("Q2 a cleared curation saves and reads back empty",
+        clear.statusCode === 200 && clear.payload.ok === true &&
+          JSON.stringify(clear.payload.enabledModelIds) === JSON.stringify([]),
+        JSON.stringify(clear.payload));
+
       // Q2. The picker's own read: the snapshot hands the roster to it.
-      // Rows carry the per-model availability markers: the
-      // panel shows every chat model, greyed with the reason when its pool
-      // is exhausted, so `available`/`quotaExhausted` travel even when true.
-      // `contextWindow` rides too: the catalog stub declares no context
-      // field, so every row carries `contextWindowOf`'s 128k fallback.
-      // `maxOutputLength` is 0 (nothing declared); `multiplier: 1` rides
-      // because the DEFAULT trendMultipliers match "sensenova" — the same
-      // pseudo rate the trend rows would get, one matcher for both.
+      // Rows carry the per-model availability markers: the panel shows every
+      // chat model, greyed with the reason when its pool is exhausted, so
+      // `available`/`quotaExhausted` travel even when true. `contextWindow`
+      // rides the single-source 131072 fallback (0.1.41 U6 拍板「兜底常数
+      // 单源化」; the catalog stub declares no context field); `imageGen`
+      // rides per row since 0.1.41; `multiplier` left the roster rows (the
+      // trend rows carry it). `maxOutputLength` is 0 (nothing declared).
       const snapshot = await call(SNAPSHOT_PATH, makeRequest());
       check("Q2 the snapshot hands the picker the whole roster with a vision verdict",
         JSON.stringify(snapshot.payload.llm?.models) === JSON.stringify([
-          { id: "SenseNova-Lite", name: "SenseNova-Lite", vision: false, available: true, quotaExhausted: false, contextWindow: 128000, maxOutputLength: 0, multiplier: 1 },
-          { id: "SenseNova-Vision", name: "SenseNova-Vision", vision: true, available: true, quotaExhausted: false, contextWindow: 128000, maxOutputLength: 0, multiplier: 1 },
-          { id: "SenseNova-Pro", name: "SenseNova-Pro", vision: false, available: true, quotaExhausted: false, contextWindow: 128000, maxOutputLength: 0, multiplier: 1 }
+          { id: "SenseNova-Lite", name: "SenseNova-Lite", vision: false, imageGen: false, available: true, quotaExhausted: false, contextWindow: 131072, maxOutputLength: 0 },
+          { id: "SenseNova-Vision", name: "SenseNova-Vision", vision: true, imageGen: false, available: true, quotaExhausted: false, contextWindow: 131072, maxOutputLength: 0 },
+          { id: "SenseNova-Pro", name: "SenseNova-Pro", vision: false, imageGen: false, available: true, quotaExhausted: false, contextWindow: 131072, maxOutputLength: 0 }
         ]), JSON.stringify(snapshot.payload.llm?.models));
       check("Q2 the snapshot quotes the profile's pinned thinking default",
         snapshot.payload.llm?.thinkingDefault === "high",

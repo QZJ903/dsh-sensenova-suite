@@ -220,6 +220,12 @@ try {
   const obsText = JSON.stringify(out);
   check("桥 429 → 换 key 重试成功（转述文本进消息）",
     obsText.includes("视觉观察") && obsText.includes("图里有只海豹"), obsText.slice(0, 160));
+  const obsBlock = Array.isArray(out) ? out[0]?.content?.find((b) => b?.type === "text" && String(b.text).includes("视觉观察")) : undefined;
+  const obsLines = typeof obsBlock?.text === "string" ? obsBlock.text.split("\n") : [];
+  check("观察文本带处境说明（标签后、正文前，2026-11-05 拍板）",
+    obsLines.length >= 3 && obsLines[0].startsWith("【视觉观察：")
+      && obsLines[1] === "你看不到图片，以下是对图片的转述文本，不要试图查找图片。",
+    (obsBlock?.text ?? "").slice(0, 200));
   check("桥换 key 排除失败 key（成功上报走新 key）",
     swapperCalls[0]?.includes("sk-b1") && swapperCalls[1]?.includes("sk-b2") && okKeys.includes("sk-b2"),
     JSON.stringify({ calls: swapperCalls, okKeys }));

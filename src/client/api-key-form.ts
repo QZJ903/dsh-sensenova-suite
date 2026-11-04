@@ -18,6 +18,23 @@ import { ProviderRegStatus, ProviderStatus, ProviderSwitch } from "./provider-co
 import { ModelPicker } from "./model-picker.ts";
 import { S } from "./styles.ts";
 
+/** 保存失败的错误文案判据（U11-D2 三处同款的抽出版，U11-T3 落钉）：旧 Host
+ * 构建的 non-JSON 4xx 给换路由文案，其余原样上屏、空消息/非 Error 回落网络
+ * 文案。act() 与 saveConcurrency 共用这一个判定，两处不会再各写一份漂移。 */
+export function errorMessageFrom(caught: unknown, fallback: string, routeMissing: string): string {
+  const message = caught instanceof Error ? caught.message : "";
+  return /non-JSON HTTP 4\d\d/.test(message) ? routeMissing : (message || fallback);
+}
+
+/** 并发框回车动作（U11-D3 拍板「回车=保存」的抽出版，U11-T3 落钉）：Enter
+ * 一律 preventDefault（防冒泡外层 form 的隐式提交——空 apiKey 会误报
+ * 「请输入 sk- 开头的 API Key」，同 2026-10-25 备注框实测过的坑），dirty 才
+ * 真正保存。 */
+export function concurrencyEnterAction(key: string, dirty: boolean): "save" | "swallow" | "none" {
+  if (key !== "Enter") return "none";
+  return dirty ? "save" : "swallow";
+}
+
 export function ApiKeyForm({ llm, pool, onDone, tt }: {
   llm?: LlmData | null;
   pool?: PoolDiagData | null;
@@ -201,8 +218,7 @@ export function PoolManager({ pool, onDone, tt }: {
     } catch (caught) {
       // 原始原因（含 URL 与 HTTP 状态）比一句「无法连接」有用得多：
       // 旧 Host 构建会得到 "non-JSON HTTP 404"，网络断会得到 fetch 的异常名。
-      const message = caught instanceof Error ? caught.message : "";
-      setError(/non-JSON HTTP 4\d\d/.test(message) ? tt("poolMng.routeMissing") : (message || tt("auth.network")));
+      setError(errorMessageFrom(caught, tt("auth.network"), tt("poolMng.routeMissing")));
       return false;
     } finally {
       setBusyId(null);
@@ -242,10 +258,9 @@ export function PoolManager({ pool, onDone, tt }: {
       onDone?.();
     } catch (caught) {
       // 原始原因（含 URL 与 HTTP 状态）比一句「无法连接」有用得多——与 act()
-      // 和多模态 save 同款：旧 Host 构建的 non-JSON 4xx 给换路由文案，其余原样
-      // 上屏（U11-D2：这句「无法连接本机 Host」把宿主内部错误说成网络故障）。
-      const message = caught instanceof Error ? caught.message : "";
-      setError(/non-JSON HTTP 4\d\d/.test(message) ? tt("poolMng.routeMissing") : (message || tt("auth.network")));
+      // 共用同一判定（U11-D2：这句「无法连接本机 Host」把宿主内部错误说成
+      // 网络故障；U11-T3 抽出 errorMessageFrom 单源防再漂移）。
+      setError(errorMessageFrom(caught, tt("auth.network"), tt("poolMng.routeMissing")));
     }
   }, [concurrencyValue, onDone, tt]);
 
@@ -283,10 +298,10 @@ export function PoolManager({ pool, onDone, tt }: {
             // 防冒泡外层 form 的 onSubmit（空 apiKey 会误报「请输入 sk- 开头的
             // API Key」）——同 2026-10-25 备注框实测过的坑（U11-D3）。
             onKeyDown: (event: { key: string; preventDefault?: () => void }) => {
-              if (event.key === "Enter") {
-                event.preventDefault?.();
-                if (concurrencyDirty) void saveConcurrency();
-              }
+              const action = concurrencyEnterAction(event.key, concurrencyDirty);
+              if (action === "none") return;
+              event.preventDefault?.();
+              if (action === "save") void saveConcurrency();
             }
           }),
           concurrencyDirty

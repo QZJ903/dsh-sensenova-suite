@@ -27,15 +27,16 @@ const restoreHostEnv = isolateHostEnv();
 // red, because there the job installs the runtime).
 const skipMissingPeer = skipOnMissingPeer(suiteName(import.meta.url), [
   "NOT verified in this run: cordis wiring — service hand-off, registerPairs",
-  "ordering, teardown symmetry, and the raccoon switch store's $DSH_HOME",
+  "ordering, teardown symmetry, and the switch store's $DSH_HOME",
   "segmentation.",
   "restore health with the desktop runtime or `npm install -g @deepseek-ai/dsh`.",
 ]);
 const { Context } = await loadPeer("cordis").catch(skipMissingPeer);
 
-// The Raccoon "second upstream provider" stores: the switch's
-// state file is shared with the plugin's own instance through `$DSH_HOME`
-// (isolated below), and the credential is a credentials-service reference.
+// The switch store (the Raccoon "second upstream" store left with the 2026-10
+// consolidation): the state file is shared with the plugin's own instance
+// through `$DSH_HOME` (isolated below), and the credential is a
+// credentials-service reference.
 import { results, check, fail, finish } from "./harness.mjs";
 import * as fakes from "./fakes.mjs";
 
@@ -175,6 +176,11 @@ async function bootPlugin({ withCredentials = true, withLlm = false, config = {}
   // `inject: ["webServer"]` would never see it and would silently never
   // activate — exactly the wiring bug this file exists to catch.
   ctx.provide("webServer", webServer);
+  // `tools` 也在 inject 名单里（host-config.ts:33，0.1.15 起声明）——cordis 在
+  // apply 之前解析 inject，缺任何一个声明服务则 apply 永不执行、路由零注册
+  // （:204 崩截的根因，2026-11-05 探针定性：本桩自创建起从未供过 tools）。
+  // register 返回 disposer 的形状与宿主契约一致（U12 前置表）。
+  ctx.provide("tools", { register: () => () => {} });
   if (credentials !== undefined) ctx.provide("credentials", credentials);
   // `llm` is consumed optionally through `ctx.get` (this plugin injects only
   // webServer), the same optional seam the settings/attachments services use.
@@ -238,7 +244,7 @@ async function bootPlugin({ withCredentials = true, withLlm = false, config = {}
   await stop();
 }
 
-// === B. the plugin activates and registers all three routes ===============
+// === B. the plugin activates and registers all five routes ================
 {
   const { webServer, host, stop } = await bootPlugin();
   check("the plugin declares the services it needs", Array.isArray(host.inject) && host.inject.includes("webServer"),
@@ -248,7 +254,7 @@ async function bootPlugin({ withCredentials = true, withLlm = false, config = {}
     "/api/dsh-sensenova-suite/account",
     "/api/dsh-sensenova-suite/provider",
     "/api/dsh-sensenova-suite/models",
-
+    "/api/dsh-sensenova-suite/pool",
   ];
   check("all routes are registered on mount",
     routes.every((path) => webServer.registered.has(path)),
@@ -304,7 +310,8 @@ async function bootPlugin({ withCredentials = true, withLlm = false, config = {}
 // in the real Host means a stale panel still polling a route nobody owns.
 {
   const { webServer, stop } = await bootPlugin();
-  check("all seven routes are present while mounted", webServer.registered.size === 7,
+  // 五条路由（0.1.47 api-key 整删后的现役面：snapshot/account/provider/models/pool）。
+  check("all five routes are present while mounted", webServer.registered.size === 5,
     [...webServer.registered.keys()].join(", "));
   await stop();
   check("unmounting withdraws the routes", webServer.registered.size === 0,
@@ -352,10 +359,13 @@ async function bootPlugin({ withCredentials = true, withLlm = false, config = {}
     llm.calls.lastRows?.[0]?.settingsNs === "dsh-sensenova-suite" &&
     llm.calls.lastRows[0]?.declared === false,
     JSON.stringify(llm.calls.lastRows));
-  check("the adapter was built for apiBase with the key resolver seam",
-    de.builds.length === 1 && typeof de.builds[0].resolveApiKey === "function" &&
-    de.builds[0].baseUrl === "https://token.sensenova.cn/v1",
-    JSON.stringify({ builds: de.builds.length, baseUrl: de.builds[0]?.baseUrl }));
+  // 2026-10-31 cleanup：resolveApiKey/get 两个 build 参数已删（key 改为请求时
+  // 池内解析——llm-adapter 内部闭包，不进 build args）。本钉反向守卫：key 材料
+  // 不得回流 build args（回流=造出无读者/双 readers 的第二把钥匙缝）。
+  check("the adapter builds for the shipped apiBase with key resolution living pool-side, not in build args",
+    de.builds.length === 1 && de.builds[0].baseUrl === "https://token.sensenova.cn/v1" &&
+    de.builds[0].resolveApiKey === undefined && de.builds[0].get === undefined,
+    JSON.stringify({ builds: de.builds.length, baseUrl: de.builds[0]?.baseUrl, args: Object.keys(de.builds[0] ?? {}).join(",") }));
   const releasedBefore = llm.calls.released;
   await stop();
   check("disposing the fiber released the registered pair",

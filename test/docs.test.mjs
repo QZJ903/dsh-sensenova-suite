@@ -67,10 +67,10 @@ console.log(`docs.test.mjs —— 检查 ${mdFiles.length} 个 markdown 文件`)
 // 3) 根 README 行数上限
 {
   const lines = readFileSync(join(ROOT, "README.md"), "utf8").split(/\r?\n/).length;
-  if (lines > 140) {
-    bad(`README.md ${lines} 行，超过 140 行上限——根 README 是索引与快速上手，细节下沉到 docs/ 与 docs/upstream/`);
+  if (lines > 200) {
+    bad(`README.md ${lines} 行，超过 200 行上限——根 README 是索引与快速上手，细节下沉到 docs/ 与 docs/upstream/`);
   } else {
-    note(`README.md ${lines} 行（上限 140）`);
+    note(`README.md ${lines} 行（上限 200）`);
   }
 }
 

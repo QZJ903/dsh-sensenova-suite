@@ -5,8 +5,9 @@
  * ```
  * 面板覆盖（pool.json modelProtocols[model]）
  *   ?? wireProtocol 配置（强制值映射为单线链；auto = 档案默认）
- *   ?? 档案默认链（facts.defaultChain：全模型统一 an>re>chat，2026-11-04 倒序；
- *      2026-10-31 曾定 re>an>chat）
+ *   ?? 档案默认链（facts.defaultChain：全模型统一 chat 单线，2026-11-05 拍板
+ *      ——an 线 0B 空流断尾真机高频；历史：10-31 re>an>chat → 11-04 an>re>chat
+ *      → 本拍板 chat）
  * ```
  *
  * 决策 = 沿生效链走查：第一条「模型声明支持（supportedWires 求交）且未命中

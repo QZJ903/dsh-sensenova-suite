@@ -8,13 +8,13 @@ import type { FactsCatalogEntry, ModelFacts, WireKind } from './types.ts';
  * （交平台 API 自行裁决）。已知分支缺省与未知分支开图共用同一份（duplication 门）。 */
 const GENERIC_IMAGE_FORMATS = ['jpeg', 'png', 'webp', 'gif'];
 
-/** 全模型统一默认降级链（2026-11-04 用户拍板，倒序重排：an>re>chat——responses
- * 线推理档位传入无效（文档称兼容 low/medium/high/xhigh，实际后台恒用
- * reasoning.effort:"high"），推理档位保真优先走 an（output_config.effort 词表
- * 真实五值）；an 的时好时坏（空流/断尾）由运行时降级兜底：ANTHROPIC_TRUNCATED /
- * 400 命中即内存级标记换线，重启清除。2026-10-31 曾定 re>an>chat。策略层——
- * 链走查仍与 supportedWires 求交，能力外的线被跳过。 */
-const STANDARD_CHAIN: readonly WireKind[] = ['anthropic', 'responses', 'chat-completions'];
+/** 全模型统一默认降级链（2026-11-05 用户拍板：chat 单线，后两槽留空——an 线
+ * 0B 空流断尾在真机高频（分模型、分上游），0.1.49 的「an 首发保档位」被可靠性
+ * 代价推翻。an/re 由用户按模型在面板三槽自调，调了才走；ANTHROPIC_TRUNCATED /
+ * 400 命中即内存级标记换线的兜底对自调链仍在。历史：2026-10-31 re>an>chat →
+ * 2026-11-04 an>re>chat → 2026-11-05 chat（本拍板）。策略层——链走查仍与
+ * supportedWires 求交，能力外的线被跳过。 */
+const STANDARD_CHAIN: readonly WireKind[] = ['chat-completions'];
 
 /** 未收录模型 id 的通用兜底档案（不抛错；Chat 行为与迁移前「未知模型」路径一致）。 */
 const GENERIC_FACTS: ModelFacts = {
@@ -44,7 +44,9 @@ const GENERIC_FACTS: ModelFacts = {
 /** 静态档案表（deepseek-v4-pro 已下线，不收录）。
  * 行号锚点：6.8 参数表 :543-560；6.8-flash :268/:330（思考/输出上限）；
  * v4-flash :1288-1320；deepseek-flash :1665-1673；
- * glm-5.2 :2022 起；kimi-k3 :2403-2451；Responses §3.2。 */
+ * glm-5.2 :2022 起；kimi-k3 :2403-2451；Responses §3.2。
+ * glm-5.3：docs/sensenova-api-reference/8-1（独立新档，docs-full 尚未收录，
+ * 2026-11-05 收编）。 */
 const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
   ['sensenova-6.8-flash-lite', {
     id: 'sensenova-6.8-flash-lite',
@@ -178,6 +180,41 @@ const STATIC_FACTS: ReadonlyMap<string, ModelFacts> = new Map([
     imageRequiresBase64: false,
     responsesMaxOutputTokens: 131072,
     responsesSupportsJsonSchema: false,
+  }],
+  ['glm-5.3', {
+    // 2026-11-05 收编（docs/sensenova-api-reference/8-1、GLM-5.3.md）+ 同日真机
+    // 口径修（他：「三线支持，可以关思考」）。
+    // 思考：文档声明默认开启、梯只有 low/high/max（默认 max）且「传 disabled 会
+    // 失败」——但真机口径**可以关思考**（同 glm-5.2 的文档判据被推翻先例）：
+    // forbidThinkingDisabled=false、efforts 补 none（关=none，5.2 家族同拼写；
+    // 文档没列 none 系文档滞后）。an 线关=thinking:{type:'disabled'}（5.2 curl
+    // 验证形状），遇 400 运行时标记兜底。
+    // 输出：max_tokens 范围 [1, 131072]、默认 65536，思考与回答共享配额。
+    // 上下文：文档声明 1M——contextWindow 走目录/探测链；若真机/目录报低值，
+    // 按 6.8-flash 先例加 contextWindowOverrides（一行）。
+    // 图像：文档「仅支持文本」。Responses 线文档无本模型行 → responsesMaxOutput
+    // Tokens null 未申报（同 6.8-flash 先例，须实测）。
+    id: 'glm-5.3',
+    supportedWires: ['chat-completions', 'responses', 'anthropic'],
+    defaultChain: STANDARD_CHAIN,
+    efforts: ['low', 'high', 'max', 'none'],
+    defaultEffort: 'max',
+    responsesDefaultEffort: 'max',
+    anthropicDefaultEffort: 'max',
+    outputLimitField: 'max_tokens',
+    outputLimitMax: 131072,
+    supportsStreamOptions: false, // 文档流式示例不带 stream_options（usage 自动随末帧）
+    requiresReasoningReplay: false, // thinking.clear_thinking 默认 true（忽略历史思维链）
+    forbidThinkingDisabled: false, // 真机口径可以关思考——文档「disabled 会失败」同 5.2 被推翻
+    fixedTemperature: null,
+    fixedTopP: null,
+    blockedSampling: [],
+    samplingParameters: ['n'], // 文档参数表列 n [1,4]；无 seed
+    supportsImages: false, // 文档「仅支持文本」
+    imageFormats: [],
+    imageRequiresBase64: false,
+    responsesMaxOutputTokens: null,
+    responsesSupportsJsonSchema: false, // 文档「json_schema 不可用」（仅 text/json_object）
   }],
   ['kimi-k3', {
     id: 'kimi-k3',

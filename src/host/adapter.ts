@@ -103,6 +103,8 @@ import { buildResponsesBody, type ReasoningSummary } from './wire/body-responses
 import { buildAnthropicBody } from './wire/body-anthropic.ts';
 import { parseResponsesSse } from './wire/sse-responses.ts';
 import { parseAnthropicSse } from './wire/sse-anthropic.ts';
+/** chat 线 usage 映射已迁出至 wire/usage.ts（U3 审计 T1：三线映射集中 peer-free 直测，行为不变）。 */
+import { mapChatUsage } from './wire/usage.ts';
 import { resolveWirePlan, type WireProtocol } from './wire/plan.ts';
 import { prepareImages, type ImageAccessResolver, type PreparedImage } from './wire/blocks.ts';
 import { contentHasImage } from './vision/bridge.ts';
@@ -264,10 +266,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function toString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
-}
-
-function toNumber(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 /** wire → 端点路径（三条协议共享同一 apiBase，路径各不同）。 */
@@ -483,23 +481,6 @@ function parseCatalog(value: unknown, failedModels: ReadonlySet<string>) {
 }
 
 /** OpenAI usage → 宿主 TokenUsage（inputTokens 为未缓存输入，缓存读单独计）。 */
-function mapUsage(usage: Record<string, unknown>): TokenUsage {
-  const prompt = toNumber(usage.prompt_tokens);
-  const completion = toNumber(usage.completion_tokens);
-  const total = toNumber(usage.total_tokens);
-  const promptDetails = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : undefined;
-  const completionDetails = isRecord(usage.completion_tokens_details) ? usage.completion_tokens_details : undefined;
-  const cacheRead = promptDetails !== undefined ? toNumber(promptDetails.cached_tokens) : 0;
-  const reasoning = completionDetails !== undefined ? toNumber(completionDetails.reasoning_tokens) : 0;
-  return {
-    inputTokens: Math.max(0, prompt - cacheRead),
-    outputTokens: completion,
-    totalTokens: total > 0 ? total : prompt + completion,
-    ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
-    ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
-  };
-}
-
 /** OpenAI finish_reason → 宿主 FinishReason。 */
 function mapFinishReason(reason: string): FinishReason {
   switch (reason) {
@@ -624,7 +605,7 @@ function usageChunksFrom(event: unknown, state: SseState): StreamChunk[] {
   if (state.usageEmitted || !isRecord(event)) return [];
   const usageRec = isRecord(event.usage) ? event.usage : undefined;
   if (state.pendingUsage === undefined && usageRec === undefined) return [];
-  const usage = state.pendingUsage ?? mapUsage(usageRec as Record<string, unknown>);
+  const usage = state.pendingUsage ?? mapChatUsage(usageRec as Record<string, unknown>);
   state.pendingUsage = undefined;
   state.usageEmitted = true;
   return [{ type: 'usage', usage }];
@@ -740,7 +721,7 @@ function processChunkEvent(event: unknown, state: SseState): StreamChunk[] {
 
     const usageRec = isRecord(event.usage) ? event.usage : undefined;
     if (usageRec !== undefined && state.pendingUsage === undefined) {
-      state.pendingUsage = mapUsage(usageRec);
+      state.pendingUsage = mapChatUsage(usageRec);
     }
   }
   return chunks;
@@ -879,9 +860,9 @@ function isTimeoutReason(value: unknown): value is Error {
   return value instanceof Error && value.name === 'TimeoutError';
 }
 
-/** Anthropic 协议的错误 type 词表（公开规范；商汤 /v1/messages 遵循）。 */
+/** Anthropic 协议的错误 type 词表（公开规范；商汤 /v1/messages 遵循）。
+ * rate_limit_error 的分类在 rate-classify.ts 单点收编（rate-soft/rpm），此处无副本。 */
 const ANTHROPIC_OVERLOADED = 'overloaded_error';
-const ANTHROPIC_RATE_LIMIT = 'rate_limit_error';
 const ANTHROPIC_AUTH = new Set(['authentication_error', 'permission_error']);
 
 /** 从错误体取 Anthropic 形状的 error.type（非该形状返回 undefined）。 */
@@ -940,12 +921,11 @@ function httpError(status: number, errText: string, retryAfterMs: number | undef
       );
     }
     const classified = classify429Body(errText);
-    // Anthropic 协议用 type 字符串表达限流（无数字 code）：同样按配额类处理。
-    // 无桶标记 ⇒ 按 TPM 桶兜底（与 bucketOfCode 同口径：闸门往严的一侧兜）。
-    const classifiedWithAnthropic = anthropicType === ANTHROPIC_RATE_LIMIT && !classified.quota
-      ? { quota: true, retryFloorMs: probeFloorFor(0), kind: 'rate' as const, bucket: 'tpm' as const }
-      : classified;
-    const floorMs = dynamicFloorMs ?? classifiedWithAnthropic.retryFloorMs;
+    // Anthropic 线限流（error.type=rate_limit_error，无数字 code）已由分类器单点
+    // 收编（rate-soft/rpm——2026-11-05 真机样本定性 rpm，与 chat 线 insufficient_quota
+    // 同 message 同桶；旧「无桶标记⇒tpm 兜底」强翻错桶已删，循环层与退避层判据
+    // 自此同源，U3-D3 销号）。
+    const floorMs = dynamicFloorMs ?? classified.retryFloorMs;
     let providerRetryAfterMs: number | undefined;
     if (floorMs !== undefined) {
       // 配额类：退避下限生效，Retry-After 更大时优先，整体封顶 60s（对齐单次
@@ -1361,6 +1341,10 @@ export class SensenovaAdapter extends LlmAdapter {
     let body = await buildBody(wire);
     // 400 兜底只在本请求内切换一次（§5.3：标记 + 立即换 Chat 重试一次）。
     let responsesFallbackUsed = false;
+    // 0B 空流断尾的换线门（2026-11-05 他拍板）：单次，与 400 兜底独立计数——
+    // an 线 200 后零字节 EOF（TRUNCATED receivedBytes=0）→ 标记 + 本请求内切
+    // 下一线重拉，不等宿主重试曲线（真机特殊场景实测宿主不接=体感卡死）。
+    let truncationFallbackUsed = false;
     // 未分类失败（未知 429 / 402 / 403）的兜底换 key 也只在 402/403 上单次；
     // 未知 429 走完整轮池（见下方兜底段的注释）。
     let unclassifiedFallbackUsed = false;
@@ -1491,7 +1475,47 @@ export class SensenovaAdapter extends LlmAdapter {
           this.quotaStickyKeys.delete(options.sessionId); // 粘性使命完成（U4 顺带②B）：下一请求回池层选 key。
           probeResetBySuccess = true;
           this.deps.reportOutcome?.(apiKey, 'success');
-          break; // 额度随 response 保留，由外层 finally 在流结束后释放
+          // 流式解析并入循环体（2026-11-05 他拍板）：0B 空流断尾在本请求内换
+          // 下一线重发——与 400 兜底同门（内容零流出，无重复输出风险），不等
+          // 宿主重试曲线（真机特殊场景实测宿主不接=体感卡死）。bytes>0 中途
+          // 断尾仍抛宿主（内容已流出，原地重发会重复输出）。
+          if (response.body === null) {
+            throw new LlmError('llm-sensenova: SenseNova API returned no response body', LLM_CODES.providerProtocolError);
+          }
+          try {
+            if (wire === 'anthropic') {
+              yield* parseAnthropicSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
+            } else if (wire === 'responses') {
+              yield* parseResponsesSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
+            } else {
+              yield* parseOpenAiSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
+            }
+            break; // 正常收尾（usage/finish 已由解析器发出；额度由 finally 释放）
+          } catch (error) {
+            if (error instanceof LlmError && error.code === ANTHROPIC_TRUNCATED_CODE) {
+              const receivedBytes = (error.cause as { receivedBytes?: number } | undefined)?.receivedBytes;
+              if (!this.anthropicUnsupported.has(options.model)) {
+                this.anthropicUnsupported.add(options.model);
+                // stop=N：实证「断尾是否伴随 stop 序列」（0B 样本已定论 stop=0；
+                // 该插桩留给 bytes>0 的中途断尾样本）。
+                traceLog(`[dsh-sensenova-suite] anthropic 流断尾（无 message_stop）model="${options.model}" stop=${options.stop?.length ?? 0} 已收 ${receivedBytes ?? "?"}B——标记该模型 anthropic 线不支持（重启清除）${receivedBytes === 0 ? "，本请求内换下一线重发" : "，抛宿主重试层"}`);
+              }
+              const hopIndex = plan.chain.indexOf(wire);
+              const chainNext = hopIndex >= 0 && hopIndex + 1 < plan.chain.length ? plan.chain[hopIndex + 1] : undefined;
+              const nextWire = chainNext ?? (wire === 'chat-completions' ? undefined : 'chat-completions');
+              // 0B=任何内容都没流出：原地重发零重复风险。链耗尽落全局兜底 chat
+              // （与 400 兜底同款）。bytes>0 或已换过一次：原样抛宿主。
+              if (receivedBytes === 0 && nextWire !== undefined && !truncationFallbackUsed) {
+                truncationFallbackUsed = true;
+                wire = nextWire;
+                body = await buildBody(wire);
+                release();
+                release = undefined;
+                continue;
+              }
+            }
+            throw error;
+          }
         }
         const errText = await attempt.text().catch(() => '');
         const retryAfterMs = parseRetryAfterMs(attempt.headers.get('retry-after'));
@@ -1706,35 +1730,8 @@ export class SensenovaAdapter extends LlmAdapter {
         throw httpError(attempt.status, errText, retryAfterMs, dynamicFloorMs, wire, allPoolMarked);
       }
 
-      if (response === undefined) {
-        // 不可达：循环要么 break（成功）要么 throw；仅用于满足明确赋值分析。
-        throw new LlmError('llm-sensenova: SenseNova API returned no response', LLM_CODES.providerProtocolError);
-      }
-      if (response.body === null) {
-        throw new LlmError('llm-sensenova: SenseNova API returned no response body', LLM_CODES.providerProtocolError);
-      }
-      if (wire === 'anthropic') {
-        // 流断尾（无 message_stop）命中即内存级换线降级（2026-10-31 他拍板）：
-        // 平台 anthropic 线时好时坏，与本进程已有的 400 运行时不符标记共用
-        // anthropicUnsupported 集合——本请求内容已流出、不能原地重发（会重复
-        // 输出），抛给宿主重试层；重试与后续请求经 resolveWirePlan 自动走生效链
-        // 下一跳（responses/chat）。标记不持久化，重启清除。
-        try {
-          yield* parseAnthropicSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
-        } catch (error) {
-          if (error instanceof LlmError && error.code === ANTHROPIC_TRUNCATED_CODE && !this.anthropicUnsupported.has(options.model)) {
-            this.anthropicUnsupported.add(options.model);
-            // stop=N：实证「断尾是否伴随 stop 序列」（平台命中 stop_sequence 时
-            // 少发终止事件的假设，跑一段时间即可定论）。
-            traceLog(`[dsh-sensenova-suite] anthropic 流断尾（无 message_stop）model="${options.model}" stop=${options.stop?.length ?? 0}——本进程内标记该模型 anthropic 线不支持，后续请求走生效链下一跳（重启清除）`);
-          }
-          throw error;
-        }
-      } else if (wire === 'responses') {
-        yield* parseResponsesSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
-      } else {
-        yield* parseOpenAiSse(response.body, options.signal, streamIdleMs, options.model, options.sessionId);
-      }
+      // 流式解析已并入上方主循环（0B 断尾换线门需与 400 兜底同门 continue）；
+      // 此处原 post-loop 解析段整体移除（2026-11-05）。
     } finally {
       for (const cleanup of connectCleanups) cleanup();
       release?.();

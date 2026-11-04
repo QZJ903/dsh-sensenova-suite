@@ -1,31 +1,33 @@
 /**
  * One roster row, drawn once for every model list that has one.
  *
- * `ModelRoster` (the Token Plan catalogue) and `RaccoonRoster` (the second
- * upstream's gateway catalogue) draw the SAME row: a two-line block whose head
- * line is a checkbox, the model id, an optional `×N` rate chip, and badges for
- * notable states, over an indented parameter line that quotes only the figures
- * the upstream actually declared.
+ * This component exists because TWO catalogues used to draw this row: the
+ * Token Plan catalogue (`ModelRoster`, still live) and the second upstream's
+ * gateway catalogue (`RaccoonRoster`, removed with the 2026-10 consolidation).
+ * The row is a two-line block whose head line is a checkbox, the model id, an
+ * optional `×N` rate chip, and badges for notable states, over an indented
+ * parameter line that quotes only the figures the platform actually declared.
  *
- * `test/render.test.mjs` pins that shape for BOTH components in one loop, with
- * a comment saying the next change must not "migrate one and forget the rest" —
- * which is precisely the case for one definition instead of two. The drift had
- * already happened, in three places nobody noticed: the Token Plan label ran a
- * 10px gap and the Raccoon one 8px; the rate chip sat INSIDE the label on one
- * side and beside it on the other; and one row pushed its badge right with
- * `flex: "1 1 auto"` on the label while the other hard-coded a spacer. Each is
- * invisible in isolation and permanent once both copies are edited separately.
+ * The drift between the two copies had already happened, in three places
+ * nobody noticed: one label ran a 10px gap and the other 8px; the rate chip
+ * sat INSIDE the label on one side and beside it on the other; and one row
+ * pushed its badge right with `flex: "1 1 auto"` on the label while the other
+ * hard-coded a spacer. Each is invisible in isolation and permanent once both
+ * copies are edited separately — which is precisely the case for one
+ * definition instead of two, and why the shared component outlived its second
+ * consumer (`test/render.test.mjs` pins the row shape).
  *
- * What stays with the CALLER is every domain fact, because that is where the
- * two catalogues genuinely differ: what counts as "on" (`ModelRoster` reads an
- * allow-list; `RaccoonRoster` reads `null` as "the whole roster pushes"), what
- * a zero rate means (`×0` is the operator's own pseudo figure, while the
- * Raccoon gateway's 0 really means free), which tooltip labels that figure,
+ * What stays with the CALLER is every domain fact, because that is where
+ * catalogues genuinely differ: what counts as "on" (`ModelRoster` reads an
+ * allow-list; the Raccoon roster read `null` as "the whole roster pushes"),
+ * what a zero rate means (`×0` is the operator's own pseudo figure, while the
+ * Raccoon gateway's 0 really meant free), which tooltip labels that figure,
  * which badges are notable, and which parameter segments exist at all — the
- * thinking ladder is deliberately absent for the Raccoon provider. This
+ * thinking ladder was deliberately absent for the Raccoon provider. This
  * component therefore takes rendered CONTENT, never a mode flag: a boolean
- * `raccoon` prop would put the two catalogues' wording back in one file, which
- * is the thing being separated.
+ * `raccoon` prop would put two catalogues' wording back in one file, which is
+ * the thing being separated. `ModelRoster` (model-picker.ts) is today's only
+ * consumer.
  * @module dsh-sensenova-suite/model-row
  */
 

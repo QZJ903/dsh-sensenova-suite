@@ -62,7 +62,7 @@ export const CONFIG_DEFAULTS = Object.freeze({
    */
   // 顺序承重：lite 的 id 包含 flash 的 id 作子串，lite 键必须在 flash 键前
   // （首中语义），否则 lite 被 ×1 抢走。
-  trendMultipliers: { "glm-5.2": 15, "kimi-k3": 30, "sensenova-6.8-flash-lite": 0.8, "sensenova-6.8-flash": 1, "deepseek": 1 },
+  trendMultipliers: { "glm-5.2": 15, "glm-5.3": 15, "kimi-k3": 30, "sensenova-6.8-flash-lite": 0.8, "sensenova-6.8-flash": 1, "deepseek": 1 },
   cacheSeconds: 60,
   pollSeconds: 30,
   consoleTimeoutMs: 15_000,

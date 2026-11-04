@@ -3,7 +3,7 @@
  * panel layout — rendered inside the Plugins page, always expanded (there is
  * no sidebar entry and no standalone `main` page).
  *
- * 面板交付面：额度 tab（池/趋势/账号）+ 接入 API tab（key/模型接入/池诊断）。
+ * 面板交付面：额度 tab（池/趋势/账号）+ 接入 API tab（key/模型接入/key 池管理）。
  */
 import {
   AccountForm

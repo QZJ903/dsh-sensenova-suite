@@ -2,13 +2,12 @@
   "name": "dsh-sensenova-suite",
   "displayName": "DSH SenseNova Suite",
   "icon": "./icon.svg",
-  "version": "0.1.53",
-  "description": "SenseNova (Token Plan) all-in-one for DeepSeek Harness: credits panel with usage pill, multi-account key pool with per-credit-group routing, tri-protocol LLM provider (anthropic/responses/chat-completions), image generation/editing tools, and vision relay for text-only models.",
+  "version": "0.1.0",
+  "description": "Multi-account key pool with 429 rate-limit scheduling (RPM/TPM classification, key state machine with kick-out and time-gate recovery, per-credit-group isolation and quota ledger, multi-round rotation/retry with a unified backoff ladder), tri-protocol adapter (anthropic/responses/chat-completions) with per-model protocol downgrade chains, credits and usage monitoring, and multimodal tools (image generation/editing and vision relay)",
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
     "sensenova",
-    "token-plan",
     "credits",
     "quota"
   ],
@@ -125,6 +124,9 @@
     "url": "git+https://github.com/QZJ903/dsh-sensenova-suite.git"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/node": "^26.6.3",
     "jscpd": "^5.4.0",

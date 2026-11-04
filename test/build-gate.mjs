@@ -55,11 +55,11 @@ const check = (name, pass, detail = "") => {
 // resolves into a chunk that is not in the tarball.
 //
 // This is not hypothetical. `lib/` is a CODE-SPLIT graph (`llm-adapter.js`,
-// `raccoon-llm-adapter.js`, … — the names carry no content hash), and the split
+// `tools.js`, … — the names carry no content hash), and the split
 // is load-bearing for LAZINESS, not an accident — `llm-adapter.ts` and
-// `raccoon-llm-adapter.ts`
-// are reached through `import()` so the panel never pays for an adapter it does
-// not use (lib/index.js:4420, :7453). That shape has exactly one bad failure
+// `vision/tools.ts`
+// are reached through `import()` (index.ts:322 / :670) so the panel never pays
+// for an adapter it does not use. That shape has exactly one bad failure
 // mode: add a split module, rebuild, and `git add src/` without `git add lib/`
 // leaves `lib/index.js` importing a chunk that is not in the commit. Node then
 // throws ERR_MODULE_NOT_FOUND at PLUGIN LOAD, inside the user's Host, on the

@@ -10,10 +10,15 @@
  * call site, not here). `test/retry.test.mjs` and `test/contract.test.mjs` pin
  * the code list without importing that peer.
  *
- * The peer classifies a SenseNova 429 into two codes (`isQuotaExceededError` →
- * `rate.?limit` inside `classifyPiAiError`; the resolved policy is pinned by
- * the optional peer block at the end of `test/retry.test.mjs`, a SKIP when the
- * peer is absent):
+ * The host's pi-ai classifier (`classifyPiAiError` in `@deepseek-ai/dsh-llm-pi-ai`)
+ * maps quota-worded failures to `QUOTA` **before** its 429 check — a path this
+ * provider never takes: our adapter throws explicit codes (every 429 shape
+ * leaves in-pool handling as `RATE_LIMIT`; `ACCOUNT_QUOTA` only on the ledger's
+ * group-fully-marked verdict). On this platform the quota-worded 429 bodies
+ * (`insufficient_quota`, `Throttling.AllocationQuota`) are rpm misnomers
+ * (0.1.48 批 A 实测) — the `QUOTA` spelling is reserved with zero producers
+ * here. The resolved policy is pinned by the optional peer block at the end of
+ * `test/retry.test.mjs`, a SKIP when the peer is absent):
  *
  *   - `QUOTA` / `ACCOUNT_QUOTA` — 额度耗尽类，fast-fail and let the panel say
  *     why.（2026-11-03 语义校准：旧注释断言「Token Plan pool is depleted」——但

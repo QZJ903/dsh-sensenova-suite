@@ -7,8 +7,9 @@
  * source label; a new caller copying the shape was the fourth copy and
  * nothing could see them drift. This suite pins the dialect so a caller
  * inventing its own `?? settings.x` precedence is the odd one out — and now
- * pins the no-config-default dialect too: {@link resolveSwitchOff} serves the
- * Raccoon switch (a never-saved `null` falls to `off` with no fallback), so
+ * pins the no-config-default dialect too: {@link resolveSwitchOff} serves a
+ * default-less switch (a never-saved `null` falls to `off` with no fallback) —
+ * the Raccoon switch was its one caller before the 2026-10 consolidation — so
  * that read is a named call rather than a caller's bare comparison.
  */
 import { resolveSwitchEnabled, resolveSwitchValue, switchSource, resolveSwitchOff } from "../src/host/switch-precedence.ts";
@@ -29,7 +30,7 @@ try {
     typeof resolveSwitchEnabled(null, true) === "boolean" &&
       typeof resolveSwitchEnabled(true, false) === "boolean", "");
 
-  // The no-config-default dialect (Raccoon switch): bare panel read, no fallback.
+  // The no-config-default dialect (last caller: the retired Raccoon switch): bare panel read, no fallback.
   check("no-default switch: null panel stays off",
     resolveSwitchOff(null) === false, "null panel, no config default");
   check("no-default switch: false panel stays off",

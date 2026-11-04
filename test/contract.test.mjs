@@ -310,7 +310,7 @@ for (const model of contract.models) {
 // 三发实测（usage.ts 头注）；an 线减法经 2026-11-01 真机探针判定 C 复核（直取
 // 不减），本段 318-321 的钉即其定论。
 {
-  const { mapResponsesUsage, mapAnthropicUsage, mergeUsage } = await import("../src/host/wire/usage.ts");
+  const { mapResponsesUsage, mapChatUsage, mapAnthropicUsage, mergeUsage } = await import("../src/host/wire/usage.ts");
 
   // responses：减法 + 字段条件展开 + total 回退。
   const r1 = mapResponsesUsage({ input_tokens: 4572, output_tokens: 64, total_tokens: 4636,
@@ -321,6 +321,22 @@ for (const model of contract.models) {
   const r2 = mapResponsesUsage({ input_tokens: 100, output_tokens: 10, total_tokens: 0 });
   check("responses usage: total 缺失回退原始 input+output（与平台口径同含缓存）",
     r2.totalTokens === 110 && r2.cacheReadTokens === undefined, JSON.stringify(r2));
+
+  // chat：与 responses 同为 OpenAI 口径——prompt_tokens 含缓存（减法）、details
+  // 嵌套字段、total 回退。U3 审计 T1 前本线映射锁在 peer 门控的 adapter.ts 里
+  // 零直测（U2-T2 同族缺口的三线补齐）。
+  const c1 = mapChatUsage({ prompt_tokens: 100, completion_tokens: 20, total_tokens: 120,
+    prompt_tokens_details: { cached_tokens: 40 }, completion_tokens_details: { reasoning_tokens: 5 } });
+  check("chat usage: input 减缓存读、total 直取平台值、缓存读/推理字段条件展开",
+    c1.inputTokens === 60 && c1.outputTokens === 20 && c1.totalTokens === 120
+      && c1.cacheReadTokens === 40 && c1.reasoningTokens === 5, JSON.stringify(c1));
+  const c2 = mapChatUsage({ prompt_tokens: 10, completion_tokens: 5 });
+  check("chat usage: 无 details 不展开、total 缺失回退原始 prompt+completion",
+    c2.inputTokens === 10 && c2.outputTokens === 5 && c2.totalTokens === 15
+      && c2.cacheReadTokens === undefined && c2.reasoningTokens === undefined, JSON.stringify(c2));
+  const c3 = mapChatUsage({ prompt_tokens: "50", completion_tokens: NaN, total_tokens: -1 });
+  check("chat usage: 非有限数一律 0（toNumber 口径，total≤0 走回退）",
+    c3.inputTokens === 0 && c3.outputTokens === 0 && c3.totalTokens === 0, JSON.stringify(c3));
 
   // anthropic：无 details 嵌套；input_tokens 是未缓存口径（2026-11-01 真机探针
   // 判定 C：input 与 cache_read 并列、118+1536=1654=全量输入）——直取不减；

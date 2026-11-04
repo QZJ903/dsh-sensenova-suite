@@ -21,9 +21,11 @@
  *   2. A whitelisted pair that grows past its line cap fails. Clones tend to
  *      accrete; the cap forces the accretion to show up as a red gate instead
  *      of silently re-creating the pre-§343 state.
- *   3. Raccoon-vs-Token-Plan cross-boundary clones are called out in the
- *      failure message even when whitelisted, so the reviewer sees the
- *      invariant that is being spent.
+ *   3. (历史) Raccoon-vs-Token-Plan cross-boundary clones were the failure this
+ *      gate was built for (§343); those pairs left the whitelist with the
+ *      second upstream's removal, and today's whitelist admits only
+ *      intra-suite wire pairs — the invariant the rule guarded is now the
+ *      wire-三线 boundary.
  *   4. A whitelisted pair that no longer appears — the files were renamed, or
  *      the duplication was genuinely removed — fails as well. Otherwise an
  *      entry rots into a silent no-op: its cap is never enforced, while it

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "商汤套件",
-    "description": "商汤 Token Plan 聚合套件 for DeepSeek Harness：积分面板与用量胶囊、按积分组路由的多账号 key 池、三协议 LLM 接入（anthropic/responses/chat-completions）、出图与图片编辑工具、纯文本模型的图片转述。"
+    "description": "多账号 Key 池与 429 限流调度（RPM/TPM 限流分类、Key 状态机踢出与时间门恢复、积分组隔离与额度账本、多轮轮换重试与统一退避梯）、三协议适配（Anthropic / Responses / Chat Completions）与协议降级链、积分用量监控及多模态工具（出图 / 图片转述）。"
   }
 }

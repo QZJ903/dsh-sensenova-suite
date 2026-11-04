@@ -125,7 +125,7 @@ const healthy = {
 // === B3. a console-less snapshot degrades, not dead-ends ==================
 // The Host answers `ok:true` with an in-body `quotaError` when the console is
 // unreachable (no account, a rejected token, the console down): the panel
-// must keep rendering the tabs (the API and Raccoon tabs are independent of
+// must keep rendering the tabs (the api and multimodal tabs are independent of
 // the console) and keep the account editor reachable on the quota tab —
 // never a full-screen dead end.
 {
@@ -351,10 +351,9 @@ const healthy = {
     // the expression.
     for (const m of text.matchAll(/["'`]([a-z][\w]*(?:\.[\w-]+)+)["'`]/g)) usedKeys.add(m[1]);
     // Tables whose VALUES are dictionary keys: `GUIDANCE_BY_CODE` /
-    // `REFUSAL_TEXT` in `snapshot.ts` map a wire code or a tab id to a key
-    // (typed `Record<string, DictionaryKey>`), and `raccoon-tab`/`panel-page`
-    // map tab ids the same way. Those literals are consumed at runtime through
-    // the table, so the scans above cannot see them.
+    // `REFUSAL_TEXT` in `snapshot.ts` map a wire code to a key (typed
+    // `Record<string, DictionaryKey>`). Those literals are consumed at runtime
+    // through the table, so the scans above cannot see them.
     for (const m of text.matchAll(/:\s*"([a-z][\w]*(?:\.[\w-]+)+)"/g)) usedKeys.add(m[1]);
   }
   const unused = zhKeys.filter((key) => !usedKeys.has(key) && !DYNAMIC.has(key) && !key.startsWith("llm.level."));
@@ -399,9 +398,10 @@ const healthy = {
 // 1-second countdown timer is unrelated to polling and may stay a literal.
 {
   // The cadence machinery now lives in `use-remote-read.ts`, the polling core
-  // BOTH readers drive (`useSnapshotPolling` for the quota panel,
-  // `useRaccoonBalance` in the composer pill), and the visibility/back-off loop
-  // is the shared `use-polling-interval.ts` (the Raccoon tab drives it too), so
+  // BOTH readers drive (the quota panel and the composer pill each run
+  // `useSnapshotPolling`), and the visibility/back-off loop
+  // is the shared `use-polling-interval.ts` (the Raccoon tab drove it too,
+  // before the 2026-10 consolidation removed it), so
   // the literal-free cadence assertion follows the loop and the "one loop" check
   // follows the core. Same rules, new homes: the checks are about "the timer
   // takes a STATED cadence" and "no surface grows a private timer", wherever
@@ -441,8 +441,9 @@ const healthy = {
   // The INITIAL cadence — what the first frame polls at, before any snapshot
   // has stated one — is the other literal the Host owns too:
   // `CONFIG_DEFAULTS.pollSeconds` is the number every snapshot states. The
-  // raccoon tab's fallback is pinned to the route's constant by
-  // `raccoon-status.test.mjs` B8; this one was left unpinned, so retuning the
+  // raccoon tab's fallback was pinned to the route's constant by
+  // `raccoon-status.test.mjs` B8 (that suite retired with the second
+  // upstream); this one was left unpinned, so retuning the
   // Host default left the quota tab polling at the old rate with nothing red.
   // The literal carries an underscore (`30_000`), the repo's own convention
   // for thousands in a number literal, which also anchors this to the cadence
@@ -500,12 +501,12 @@ const healthy = {
 }
 
 // === F5b. the composer pill's provider ids are the Host's own ==============
-// The pill sorts models into two buckets by the provider id (suite vs.
-// Raccoon) — that attribution is what keeps the two data sources from bleeding
-// into each other. The ids are declared ONCE in the Host's model tables, but
+// The pill renders only for the suite's provider id and returns null for
+// every other provider — that gate is what keeps foreign conversations free
+// of a credit readout. The id is declared ONCE in the Host's model tables, but
 // the pill carries its own literal; a drift there would silently file every
-// suite model under a foreign readout and no suite would go red. Pin the
-// copy to the Host's declaration.
+// suite model under a foreign readout (or strip the readout) and no suite
+// would go red. Pin the copy to the Host's declaration.
 {
   const pill = await readFile(new URL("../src/client/composer-usage-pill.ts", import.meta.url), "utf8");
   const own = (name) => pill.match(new RegExp(`const\\s+${name}\\s*=\\s*"([^"]+)"`))?.[1];

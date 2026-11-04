@@ -33,7 +33,7 @@
  * `--only` / `--skip` give the rule a first-class form:
  *
  *   node test/run-all.mjs --only=parsers     # one domain
- *   node test/run-all.mjs --only=raccoon    # everything with a prefix
+ *   node test/run-all.mjs --only=pool       # everything with a prefix
  *   node test/run-all.mjs --skip=gate       # drop the slow build-shaped gates
  *   node test/run-all.mjs --list            # the roster, no execution
  *
@@ -75,8 +75,8 @@ const skip = flag("skip");
  * Select the roster for this run.
  *
  * `only` and `skip` are SUBSTRING matches, not globs or regexes: a contributor
- * typing `--only=raccoon` should get the four raccoon suites without knowing
- * whether one of them is spelled `raccoon-web`. An empty `--only=` or
+ * typing `--only=pool` should get the pool and pool-route suites without
+ * knowing whether one of them is spelled `pool-route`. An empty `--only=` or
  * `--skip=` is treated as "no filter" rather than "match nothing", so a stray
  * env expansion cannot silently produce an empty green run — that is precisely
  * the failure mode of the chain it replaces (a gate that verifies nothing

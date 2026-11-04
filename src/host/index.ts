@@ -555,11 +555,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     poolRefresh: refreshPoolRecord,
     poolSnapshot: async () => {
       const keys = await poolKeyRows();
-      const snap = orchestrator.snapshot(); // 一次取用：poolGrid 与 inflight 同帧（U4 顺带⑤）
       return {
         keys,
-        poolGrid: snap.poolGrid,
-        inflight: snap.inflight,
         modelProtocols: poolRecord.modelProtocols,
         globalConcurrency: effectiveConcurrency(),
         // 多模态面板设置（已保存值；面板以此渲染控件初值）。vision/thinking

@@ -115,26 +115,24 @@ const { toResponsesInput } = await import("../src/host/wire/body-responses.ts");
     const shape = (wire, reason, chain) =>
       JSON.stringify([wire, reason, chain]);
 
-    // 档案默认链：全模型统一 an>re>chat（2026-11-04 他拍板倒序——re 推理档位
-    // 传入无效）起步即 anthropic。须传已知模型（factsFor("m") 是未知模型、能力
-    // 面只有 chat，恒落兜底）——此钉此前未传，出生即红，被 call_id 块的
-    // TypeError 挡住从未暴露。
-    check("a standard model walks its an>re>chat default and serves anthropic",
+    // 档案默认链：全模型统一 chat 单线（2026-11-05 他拍板——an 线 0B 空流断尾
+    // 真机高频，0.1.49 的 an 首发被推翻）。须传已知模型（factsFor("m") 是未知
+    // 模型、能力面只有 chat，恒落兜底）。
+    check("a standard model walks its chat default and serves chat-completions",
       shape(resolve(opts(), {}, undefined, {}, "deepseek-flash").wire, resolve(opts(), {}, undefined, {}, "deepseek-flash").reason, resolve(opts(), {}, undefined, {}, "deepseek-flash").chain)
-        === shape("anthropic", "anthropic-default", ["anthropic", "responses", "chat-completions"]),
+        === shape("chat-completions", "chat-default", ["chat-completions"]),
       JSON.stringify(resolve(opts(), {}, undefined, {}, "deepseek-flash")));
 
-    // kimi/glm 档案默认链与标准链同形（2026-10-31 加回 anthropic 撤销分岔；
-    // 2026-11-04 随标准链倒序为 an>re>chat）。钉「不分岔」本身。
+    // kimi/glm 档案默认链与标准链同形（钉「不分岔」本身）。
     const kimi = resolve(opts(), {}, undefined, {}, "kimi-k3");
-    check("kimi's facts default chain is the standard (anthropic restored, no fork)",
+    check("kimi's facts default chain is the standard (no fork)",
       shape(kimi.wire, kimi.reason, kimi.chain)
-        === shape("anthropic", "anthropic-default", ["anthropic", "responses", "chat-completions"]),
+        === shape("chat-completions", "chat-default", ["chat-completions"]),
       JSON.stringify(kimi));
     const glm = resolve(opts(), {}, undefined, {}, "glm-5.2");
     check("glm's facts default chain is the standard too (no fork)",
       shape(glm.wire, glm.reason, glm.chain)
-        === shape("anthropic", "anthropic-default", ["anthropic", "responses", "chat-completions"]),
+        === shape("chat-completions", "chat-default", ["chat-completions"]),
       JSON.stringify(glm));
 
     // 面板覆盖三层之首：单线链钉死；显式加回 anthropic 也照走。
@@ -224,10 +222,10 @@ const { toResponsesInput } = await import("../src/host/wire/body-responses.ts");
       JSON.stringify(mixedBody.messages));
 
     // 非法覆盖回落档案默认；能力门跳过链上能力外的线后兜底。
-    // 期望三线 = 2026-11-04 拍板（全模型统一 an>re>chat）。
+    // 期望单线 chat = 2026-11-05 拍板（全模型统一 chat 单线）。
     const junk = resolve(opts(), {}, ["nope", 42], {}, "kimi-k3");
     check("a junk override falls through to the facts default chain",
-      junk.wire === "anthropic" && JSON.stringify(junk.chain) === JSON.stringify(["anthropic", "responses", "chat-completions"]),
+      junk.wire === "chat-completions" && JSON.stringify(junk.chain) === JSON.stringify(["chat-completions"]),
       JSON.stringify(junk));
     const gated = resolve(opts(), {}, ["anthropic"], {}, "unknown-model-x");
     check("a wire outside supportedWires is skipped, then the chat fallback serves",

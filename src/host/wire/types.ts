@@ -14,11 +14,11 @@ export interface ModelFacts {
   supportedWires: readonly WireKind[];
   /**
    * 本模型的默认降级链（协议策略层）：面板覆盖缺席时的生效链。全模型统一
-   * an>re>chat（2026-11-04 用户拍板：responses 线推理档位传入无效——文档称
-   * 兼容 low/medium/high/xhigh，实际后台恒用 high——档位保真优先走 an；an 的
-   * 空流/断尾由运行时降级兜底，不档案层预防。2026-10-31 曾定 re>an>chat）。
-   * 能力面（supportedWires）不受影响。链走查仍与 supportedWires 求交：链上
-   * 声明了能力不存在的线会被跳过。
+   * chat 单线（2026-11-05 用户拍板：an 线 0B 空流断尾真机高频——分模型、分
+   * 上游，0.1.49 的「an 首发保档位」被可靠性代价推翻；an/re 由用户按模型在
+   * 面板自调。历史：2026-10-31 re>an>chat → 2026-11-04 an>re>chat → 2026-11-05
+   * chat）。能力面（supportedWires）不受影响。链走查仍与 supportedWires 求交：
+   * 链上声明了能力不存在的线会被跳过。
    */
   defaultChain: readonly WireKind[];
   /** 推理档位 wire 原值（按文档参数表权威列）；空数组 = 未知/不支持声明。 */

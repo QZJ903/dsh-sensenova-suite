@@ -1,7 +1,8 @@
 /**
  * Block 4 of the token-store split: the sign-in refusal state machine.
- * Owns the throttle's read/write/clear and the local backoff doubling.
- * record adoption, and the refusal-shape error synthesis.
+ * Owns the throttle's read/write/clear, the local backoff doubling, and the
+ * refusal-shape error synthesis. （credentials-record 收编通道已随 2026-10-29
+ * 「无存量用户，迁移代码是纯负债」拍板退役，本模块不再有 adoption。）
  *
  * No state of its own; operates on the shared context from `state.ts`.
  *

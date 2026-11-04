@@ -114,7 +114,7 @@ export default defineConfig([
     deps: { neverBundle: ["react"] },
     outputOptions: {
       entryFileNames: "client.js",
-      name: "dsh_connect_sensenova_token_plan_client",
+      name: "dsh_connect_sensenova_suite_client",
     },
     // outDir is the repo root (the artifact lives at the package root by
     // contract), so tsdown's clean must never run here.

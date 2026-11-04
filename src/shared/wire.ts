@@ -182,10 +182,6 @@ export interface PoolKeyData {
 /** Key 池诊断块（只读——账号在 cordis.patch.yml 配，面板只看与管理）。 */
 export interface PoolDiagData {
   keys: PoolKeyData[];
-  /** (key,组) 池耗尽格子的组侧摘要（key 段经 maskKey 打码：首 5 + 点串 + 尾 3，短键全遮；组名保留）。 */
-  poolGrid: string[];
-  /** 当前全局在途请求数。 */
-  inflight: number;
   /** 生效中的全局并发数（面板保存值 ?? 配置 ?? key 数）。 */
   globalConcurrency: number;
   /** 多模态面板已保存设置（仅面板改过的键；未设键回落配置）。 */

@@ -13,8 +13,7 @@
  *   - parseRetryAfterMs 秒数与 HTTP 日期两形态；
  *   - KeyOrchestrator：按组亲和（商汤组粘、通用组轮）、(key,组) 池格跳过
  *     与 groupFullyPoolMarked、连续 rate 踢出（阈值 3）、探测到期恢复、
- *     全局槽排队（含中止不占额度）、refreshKeys 重种（新增入池/消失摘出/存量相位保留）、
- *     snapshot().poolGrid 诊断投影打码（key 段过 maskKey、组名保留，U4-D1）；
+ *     全局槽排队（含中止不占额度）、refreshKeys 重种（新增入池/消失摘出/存量相位保留）；
  *   - normalizeAccounts / normalizeModelGroups 的丢弃与回落。
  */
 import { strict as assert } from "node:assert";
@@ -76,6 +75,16 @@ try {
   check("insufficient_quota → rate-soft/rpm（quota:true，3s 起分级）", aliasQuota.quota === true && aliasQuota.kind === "rate-soft" && aliasQuota.bucket === "rpm" && aliasQuota.retryFloorMs === 3_000, JSON.stringify(aliasQuota));
   const aliasFull = classify429Full('{"error":{"code":"insufficient_quota","message":"inference exceeds tpm/rpm limit"}}');
   check("insufficient_quota 全链分类 → rate-soft（rpm 桶不计踢）", aliasFull.kind === "rate-soft" && aliasFull.bucket === "rpm" && aliasFull.retryFloorMs === 3_000, JSON.stringify(aliasFull));
+  // Anthropic 线限流（无数字 code、error.type 表达——/v1/messages 方言）：2026-11-05
+  // 用户真机样本（type=rate_limit_error + "inference exceeds tpm/rpm limit"）定性
+  // rpm（与 insufficient_quota 同 message 同桶）→ rate-soft/rpm 不计踢（U3-D3
+  // 判据同源收编）。数字 code 体优先走 code 分支：429001=tpm 不被同 type 劫持。
+  const anLine = classify429Body('{"error":{"type":"rate_limit_error","message":"inference exceeds tpm/rpm limit"}}');
+  check("an 线限流（无 code，type=rate_limit_error）→ rate-soft/rpm（不计踢）", anLine.quota === true && anLine.kind === "rate-soft" && anLine.bucket === "rpm" && anLine.retryFloorMs === 3_000, JSON.stringify(anLine));
+  const anLineOther = classify429Body('{"error":{"type":"api_error","message":"x"}}');
+  check("an 线其他 type（无 code）→ unknown 兜底轮池", anLineOther.kind === undefined && anLineOther.quota === false, JSON.stringify(anLineOther));
+  const codeBeatsType = classify429Full('{"error":{"code":429001,"type":"rate_limit_error"}}');
+  check("数字 code 优先于同 type：429001 仍 rate-tpm", codeBeatsType.kind === "rate-tpm" && codeBeatsType.bucket === "tpm", JSON.stringify(codeBeatsType));
   const aliasMsgOnly = classify429Full('{"error":{"code":1213,"message":"insufficient_quota"}}');
   check("insufficient_quota 只出现在 message（code 不认识）→ 不归 pool（unknown 兜底）", aliasMsgOnly.kind === "unknown", JSON.stringify(aliasMsgOnly));
   // 踢出阈值单一判据（2026-11-02 定稿：按桶）：只有 TPM 桶计数；RPM 桶
@@ -218,17 +227,6 @@ try {
   orch.reportPoolExhausted(orch.snapshot().blocked[0]?.key ?? "", "flash-lite");
   check("groupFullyPoolMarked：全池标记后为真", orch.groupFullyPoolMarked("flash-lite") === true);
   check("groupFullyPoolMarked：general 组不受影响", orch.groupFullyPoolMarked("general") === false);
-
-  // 3f-b. 诊断投影打码（U4-D1）：snapshot().poolGrid 的 key 段过 maskKey 再出
-  // （shared/wire.ts PoolDiagData 契约），内部判据串不受影响——上一行全标判据
-  // 在同一份内部 Map 上依旧为真。钉投影形状：含 maskKey 点串、无 key 原文、组名段保留。
-  const maskedGrid = orch.snapshot().poolGrid;
-  check("poolGrid 投影非空且 key 段已打码（含 maskKey 点串 U+00B7）",
-    maskedGrid.length > 0 && maskedGrid.every((mark) => mark.includes("\u00B7")), JSON.stringify(maskedGrid));
-  check("poolGrid 投影不含 key 原文",
-    maskedGrid.every((mark) => !mark.includes(poolVictim)), JSON.stringify(maskedGrid));
-  check("poolGrid 投影组名段保留",
-    maskedGrid.every((mark) => mark.endsWith("\u0000flash-lite")), JSON.stringify(maskedGrid));
 
   // 3g. 401 永久移除。
   const before = orch.snapshot();

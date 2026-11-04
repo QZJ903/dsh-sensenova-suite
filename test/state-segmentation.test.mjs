@@ -3,7 +3,7 @@
  * deliberately shared.
  *
  * The rule (docs/PITFALLS.md §23): the three *switch-shaped* states — catalog,
- * provider switch, draw switch — and the Raccoon opt-in switch are per-profile
+ * provider switch, draw switch — are per-profile
  * (`$DSH_HOME/state/<profile>/<name>/`), derived from `profileContext.name`; a
  * `null` profile degrades to today's single shared directory. Two states are
  * intentionally NOT partitioned: the throttle (cross-profile so the same key

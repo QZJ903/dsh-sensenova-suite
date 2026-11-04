@@ -545,18 +545,11 @@ export class KeyOrchestrator {
     return released;
   }
 
-  /** 诊断快照（设置页/日志用）。poolGrid 是诊断投影：key 段经 maskKey 打码再出
-   * （shared/wire.ts PoolDiagData 契约「打码」；2026-11-03 U4 审计 D1——此前投影把
-   * 池格内部原文串（完整 key + NUL 分隔 + 组名）直接吐进了面板快照响应）。内部
-   * 判据（gridMarked / reportPoolExhausted / clearPoolCell）仍用原文串，行为不受影响。 */
-  snapshot(): KeyPoolSnapshot & { poolGrid: string[]; inflight: number } {
-    return {
-      ...this.pool.snapshot(),
-      poolGrid: [...this.poolGrid.keys()].map((mark) => {
-        const sep = mark.indexOf("\u0000");
-        return sep < 0 ? maskKey(mark) : `${maskKey(mark.slice(0, sep))}\u0000${mark.slice(sep + 1)}`;
-      }),
-      inflight: this.inflight,
-    };
+  /** 诊断快照。inflight 留作在途计数的测试观察面（pool.test 3h-b 中止/守恒钉的
+   * 唯一读口）；poolGrid 投影已整删（2026-11-05 他拍板）——wire 上零消费的死字段
+   * （U4-D1 打码修的是秘，不是死）。池格内部 Map 与判据
+   * （gridMarked / reportPoolExhausted / clearPoolCell，原文串）不受影响。 */
+  snapshot(): KeyPoolSnapshot & { inflight: number } {
+    return { ...this.pool.snapshot(), inflight: this.inflight };
   }
 }

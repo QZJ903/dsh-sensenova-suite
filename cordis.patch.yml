@@ -24,7 +24,7 @@
         # 键要写窄到实测的那一个型号：写 "sensenova" 会把没测过的型号全部搭车
         # （2026-11-03 收窄）。顺序承重：lite 的 id 包含 flash 的 id 作子串，
         # lite 键必须排在 flash 键前面，否则 lite 被 ×1 首中。
-        trendMultipliers: { "glm-5.2": 15, "kimi-k3": 30, "sensenova-6.8-flash-lite": 0.8, "sensenova-6.8-flash": 1, "deepseek": 1 }
+        trendMultipliers: { "glm-5.2": 15, "glm-5.3": 15, "kimi-k3": 30, "sensenova-6.8-flash-lite": 0.8, "sensenova-6.8-flash": 1, "deepseek": 1 }
 
         # 每次控制台请求的结果缓存秒数。
         cacheSeconds: 60
@@ -42,8 +42,8 @@
         # ── Key 池：多账号轮转 / 按积分组路由 / 全局并发 ──────────────────────
 
         # 多账号清单：每项 { id, label, apiKeyRef }；apiKeyRef 是 DSH 凭据服务
-        # 的 ref 名。解析失败的条目静默跳过。面板保存的默认 key 始终作为第一把
-        # 参与轮转，不必在此重复。
+        # 的 ref 名。解析失败的条目静默跳过。面板保存的 key 与这些账号一样进池
+        # 轮转（池内人人平等，无主 key 特权），不必在此重复。
         # accounts: []
         #   - id: backup
         #     label: Backup
@@ -75,10 +75,8 @@
         img2imgModel: sensenova-u1.5-lite
         imageTimeoutMs: 180000
 
-        # 视觉转述模型（单模型；429 走池教义）、图片传输模式（base64 为遗留兼容）
-        # 与单次转述超时。
+        # 视觉转述模型（单模型；429 换 key 保服务、不打格不记账）与单次转述超时。
         visionModel: sensenova-6.8-flash-lite
-        visionImageMode: image_url
         visionTimeoutMs: 120000
 
         # 视觉转述附加提示词；空 = 用内置。

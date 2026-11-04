@@ -1,4 +1,4 @@
-var dsh_connect_sensenova_token_plan_client = (function() {
+var dsh_connect_sensenova_suite_client = (function() {
 
 //#region \0rolldown/runtime.js
 	var __esmMin = (fn, res, err) => () => {
@@ -127,7 +127,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.switchBusy": "切换中…",
 			"llm.switchError": "切换失败：{error}",
 			"llm.roster": "推送到 DSH 的模型",
-			"llm.rosterHint": "勾选 / 选择只改本地草稿：需要按「保存」才会推到 DSH；「撤销」回到上次保存值。目录新增的模型默认不推送。模型「最大输出」与「上下文长度」可在插件根目录的 cordis.patch.yml（maxTokensOverrides / contextWindowOverrides）调整。",
+			"llm.rosterHint": "勾选 / 选择只改本地草稿：需要按「保存」才会推到 DSH；「撤销」回到上次保存值。模型「最大输出」与「上下文长度」可在插件根目录的 cordis.patch.yml（maxTokensOverrides / contextWindowOverrides）调整。",
 			"llm.rosterEmpty": "还没有可推送的模型——先在「API Key」卡片保存一次 Key 再回来。",
 			"llm.catalogError": "模型目录未拉取：{message}",
 			"llm.rosterSearchPlaceholder": "搜索模型名或 ID",
@@ -143,7 +143,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterNoMatch": "没有匹配的模型。",
 			"llm.rosterVision": "可看图",
 			"llm.rosterThinking": "模型设置",
-			"llm.settingsHint": "默认配置已按各模型能力完成，无需调整。『可看图』仅限具备原生看图能力的模型勾选；若为无法看图的模型勾选，图片既无法被识别，也不会被转述。新模型上架后，如需启用再在此处补充勾选。",
+			"llm.settingsHint": "默认配置已按各模型能力完成，无需调整。『可看图』仅限具备原生看图能力的模型勾选；若为无法看图的模型勾选，图片既无法被识别，也不会被转述。新模型上架后按默认生效：思考档位用默认档，可看图由目录自动勾选；要改默认待遇再在此处调整。",
 			"llm.rosterThinkingLevels": "思考档位",
 			"llm.rosterExhausted": "额度耗尽",
 			"llm.rosterRateTitle": "积分消耗伪倍率（自定义对比用，非官方）",
@@ -294,7 +294,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.switchBusy": "Switching…",
 			"llm.switchError": "Switch failed: {error}",
 			"llm.roster": "Models pushed to DSH",
-			"llm.rosterHint": "Ticking or picking edits a local draft only: nothing reaches DSH until you hit Save; Discard returns to the last saved values. Models the catalogue gains later are not pushed by default. A model's max output and context window are tunable via maxTokensOverrides / contextWindowOverrides in the plugin root's cordis.patch.yml.",
+			"llm.rosterHint": "Ticking or picking edits a local draft only: nothing reaches DSH until you hit Save; Discard returns to the last saved values. A model's max output and context window are tunable via maxTokensOverrides / contextWindowOverrides in the plugin root's cordis.patch.yml.",
 			"llm.rosterEmpty": "No models to push yet — save a key in the API key card first.",
 			"llm.catalogError": "Model catalogue not fetched: {message}",
 			"llm.rosterSearchPlaceholder": "Search a model name or id",
@@ -310,7 +310,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"llm.rosterNoMatch": "No model matches.",
 			"llm.rosterVision": "vision",
 			"llm.rosterThinking": "model settings",
-			"llm.settingsHint": "Defaults are preconfigured per model capability; no adjustment needed. \"vision\" is only for models with native vision — checking it on a model that cannot see images means the image is neither recognized nor relayed. When a new model arrives, tick it here if needed.",
+			"llm.settingsHint": "Defaults are preconfigured per model capability; no adjustment needed. \"vision\" is only for models with native vision — checking it on a model that cannot see images means the image is neither recognized nor relayed. A newly arrived model takes effect with its defaults: thinking uses the default level, vision is auto-ticked from the catalogue; adjust here only to change that.",
 			"llm.rosterThinkingLevels": "thinking levels",
 			"llm.rosterExhausted": "quota exhausted",
 			"llm.rosterRateTitle": "Pseudo credit multiplier (custom comparison aid, not official)",
@@ -2366,6 +2366,21 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 
 //#endregion
 //#region src/client/api-key-form.ts
+/** 保存失败的错误文案判据（U11-D2 三处同款的抽出版，U11-T3 落钉）：旧 Host
+	* 构建的 non-JSON 4xx 给换路由文案，其余原样上屏、空消息/非 Error 回落网络
+	* 文案。act() 与 saveConcurrency 共用这一个判定，两处不会再各写一份漂移。 */
+	function errorMessageFrom(caught, fallback, routeMissing) {
+		const message = caught instanceof Error ? caught.message : "";
+		return /non-JSON HTTP 4\d\d/.test(message) ? routeMissing : message || fallback;
+	}
+	/** 并发框回车动作（U11-D3 拍板「回车=保存」的抽出版，U11-T3 落钉）：Enter
+	* 一律 preventDefault（防冒泡外层 form 的隐式提交——空 apiKey 会误报
+	* 「请输入 sk- 开头的 API Key」，同 2026-10-25 备注框实测过的坑），dirty 才
+	* 真正保存。 */
+	function concurrencyEnterAction(key, dirty) {
+		if (key !== "Enter") return "none";
+		return dirty ? "save" : "swallow";
+	}
 	function ApiKeyForm({ llm, pool, onDone, tt }) {
 		const [apiKey, setApiKey] = useState("");
 		const [showKey, setShowKey] = useState(false);
@@ -2519,8 +2534,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				onDone?.();
 				return true;
 			} catch (caught) {
-				const message = caught instanceof Error ? caught.message : "";
-				setError(/non-JSON HTTP 4\d\d/.test(message) ? tt("poolMng.routeMissing") : message || tt("auth.network"));
+				setError(errorMessageFrom(caught, tt("auth.network"), tt("poolMng.routeMissing")));
 				return false;
 			} finally {
 				setBusyId(null);
@@ -2561,8 +2575,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				setConcurrency(null);
 				onDone?.();
 			} catch (caught) {
-				const message = caught instanceof Error ? caught.message : "";
-				setError(/non-JSON HTTP 4\d\d/.test(message) ? tt("poolMng.routeMissing") : message || tt("auth.network"));
+				setError(errorMessageFrom(caught, tt("auth.network"), tt("poolMng.routeMissing")));
 			}
 		}, [
 			concurrencyValue,
@@ -2598,10 +2611,10 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			disabled: busyId !== null,
 			onChange: (event) => setConcurrency(Math.max(0, Math.floor(Number(event.target.value) || 0))),
 			onKeyDown: (event) => {
-				if (event.key === "Enter") {
-					event.preventDefault?.();
-					if (concurrencyDirty) saveConcurrency();
-				}
+				const action = concurrencyEnterAction(event.key, concurrencyDirty);
+				if (action === "none") return;
+				event.preventDefault?.();
+				if (action === "save") saveConcurrency();
 			}
 		}), concurrencyDirty ? h("button", {
 			type: "button",

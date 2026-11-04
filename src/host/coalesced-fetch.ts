@@ -138,7 +138,8 @@ export function createCoalescedFetch(options: {
   /**
    * Read one key through the cache, coalescing concurrent misses.
    * @param {string} key - the cache key (a URL, or a key carrying a
-   *   credential fingerprint — see the raccoon route).
+   *   credential fingerprint — console-client's
+   *   `${url}@${credentialFingerprint(...)}` keys).
    * @param {() => Promise<unknown>} producer - what to call on a miss.
    * @param {number} ttlMs - how long an answer stays fresh (`0` = never
    *   reuse; the single-flight sharing still applies).

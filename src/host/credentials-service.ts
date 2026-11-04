@@ -1,11 +1,13 @@
 /**
- * The DSH credentials service, resolved on every use — one source for the three
- * stores that reach it (`token-store`, `api-key-store`, `raccoon-store`).
+ * The DSH credentials service, resolved on every use — one source for the one
+ * store that still reaches it (`token-store`; the pool keys are panel-entered,
+ * and the `api-key-store` / `raccoon-store` consumers left with the 2026-10
+ * consolidation and the 0.1.47 main-key teardown).
  *
- * The wiring hands each store either the service itself (tests) or a resolver
+ * The wiring hands the store either the service itself (tests) or a resolver
  * FUNCTION (production, where the service is looked up per use because it may
- * register AFTER this plugin mounts). That 4-line idiom was copied verbatim into
- * all three stores, and a copy in this domain has already drifted once in
+ * register AFTER this plugin mounts). That 4-line idiom used to be copied
+ * verbatim into three stores, and a copy in this domain drifted once in
  * silence (`fakes.mjs`'s fixture, where `v !== ""` and `v.length > 0` had
  * quietly diverged), so it lives here instead.
  *
@@ -36,7 +38,7 @@ export function resolveCredentialsService(credentials: unknown) {
 /**
  * True while nothing written through the store would survive a restart.
  *
- * Read by the panel-facing state of all three stores (`ephemeral`), which is why
+ * Read by the panel-facing state of the store (`ephemeral`), which is why
  * it is defined against the same resolver: a store that answered `false` here
  * while reading through the in-memory vault would tell the user their credential
  * was saved when the next restart will not find it.

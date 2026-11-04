@@ -19,11 +19,13 @@
  * Math.max(0,…) 钳成 0。an 线 inputTokens **直取 input_tokens**；totalTokens =
  * input + cacheRead + cacheWrite + output（含缓存全口径，与 chat/responses 的
  * 平台 total 对齐——cache_write 按 Anthropic 规范与 input 并列）。
- * chat 线（adapter mapUsage）：cached_tokens 在 prompt_tokens_details 里、
- * prompt_tokens 含缓存（OpenAI 口径），减法正确，不受本定论影响。
+ * chat 线 mapChatUsage（本模块，U3-T1 从 adapter 抽出）：cached_tokens 在
+ * prompt_tokens_details 里、prompt_tokens 含缓存（OpenAI 口径），减法正确，
+ * 不受本定论影响。
  *
  * 本模块零运行时依赖（peer-free，contract 套件直测三线映射——U2 审计 T2：
- * 此前三线 usage 零钉，responses/an 两线映射还锁在 peer 门控块可达面之外）。
+ * 此前三线 usage 零钉，responses/an 两线映射还锁在 peer 门控块可达面之外；
+ * chat 线同样直至 U3-T1 抽出才有直测）。
  * @module dsh-sensenova-suite/wire/usage
  */
 import type { TokenUsage } from '@deepseek-ai/dsh-llm';
@@ -55,6 +57,29 @@ export function mapResponsesUsage(usage: Record<string, unknown>): TokenUsage {
     inputTokens: Math.max(0, input - cacheRead),
     outputTokens: output,
     totalTokens: total > 0 ? total : input + output,
+    ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
+    ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
+  };
+}
+
+/** chat 线（OpenAI chat-completions）usage → 宿主 TokenUsage。从 adapter.ts
+ * 挪入（U3 审计 T1：chat 线 usage 映射零直测）。字段：prompt_tokens **含**缓存
+ * （OpenAI 口径，与 responses 线同）——减去 prompt_tokens_details.cached_tokens
+ * 对齐宿主 inputTokens 的「未缓存输入」语义；completion_tokens_details.
+ * reasoning_tokens → reasoningTokens；total 直取平台值、缺失回退 input+output。
+ */
+export function mapChatUsage(usage: Record<string, unknown>): TokenUsage {
+  const prompt = toNumber(usage.prompt_tokens);
+  const completion = toNumber(usage.completion_tokens);
+  const total = toNumber(usage.total_tokens);
+  const promptDetails = isRecord(usage.prompt_tokens_details) ? usage.prompt_tokens_details : undefined;
+  const completionDetails = isRecord(usage.completion_tokens_details) ? usage.completion_tokens_details : undefined;
+  const cacheRead = promptDetails !== undefined ? toNumber(promptDetails.cached_tokens) : 0;
+  const reasoning = completionDetails !== undefined ? toNumber(completionDetails.reasoning_tokens) : 0;
+  return {
+    inputTokens: Math.max(0, prompt - cacheRead),
+    outputTokens: completion,
+    totalTokens: total > 0 ? total : prompt + completion,
     ...(cacheRead > 0 ? { cacheReadTokens: cacheRead } : {}),
     ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
   };
