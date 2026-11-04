@@ -293,9 +293,9 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
   const imageCard = (tool: "text2img" | "img2img", title: string, description: string, modelFallback: string) => h(
     SectionCard,
     { title, description, open: openCards[tool] !== false, onToggle: () => toggleCard(tool), tt },
-    // 开关写进 toolsEnabled 分区（宿主注册 gating 只认 toolsEnabled.text2img /
-    // toolsEnabled.img2img）。写进 text2img.enabled 会被 readImage 白名单丢弃，
-    // 工具永不注册 —— 2026-10-25 修的「按了开启没反应」根因。
+    // 开关写进 toolsEnabled 分区（宿主注册 gating 是 tri-state：存过值听面板、
+    // 没存过回落 patch 默认——U12-D1 案 A 2026-11-04）。写进 text2img.enabled
+    // 会被 readImage 白名单丢弃，工具永不注册 —— 2026-10-25 修的「按了开启没反应」根因。
     switchRow("toolsEnabled", tool, tt("mm.enabled"), true),
     modelSelect(tool, tt("mm.defaultModel"), imageModels, modelFallback),
     selectRow(tool, "size", tt("mm.size"), IMAGE_SIZES.map(([value]) => value), "auto",

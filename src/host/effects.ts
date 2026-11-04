@@ -91,7 +91,7 @@ export function createEffectRegistry(
         // The cap's timer is deliberately NOT unref'd: the cap is a safety
         // property, so `drain` must settle even when nothing else keeps the
         // event loop alive (a Node host shutting down with effects still in
-        // flight, or the F6 registry check in `wiring.test`). An unref'd
+        // flight, or the F8 registry check in `wiring.test`). An unref'd
         // gate never fires in that situation and the unmount's cleanup
         // promise would stay unsettled — an unmount that hangs is worse
         // than a 5-second lingering timer in a long-lived Host process.

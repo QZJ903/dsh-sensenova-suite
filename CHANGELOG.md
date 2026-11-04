@@ -1,5 +1,18 @@
 # 更新日志（Changelog）
 
+## 0.1.52（2026-11-04）
+
+- **U12 入口装配与生命周期审计处置全清（纯装配单元，台账代码侧零挂账）**：
+  - **D1（P2）面板「多模态」三工具开关死门**：工具注册门 `settings.X || pool.X === true` 的 OR 门遇上配置默认 true（解析 `!== false`）→ 面板写 false 恒被短路——开关显示已关、工具照常注册，重挂还空转一轮；识图/转述开关（relayOn）同型。与两处契约文字双向矛盾（client「宿主注册 gating 只认 toolsEnabled」、pool-store ToolsEnabled「面板为主设置；配置为部署默认」）。拍板**案 A（tri-state 面板优先）**：`effectiveToolEnabled(saved, patchDefault)` 进 pool-store 生效视图家族（与 effectiveVisionModels 同区），relayOn / enabled() / anyEnabled 三处门换装（anyEnabled 改由 enabled() 派生 = 单一事实源）；「未存过=patch 默认、存过=面板说了算」与面板显示基 savedBool ?? fallback 同构，client 注释自动成真，面板侧零改动。pool.test +3 三态钉；routes.test 新节 R1-R4 端到端钉（自建带效果捕获挂载桩——原 mount 的 `effect: () => () => {}` 把效果整个丢弃无法驱动）：R1 首挂两工具（patch 默认）/ R2 面板全关→重挂零注册（anyEnabled 全关分支首次被真实路径踩到）/ R3 单开只回一个（存下的 false 继续压住另一个）/ R4 卸载后保存触发的迟到重挂被守卫拦下。
+  - **S1 卸载竞态 ghost tools（防御门）**：重挂链可能跨越卸载时刻——cleanup 先跑掉此刻（空）的待清理清单，链继续把新工具注册进已卸载的宿主且无人认领。effect 闭包加 `disposed` 标志，链首 + 注册前各查一次过门即弃；cleanup 先立门再拆注册、拆后清空清单（防御性：宿主对 register-after-dispose 的行为未实测，R4 钉钉住插件侧语义）。
+  - **D2 toolEnabled 死参数**：index 构造传给 buildToolset 的开关参数，接收方 body 从不读它（同开关事实的两道门，一道是 D1 的坏 OR、一道不通电）——连 arrow 带参数带 JSDoc 整根删。
+  - **D3 poolAdmin.accounts 死装配链**：PoolAdmin 接口声明 + index 装配俱在、pool 路由 29 处消费零调用 → `accounts:` 注入 + listAccounts + accountLabel 三件传递性死码删，接口成员同步删（Wiring 经接口引用自动自洽）。
+  - **D4 挂载重试簇整体死码 ≈110 行**：retryBounded + SERVICE_RETRY_ATTEMPTS/_DELAY_MS + resolveServiceWithRetry 全仓零调用——其 JSDoc 点名的全部调用方（registerDrawTool/publishVisionStepTwo/web-search mount/seedRaccoonOnMount）死于 2026-10 收编，工具未跟人走；U1 挂账「调用点核对」就此闭账（双双零调用）。
+  - **D5 vision step two 残留注释五处**：机制已随收编拆除，index 头部模块表 / 整段「settings-row writer」注释 / 效果注册注释 / lifecycle JSDoc 四处改真话 + effects.ts 测试编号指错 F6→F8（初审漏 index.ts:608 一处，处置重锚定时补上）。
+  - **S2 裸 ctx.get 收编**：index.ts:427 是全文件唯一不经 getService 的服务读取 → 换 getService 同款包裹（注释点名）；**前置验证按拍板撤**（修法保留——探针只会回答「旧代码当时是否真危险」，无可行动结果；抛错语义属宿主 cordis 契约）。顺带 4 同批销号（bridge.ts:191 只防 undefined 的隐患，触发前提=无 llm 的 DSH 形态不存在）。
+  - **N1 维持真机验证点**：双 profile 同进程共享 trace-log 全局 sink（setTraceSink 后挂载者赢）——仅两 profile 加载同一模块实例（同 realpath）才触发，文档场景路径不同不触发；单 profile 机器直接销号。
+  - 测试：typecheck 0 错；pool（+3）/ pool-route / config / vision-image / panel / render / duplication / snapshot-aggregate / contract / store 全绿；routes 148 查 6 红系 0.1.51 基线预存在名单逐字一致（本轮 R1-R4 全绿零新增）、wiring :204 崩截死 F8 钉系预存在领地（0.1.49 起，另行挂账）。真机生效 = 完整重启 DSH。
+
 ## 0.1.51（2026-11-04）
 
 - **U11 面板业务块审计处置全清（代码侧零挂账）**：

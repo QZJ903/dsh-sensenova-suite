@@ -502,6 +502,20 @@ try {
     JSON.stringify(parsed?.vision));
 } catch (e) { fail("vision-effective", e); }
 
+// ── 工具开关生效值（2026-11-04 U12-D1 案 A 拍板：tri-state 面板优先）──────────
+// 旧的 OR 门（settings.X || pool===true）让 patch 默认 true 恒赢，面板「关」
+// 落不了地；生效值现在与面板显示基 savedBool ?? fallback 同构。
+try {
+  const { effectiveToolEnabled } = await import("../src/host/pool-store.ts");
+  check("没存过（undefined）→ patch 默认（true/false 两向）",
+    effectiveToolEnabled(undefined, true) === true && effectiveToolEnabled(undefined, false) === false,
+    `${effectiveToolEnabled(undefined, true)}/${effectiveToolEnabled(undefined, false)}`);
+  check("面板 false 压过 patch 默认 true（U12-D1 死门的核心态）",
+    effectiveToolEnabled(false, true) === false, String(effectiveToolEnabled(false, true)));
+  check("面板 true 压过 patch 默认 false",
+    effectiveToolEnabled(true, false) === true, String(effectiveToolEnabled(true, false)));
+} catch (e) { fail("tool-effective", e); }
+
 // ── N. pool-store 文件面：ADR-006 拒绝表面化 + 读-改-写串行化（2026-10-31 处置轮）──
 try {
   const { createFilePoolStore } = await import("../src/host/pool-store.ts");

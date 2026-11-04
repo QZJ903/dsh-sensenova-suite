@@ -34,8 +34,6 @@ export interface PoolAdmin {
    * 「期望生效集 − 原生」写进 autoOffIds 墓碑（手动取消不被自动勾翻案）。
    * 可选：测试替身省略时墓碑退化为不写（自动勾翻案的旧行为）。 */
   nativeVisionIds?: () => string[];
-  /** 账号清单（全量、未过滤）+ 标签；顺序即池序。 */
-  accounts(): Promise<Array<{ id: string; label: string | null }>>;
   /** 单账号相位（面板停用/删除的账号读作 absent）。 */
   phaseOf(id: string): "running" | "blocked" | "absent";
   /** 管理面行，与快照 pool 块**同一份** poolKeyRows（label=脱敏名、note=备注）——

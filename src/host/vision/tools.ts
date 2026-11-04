@@ -20,8 +20,6 @@ import { buildImageTools, type ImageToolDeps, type ImageToolOptions } from "../i
 export interface ToolsetDeps {
   /** 出图工具配置（按工具解析；两工具各自一份）。 */
   imageOptions: (tool: "text2img" | "img2img") => ImageToolOptions;
-  /** 工具开关（面板「多模态」为主设置；注册侧过滤用）。 */
-  toolEnabled: (tool: "text2img" | "img2img") => boolean;
   /** 出图 key 解析（池，按模型分组）。 */
   resolveImageKey: (model: string) => Promise<string>;
   /** 出图成功上报（池 onSuccess）。 */

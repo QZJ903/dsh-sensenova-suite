@@ -1231,6 +1231,90 @@ async function seedPoolKey(credentials, key) {
   } catch (error) { fail("Q: the model roster route", error); }
 }
 
+// === R. U12-D1/S1: the image/vision tool gates + the unmount race guard =====
+// Drives the REAL apply() effect chain. mount() above discards effects
+// (`effect: () => () => {}` — the image/vision callback never runs there), so
+// this section carries its own stub: Cordis calls an effect callback AT
+// registration and keeps its return as the unmount cleanup, and the stub must
+// reproduce exactly that. pool.json goes through the real pool-store under the
+// isolateStateDir sandbox from the top of this file.
+{
+  try {
+    await (async () => {
+      const host = await import(`../src/host/index.ts?tools=${Math.random()}`);
+      const handlers = new Map();
+      const cleanups = [];
+      const registered = [];
+      const services = {
+        credentials: makeCredentials(),
+        tools: {
+          register(tool) {
+            const toolName = String(tool?.name ?? "");
+            registered.push(toolName);
+            return () => {
+              const at = registered.indexOf(toolName);
+              if (at >= 0) registered.splice(at, 1);
+            };
+          }
+        }
+      };
+      host.apply({
+        // `services[s]` (NOT `?? null`): the capability override reads
+        // ctx.get("llm") and only guards against `undefined` — a null here
+        // would throw inside the effect callback and kill the mount.
+        get: (s) => services[s],
+        emit: () => {},
+        effect: (callback) => { cleanups.push(callback() ?? null); return () => {}; },
+        tools: services.tools,
+        webServer: { register(spec) { handlers.set(spec.path, spec.handler); return () => {}; } }
+      }, { consoleBase: "https://console.test" }, {});
+      const call = async (path, request) => {
+        const response = makeResponse();
+        await handlers.get(path)(request, response);
+        return response;
+      };
+      const saveTools = async (values) =>
+        call(POOL_PATH, makePost({ section: "toolsEnabled", values }));
+      const names = () => [...registered].sort().join(",");
+      const settleUntil = async (predicate) => {
+        for (let i = 0; i < 150; i += 1) {
+          if (predicate()) return true;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return false;
+      };
+
+      // R1. Fresh mount, panel never touched: patch defaults (true/true) rule.
+      const r1 = await settleUntil(() => registered.length === 2);
+      check("R1 fresh mount registers both tools from patch defaults",
+        r1 && names() === "sn_img2img,sn_text2img", names());
+
+      // R2. Panel turns BOTH off. The old OR gate made this a no-op (patch
+      // true always won — U12-D1); tri-state must unregister everything.
+      await saveTools({ text2img: false, img2img: false });
+      const r2 = await settleUntil(() => registered.length === 0);
+      check("R2 panel-off unregisters both tools (U12-D1 dead gate fixed)",
+        r2 && registered.length === 0, names());
+
+      // R3. Panel turns text2img back on: exactly that tool returns; the
+      // stored false for img2img keeps it out.
+      await saveTools({ text2img: true });
+      const r3 = await settleUntil(() =>
+        registered.includes("sn_text2img") && !registered.includes("sn_img2img"));
+      check("R3 panel-on re-registers only the enabled tool",
+        r3 && names() === "sn_text2img", names());
+
+      // R4. U12-S1: after unmount, a save-triggered re-register must be
+      // blocked by the disposed gate — no tool may come back.
+      for (const cleanup of cleanups) cleanup?.();
+      await saveTools({ img2img: true });
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      check("R4 a re-register racing unmount registers nothing (U12-S1 guard)",
+        registered.length === 0, names());
+    })();
+  } catch (error) { fail("R: U12 tool gates", error); }
+}
+
 // The Host routes are exercised against a stubbed console; nothing here may
 // reach the real one. See the same guard in test/auth.test.mjs.
 const unstubbed = releaseNetworkGuard();

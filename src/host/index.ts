@@ -10,7 +10,7 @@
  *
  *   - `host-config.ts`    config contract + the `isAdmitted` trust fence
  *   - `routes.ts`         the HTTP route handlers (peer-free, wiring-injected)
- *   - `lifecycle.ts`      mount seed / vision step two / teardown
+ *   - `lifecycle.ts`      mount seed / provider-refresh / teardown
  *   - `console-client.ts` console/catalog fetch with cache + single-flight
  *   - `parsers.ts`        response normalization + shape-drift detection
  *   - `snapshot-aggregate.ts` the snapshot body's data aggregation
@@ -38,7 +38,7 @@ import { createFileCatalogStore } from "./catalog-store.ts";
 import { createFileProviderStore } from "./provider-store.ts";
 import { profileSegment, profileStateDir } from "./state-store.ts";
 import { KeyOrchestrator, DEFAULT_ORCHESTRATOR_PARAMS } from "./key-orchestrator.ts";
-import { createFilePoolStore, emptyPoolRecord, effectiveVisionModels } from "./pool-store.ts";
+import { createFilePoolStore, emptyPoolRecord, effectiveToolEnabled, effectiveVisionModels } from "./pool-store.ts";
 import { thinkingWithDefaults } from "./wire/facts.ts";
 import { identifyVisionModel } from "./llm-models.ts";
 import { createImageSwapper, installCapabilityOverride } from "./vision/bridge.ts";
@@ -328,7 +328,10 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
         model: poolRecord.vision?.model ?? settings.visionModel,
         timeoutMs: settings.visionTimeoutMs,
         bridgePrompt: poolRecord.vision?.bridgePrompt ?? settings.visionBridgePrompt,
-        relayOn: settings.visionToolsEnabled || poolRecord.toolsEnabled.visionTools === true,
+        // 工具开关生效值走 tri-state 面板优先（U12-D1 案 A，同 enabled() 注）：
+        // 面板存过值听面板、没存过回落 patch 默认——「识图关掉=原样放行」从
+        // 不可达变为可达（host-config visionToolsEnabled 注释自 U9 起就这么说）。
+        relayOn: effectiveToolEnabled(poolRecord.toolsEnabled.visionTools, settings.visionToolsEnabled),
       }),
       checkedIds: () => visionView(),
       resolveKey: async () => {
@@ -423,8 +426,10 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     auth: auth ?? createAuth(),
     // A resolver, not a snapshot: the credentials service may register after
     // this plugin mounts, and a one-time lookup would freeze a wrong
-    // "ephemeral" claim into every later poll.
-    credentials: () => ctx.get("credentials") ?? null,
+    // "ephemeral" claim into every later poll. getService 包裹与本文件其余
+    // 读取同款：ctx.get 若对缺席/失败服务抛错，异常就地吞掉、不进轮询路径
+    // （U12-S2——这是全文件唯一一处裸 ctx.get）。
+    credentials: () => getService("credentials"),
     credentialKey,
     skewMs: settings.tokenSkewSeconds * 1000,
     // Explicit, because the store defaults to an in-memory throttle: a wait
@@ -441,16 +446,12 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       void writeLoginTrace(hops, error === null ? "ok" : str((error as { code?: unknown } | null | undefined)?.code, CODE.AUTH_ERROR));
     }
   });
-  // Vision step two (ARCHITECTURE.md §5.1): the settings-row writer the
-  // snapshot route calls after it has computed the vision list. Filled in
-  // by `startSideEffects`; until then it is a no-op, so a Host without a
-  // settings service still answers polls.
+  // （原「Vision step two settings-row writer」注释随机制拆除：该写入器已在
+  // 收编中删除，startSideEffects 现在只有 catalog-seed 与 provider-refresh
+  // 两个效果——U12-D5。）
 
-  // 池管理面（pool 路由）：标签（accounts 用配置 label）、相位、池侧动作。
-  const accountLabel = (id: string): string | null => {
-    if (id === "default") return null;
-    return settings.accounts.find((account) => account.id === id)?.label ?? null;
-  };
+  // 池管理面（pool 路由）：相位、池侧动作。（原 accountLabel/listAccounts
+  // 死装配链已删：poolAdmin.accounts 接口声明过、路由零调用——U12-D3。）
   /** 生效中的全局并发数：面板保存值 > 配置 >（编排层再兜底 key 数）。 */
   const effectiveConcurrency = () => poolRecord.globalConcurrency ?? settings.globalConcurrency;
   /**
@@ -496,11 +497,6 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     }
     return rows;
   };
-  /** 全量账号清单（未过滤停用/删除）+ 标签——池管理与池诊断共源。 */
-  const listAccounts = async (): Promise<Array<{ id: string; label: string | null }>> => {
-    const entries = await resolvePoolKeys();
-    return entries.map((entry) => ({ id: entry.id, label: accountLabel(entry.id) }));
-  };
   const wiring = {
     settings,
     configError,
@@ -511,7 +507,6 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     providerStore,
     poolAdmin: {
       store: poolStore,
-      accounts: listAccounts,
       // 「可看图自动勾」的底集来源（目录原生看图 id）；vision 保存路径据此把
       // 「期望生效集 − 原生」写进墓碑（手动取消不被自动勾翻案）。
       nativeVisionIds,
@@ -605,7 +600,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // The five route handlers (trust fence, method allowances, body ceilings,
   // trace writes, publish-after-save) — see routes.ts.
   const offs = registerRoutes(ctx, wiring);
-  // Mount-time side effects (persisted-catalog seed, vision step two) — see
+  // Mount-time side effects (persisted-catalog seed, provider-refresh) — see
   // lifecycle.ts. Each one is tracked by the effect registry; the unmount
   // cleanup below lets them settle before teardown.
   startSideEffects(ctx, wiring, effects);
@@ -624,6 +619,11 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // 主模型拖图不被阻断。视觉/出图调用都经池解析 key（按模型积分组）。
   ctx.effect(() => {
     const disposers: Array<() => void> = [];
+    // 卸载竞态门（2026-11-04 U12-S1）：重挂链可能跨越卸载时刻——cleanup 先跑
+    // （此刻 toolDisposers 可能为空），链继续把新工具注册进已卸载的宿主 =
+    // 泄漏且无人认领。链首与注册前各查一次 disposed，过门即弃（防御性：
+    // 宿主对 register-after-dispose 的行为——静默收下或抛错——未实测）。
+    let disposed = false;
     // 工具热重挂（2026-10-27）：注册不再是启动一次性——toolsEnabled 变更时
     // 拆旧重挂（register 返回 disposer，拆除的机械能力在）。DSH 的 agent 对
     // 工具集没有中途注销语义：新会话必然按新集合走，进行中的会话视宿主实现
@@ -632,6 +632,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     let chain: Promise<void> = Promise.resolve();
     const registerImageTools = (): Promise<void> => {
       chain = chain.catch(() => {}).then(async () => {
+        if (disposed) return; // 卸载后才轮到的重挂：过门即弃（U12-S1）。
         // 阶段标记 + 看门狗：重挂若挂死，30s 后日志报出最后阶段——保存路由已
         // 解耦不受影响，但工具缺席/卡顿的原因就在这一行里。
         let stage = "拆除旧注册";
@@ -654,13 +655,16 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
           }
           stage = "读取 pool.json";
           await refreshPoolRecord(); // 开关读取磁盘现值（面板保存已落盘）
+          // 工具注册门（2026-11-04 U12-D1 案 A 拍板）：tri-state——面板存过值听
+          // 面板、没存过回落 patch 默认，与面板显示基 savedBool ?? fallback 同构
+          // （effectiveToolEnabled，pool-store）。旧写法 `settings.X || pool===true`
+          // 的 OR 门让 patch 默认 true 恒赢，面板「关」永远落不了地。
           const enabled = (name: string): boolean => {
-            if (name === "sn_text2img") return settings.text2imgEnabled || poolRecord.toolsEnabled.text2img === true;
-            if (name === "sn_img2img") return settings.img2imgEnabled || poolRecord.toolsEnabled.img2img === true;
+            if (name === "sn_text2img") return effectiveToolEnabled(poolRecord.toolsEnabled.text2img, settings.text2imgEnabled);
+            if (name === "sn_img2img") return effectiveToolEnabled(poolRecord.toolsEnabled.img2img, settings.img2imgEnabled);
             return false; // 识图工具已下线（2026-11-04：原生看图+读图桥覆盖，见 vision/tools.ts）
           };
-          const anyEnabled = settings.text2imgEnabled || settings.img2imgEnabled
-            || poolRecord.toolsEnabled?.text2img === true || poolRecord.toolsEnabled?.img2img === true;
+          const anyEnabled = enabled("sn_text2img") || enabled("sn_img2img");
           if (!anyEnabled) return; // 全关：保持零注册（与旧行为一致，peer 也不加载）。
           stage = "加载 tools 模块";
           const module = await import("./vision/tools.ts");
@@ -685,10 +689,6 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
                 timeoutMs: settings.imageTimeoutMs,
               };
             },
-            toolEnabled: (tool: "text2img" | "img2img") =>
-              tool === "text2img"
-                ? (poolRecord.toolsEnabled?.text2img === true || settings.text2imgEnabled)
-                : (poolRecord.toolsEnabled?.img2img === true || settings.img2imgEnabled),
             resolveImageKey: async (model) => {
               try {
                 const picked = await orchestrator.pickStart({ model });
@@ -705,6 +705,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
             ctx: { get: (service: string) => getService(service) },
           });
           stage = "注册工具";
+          if (disposed) return; // pool.json/模块加载期间卸载了：不注册（U12-S1）。
           for (const tool of toolset) {
             if (enabled(String((tool as { name?: unknown }).name ?? ""))) {
               toolDisposers.push(tools.register?.(tool) ?? (() => {}));
@@ -732,10 +733,12 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
     );
     disposers.push(restoreCapability);
     return () => {
+      disposed = true; // 先立门再拆注册：迟到的重挂链不得再进（U12-S1）。
       for (const dispose of disposers) dispose();
       for (const dispose of toolDisposers) {
         try { dispose(); } catch { /* 卸载失败静默。 */ }
       }
+      toolDisposers = []; // 清单交还：卸载后链内残留引用不得再拆一遍。
     };
   }, `${name}: image/vision`);
 

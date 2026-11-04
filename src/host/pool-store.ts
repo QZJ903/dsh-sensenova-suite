@@ -264,6 +264,21 @@ export function effectiveVisionModels(vision: VisionSettings | undefined, native
   return out;
 }
 
+/**
+ * 工具开关的生效值（2026-11-04 U12-D1 案 A 拍板）：面板存过值（true/false）
+ * 听面板的，没存过（undefined = 从未动过该开关）回落 patch 配置默认。
+ *
+ * 与面板显示基 `savedBool(section, key) ?? fallback` 同构——面板显示什么，
+ * 注册门就认什么。旧的 `settings.X || pool === true` OR 门让 patch 默认
+ * true 恒赢，面板「关」永远落不了地（U12 台账 D1）；本接口的 ToolsEnabled
+ * 注释「面板为主设置；配置为部署默认」自始就是这个 tri-state 语义。
+ * @param saved - 面板存过该键的布尔值；没存过 = undefined。
+ * @param patchDefault - patch 配置里的部署默认（text2imgEnabled 等）。
+ */
+export function effectiveToolEnabled(saved: boolean | undefined, patchDefault: boolean): boolean {
+  return saved ?? patchDefault;
+}
+
 /** 一个 key 的运营状态（快照/路由读）。 */
 export interface PoolKeyState {
   id: string;

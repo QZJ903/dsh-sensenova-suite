@@ -25,8 +25,8 @@ import { type EffectRegistry } from "./effects.ts";
 import type { Wiring } from "./types.ts";
 
 /**
- * Run the mount-time side effects: the persisted-catalog seed, the
- * background provider refresher, and vision step two's settings-row writer.
+ * Run the mount-time side effects: the persisted-catalog seed and the
+ * background provider refresher.
  * @param {{ get?: (n: string) => unknown; [key: string]: unknown }} ctx - the host root context.
  * @param {Wiring} wiring - assembled by `apply()`; the fields read here are
  *   `publisher` / `catalogStore` / `settings` / `logger`
