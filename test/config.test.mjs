@@ -465,7 +465,7 @@ check("patch tokenSkewSeconds matches code default", Number(activeValue("tokenSk
     .filter((line) => /^\s{2}[A-Za-z_]\w*\??\s*:/.test(line));
   // 2026-11-03 拆除主 key：apiKeyStore 出场，20 → 19。
   check("Wiring's field count is the one this suite reasons about",
-    wiringFields.length === 19, `${wiringFields.length} fields`);
+    wiringFields.length === 18, `${wiringFields.length} fields`);
 
   // Every route declares its own subset, and `registerRoutes` calls each exactly
   // once. A route module added without joining the facade would mount nothing

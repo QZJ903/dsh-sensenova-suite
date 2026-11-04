@@ -627,14 +627,9 @@ try {
   // models" when it never asked the platform.
   {
     const res = await call("/api/dsh-sensenova-suite/snapshot");
-    check("without an API key the catalog is unavailable",
-      res.body?.catalogAvailable === false, String(res.body?.catalogAvailable));
     check("no catalog means visionModels is absent, not an empty claim",
       res.body?.visionModels === undefined,
       JSON.stringify(res.body?.visionModels ?? null));
-    check("a degraded catalog still reports no uncounted models",
-      Array.isArray(res.body?.uncountedModels) && res.body?.uncountedModels.length === 0,
-      JSON.stringify(res.body?.uncountedModels));
   }
 
   // === step three: a pasted key lights the catalog AND the provider =======
@@ -664,11 +659,6 @@ try {
     const res = await call("/api/dsh-sensenova-suite/snapshot");
     check("the key reached the fake's model endpoint", fake.log.catalog > before,
       `catalog calls ${before} -> ${fake.log.catalog}`);
-    check("the catalog is available once a key is saved",
-      res.body?.catalogAvailable === true, String(res.body?.catalogAvailable));
-    check("the catalog lists every model the key can call",
-      JSON.stringify(res.body?.catalogModels) === JSON.stringify(["SenseNova-Lite", "SenseNova-Vision", "SenseNova-Draw"]),
-      JSON.stringify(res.body?.catalogModels));
     // Only the input-modality model counts: the image-OUTPUT model must not
     // be published as one that can take a picture.
     check("the vision list is exactly the input-modality model",

@@ -76,7 +76,7 @@ import { ComposerUsagePill } from "./composer-usage-pill.ts";
  * 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
  * 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
  */
-const CLIENT_BUILD = "2026-11-04T04:36";
+const CLIENT_BUILD = "2026-11-04T23:06";
 
 function clientFactory(loaderRequire: (specifier: string) => unknown): {
   inject: string[];

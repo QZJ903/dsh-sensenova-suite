@@ -240,8 +240,12 @@ export function PoolManager({ pool, onDone, tt }: {
       }
       setConcurrency(null);
       onDone?.();
-    } catch {
-      setError(tt("auth.network"));
+    } catch (caught) {
+      // 原始原因（含 URL 与 HTTP 状态）比一句「无法连接」有用得多——与 act()
+      // 和多模态 save 同款：旧 Host 构建的 non-JSON 4xx 给换路由文案，其余原样
+      // 上屏（U11-D2：这句「无法连接本机 Host」把宿主内部错误说成网络故障）。
+      const message = caught instanceof Error ? caught.message : "";
+      setError(/non-JSON HTTP 4\d\d/.test(message) ? tt("poolMng.routeMissing") : (message || tt("auth.network")));
     }
   }, [concurrencyValue, onDone, tt]);
 
@@ -274,7 +278,16 @@ export function PoolManager({ pool, onDone, tt }: {
             style: { ...S.input, width: 90 },
             value: String(concurrencyValue),
             disabled: busyId !== null,
-            onChange: (event: { target: { value: string } }) => setConcurrency(Math.max(0, Math.floor(Number(event.target.value) || 0)))
+            onChange: (event: { target: { value: string } }) => setConcurrency(Math.max(0, Math.floor(Number(event.target.value) || 0))),
+            // 回车=保存并发数（2026-11-04 拍板，与备注框同语义）；preventDefault
+            // 防冒泡外层 form 的 onSubmit（空 apiKey 会误报「请输入 sk- 开头的
+            // API Key」）——同 2026-10-25 备注框实测过的坑（U11-D3）。
+            onKeyDown: (event: { key: string; preventDefault?: () => void }) => {
+              if (event.key === "Enter") {
+                event.preventDefault?.();
+                if (concurrencyDirty) void saveConcurrency();
+              }
+            }
           }),
           concurrencyDirty
             ? h("button", { type: "button", style: S.button, onClick: () => void saveConcurrency() }, tt("llm.save"))

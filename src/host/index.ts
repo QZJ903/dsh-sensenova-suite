@@ -516,6 +516,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       // 「期望生效集 − 原生」写进墓碑（手动取消不被自动勾翻案）。
       nativeVisionIds,
       phaseOf: (id: string) => orchestrator.phaseOf(orchestrator.keyOf(id)),
+      // GET /pool 与快照 pool 块同一份行（U11 顺带1 单源对齐，2026-11-04）。
+      keyRows: poolKeyRows,
       apply: async (action: "disable" | "restore" | "delete", id: string) => {
         if (action === "disable") orchestrator.disableById(id);
         else if (action === "restore") await orchestrator.restoreById(id);
@@ -577,8 +579,6 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
         }
       };
     },
-    // 每模型可用思考档位（面板行内勾选；snapshot roster 与发布链读取）。
-    thinkingOverrides: () => poolRecord.thinking,
     logger: ctx.logger,
     // The background provider refresher's handle (review #1b): a SLOT like
     // slots — null = nothing armed; `startSideEffects`

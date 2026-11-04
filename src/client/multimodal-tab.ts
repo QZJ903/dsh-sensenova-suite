@@ -115,19 +115,33 @@ export function MultimodalTab({ llm, pool, onDone, tt }: {
     })
   );
 
-  /** 模型下拉（imageGen / vision 清单）。 */
-  const modelSelect = (section: string, label: string, list: ModelData[], fallback: string) => h(
-    Field,
-    { label },
-    h("select", {
-      style: { ...S.input, width: "auto" },
-      value: saved(section, "model") !== "" ? saved(section, "model") : fallback,
-      disabled: busySection === section,
-      onChange: (event: { target: { value: string } }) => setKey(section, "model", event.target.value)
-    }, list.length === 0
-      ? h("option", { value: fallback }, fallback + tt("mm.catalogEmpty"))
-      : list.map((model) => h("option", { key: String(model.id), value: String(model.id) }, String(model.name ?? model.id))))
-  );
+  /** 模型下拉（imageGen / vision 清单）。S2（2026-11-04 拍板）：已存模型 id 暂缺于
+   * 目录时补一行提示——选项来自当前目录、值来自已存设置，脱档时下拉显示不出它，
+   * 而适配器仍拿旧 id 发请求（400+30s 冷却）；分叉别静默。saved 为空（走
+   * fallback）不提示：fallback 缺席是另一回事（空目录分支自己有文案）。 */
+  const modelSelect = (section: string, label: string, list: ModelData[], fallback: string) => {
+    const savedModel = saved(section, "model");
+    const staleSaved = savedModel !== "" && !list.some((model) => String(model?.id ?? "") === savedModel);
+    return h(
+      "div",
+      null,
+      h(
+        Field,
+        { label },
+        h("select", {
+          style: { ...S.input, width: "auto" },
+          value: savedModel !== "" ? savedModel : fallback,
+          disabled: busySection === section,
+          onChange: (event: { target: { value: string } }) => setKey(section, "model", event.target.value)
+        }, list.length === 0
+          ? h("option", { value: fallback }, fallback + tt("mm.catalogEmpty"))
+          : list.map((model) => h("option", { key: String(model.id), value: String(model.id) }, String(model.name ?? model.id))))
+      ),
+      staleSaved
+        ? h("p", { style: { ...S.formNote, color: "var(--dsw-alias-state-warn-primary)", margin: "2px 0 0" } }, tt("mm.savedModelMissing"))
+        : null
+    );
+  };
 
   /** 文本草稿（key = section.key；常驻输入框用）。 */
   const [drafts, setDrafts] = useState<Record<string, string>>({});

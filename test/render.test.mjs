@@ -15,7 +15,8 @@
  */
 import { render, styles as S, texts, findElement, findAll } from "./panel-render.js";
 import { h, surface, reactStandin } from "./client-surface.js";
-import { applyChainSlotEdit } from "../src/client/model-picker.ts";
+import { applyChainSlotEdit, lastLevelGuard } from "../src/client/model-picker.ts";
+import { poolFor } from "../src/client/composer-usage-pill.ts";
 import { results, check, finish } from "./harness.mjs";
 
 
@@ -477,11 +478,7 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
   // decimal rounding drew, so it stays pinned here and in tokenSize below.
   const rich = [{
     id: "deepseek-v4-flash", name: "deepseek-v4-flash", vision: false, available: false, quotaExhausted: true,
-    contextWindow: 1048576, maxOutputLength: 65536, multiplier: 10,
-    // Proven-only levels: the 2026-09-30 probe recorded 200 on
-    // low/medium/xhigh for this model (frozen baseline) — the roster
-    // quotes exactly what the panel would let the user pick.
-    thinkingLevels: ["off", "low", "medium", "high", "xhigh"]
+    contextWindow: 1048576, maxOutputLength: 65536, multiplier: 10
   }];
   const richTree = treeOf(render.ModelRoster, { models: rich, enabledIds: [], tt: ttZh });
   const richText = texts(richTree).join("\n");
@@ -579,6 +576,25 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
       JSON.stringify(applyChainSlotEdit(["anthropic", "responses", "chat-completions"], 0, "responses")) === JSON.stringify(["responses", "chat-completions"])
         && JSON.stringify(applyChainSlotEdit(["anthropic", "responses"], 2, "")) === JSON.stringify(["anthropic", "responses"]),
       "tail-keep + blank");
+    check("lastLevelGuard: the last remaining level cannot be unchecked (D1A, 2026-11-04)",
+      lastLevelGuard(["high"], "high") === true
+        && lastLevelGuard(["off", "high"], "high") === false
+        && lastLevelGuard(["high"], "off") === false
+        && lastLevelGuard(undefined, "off") === false
+        && lastLevelGuard([], "off") === false,
+      "[] 与 undefined 必须不设防——零档位没有拼法，守卫只锁「只剩一档」");
+    check("poolFor: a drained covering pool yields to a live one, liveness before dedicated (T1)",
+      (() => {
+        const drainedGeneral = { id: "pg", poolType: "default", modelIds: ["m"], window5h: { limit: 100, used: 100 }, window7d: null };
+        const drainedDedicated = { id: "pd", poolType: "dedicated", modelIds: ["m"], window5h: { limit: 100, used: 100 }, window7d: null };
+        const liveGeneral = { id: "pg-live", poolType: "default", modelIds: ["m"], window5h: { limit: 100, used: 10 }, window7d: null };
+        const liveDedicated = { id: "pd-live", poolType: "dedicated", modelIds: ["m"], window5h: { limit: 100, used: 10 }, window7d: null };
+        return poolFor([drainedGeneral, liveDedicated], "m", "sensenova-suite") === liveDedicated
+          && poolFor([drainedDedicated, liveGeneral], "m", "sensenova-suite") === liveGeneral
+          && poolFor([drainedDedicated, drainedGeneral], "m", "sensenova-suite") === drainedDedicated
+          && poolFor([{ ...liveGeneral, window5h: { limit: 0, used: 0 } }], "m", "sensenova-suite")?.id === "pg-live";
+      })(),
+      "满表让位给有余额池（活性先于专属）；limit 0 是 unknown 不算耗尽——pill 与 picker 不得对同一事实各执一词");
     const unopened = treeOf(render.ModelRoster, {
       models: rich, enabledIds: [], tt: ttZh,
       thinkingById: { "deepseek-v4-flash": ["off"] },

@@ -172,12 +172,16 @@ export function selectedModelOf(projection: ModelSelectionLike | undefined): str
  * its exhaustion — to the general pool, i.e. show a full meter for a model that
  * still has an untouched quota behind it.
  *
- * That observation does not prove the platform charges the dedicated pool
- * FIRST: a "general pool until it runs dry, then the dedicated one" rule would
- * have produced the same numbers. The pill can therefore read healthy while a
- * request still comes back 429. That is the same bet the Host's all-pools rule
- * makes (`exhaustedModelIds`), so the pill and the picker never disagree — only
- * the inference about the console's billing order stays unverified.
+ * CONFIRMED 2026-11-04 (the operator's live machine): the billing map is
+ * EXCLUSIVE — `sensenova-6.8-flash-lite` draws from the dedicated pool only,
+ * every other model from the general pool only, and neither ever crosses over.
+ * The 2026-10-18 numbers alone could not show that: a "general first, then
+ * dedicated on drain" rule would have looked identical, and under that reading
+ * a pill could have read healthy while a request still came back 429. With the
+ * exclusive mapping that gap is closed — what the pill points at is what the
+ * platform bills — and the Host's all-pools rule (`exhaustedModelIds`) stays
+ * consistent with it: a drained dedicated pool blocks only the Flash-Lite
+ * model, never the others.
  *
  * A Token Plan model that names no pool falls back to the first pool — never to
  * an invented aggregate.

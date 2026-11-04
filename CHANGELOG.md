@@ -1,5 +1,18 @@
 # 更新日志（Changelog）
 
+## 0.1.51（2026-11-04）
+
+- **U11 面板业务块审计处置全清（代码侧零挂账）**：
+  - **D1（P2）thinking「全取消档位」删不掉**：面板把清空的模型从保存载荷滤掉 × 宿主 setSection 按键合并 → 旧档位原地复活、勾选静默还原（宿主半边 pool.test 钉着「显式空数组尊重用户选择」——两端语义相反）。复核升级：存储模型根本没有「显式零档位」拼法（thinkingLevelMapFor 与 adapter withUserThinking 都把空数组折叠回全档位），拍板**案 A**——UI 禁止取消最后一档：`lastLevelGuard` 导出纯函数 + 档位复选框接线（可看图无此守卫，visionModels 显式空数组是宿主尊重的合法状态）；render.test 真钉四断言+lastLevelGuard 五断言，均变异验红红→绿；facts.ts「面板全不勾的保存不被翻案」半截注释对齐真话。
+  - **D2 saveConcurrency 吞错**：并发数保存失败一律报「无法连接本机 Host」→ catch 取 errorText 原文 + non-JSON 4xx 给 routeMissing 文案，与 act()/多模态 save 三处同款。
+  - **D3 并发框回车隐式提交**：并发输入框回车触发外层表单提交、空 apiKey 误报「请输入 sk- 开头的 API Key」→ onKeyDown preventDefault + **回车=保存并发数**（与备注框同语义；同 2026-10-25 备注框实测过的坑，三常驻输入框补齐守卫）。
+  - **S2 目录缺已存模型 id 下拉脱档**：出图/转述「默认模型」下拉下补提示行「已保存的模型不在当前目录中」（mm.savedModelMissing，zh 逐字拍板 + en 镜像）；saved 为空走 fallback 不提示。
+  - **死字段清理（拍板「删」）**：快照三字段 catalogAvailable / catalogModels / uncountedModels 与 roster 行 thinkingLevels 整删（UI 消费者分别随 2026-10-27 PoolCard 详情折叠块删除消失/从未存在；字段兼在无存储场景下说错话）；**thinkingOverrides roster 注入链六跳端到端拆净**（index wiring → Wiring 类型 → routes/snapshot 签名与传参 → buildSnapshotBody 形参 → rosterWithAvailability 第 4 参 → 产出）——适配器侧 thinkingView 链独立保留（grep 实证分界）；测试六文件同批手术：provider 行键集钉、retry 行级钉删（supportedThinkingLevels 直测钉保留）、routes Q2/L2、render fixture、e2e 四检查、snapshot-aggregate H1/H2/H4 改写（replaceCalls 写数语义全保留）。
+  - **GET /pool 单源对齐（顺带1 案 a）**：GET 行改走 `poolAdmin.keyRows` = index 的 poolKeyRows **本体**（原 GET 的 label 装备注、无 note，与快照投影语义相反且零消费者的潜伏分叉）——PoolAdmin 接口 + index 注入 + pool-route 桩同步；pool-route 29 项（+2 形状级钉：无凭据行 label 回落 id+note 字段在、有凭据行 label=maskKey）。
+  - **N1 销号 + 注释对齐**：用户真机口径确认**计费排他映射**（6.8-flash-lite 只烧专属池、其他模型只烧通用池、不串）——poolFor「专属优先于 live 池」推断与 poolHit「本模型计入此池」断言成立；poolFor 四断言直导钉（render.test，活性先于专属/满表让位/limit 0=unknown，变异验红）；poolFor JSDoc 过期 hedge 改确认口径。
+  - **i18n 残胶清理**：四块 raccoon 时代孤儿注释删（浣熊单位/「1 新模型」chip/字典尾部零倍率+QR walk 孤儿块/en 镜像）——描述的键均已不存在；composer.planPrefix 注释刻意保留（键活着）。
+  - 测试：typecheck 0 错（3 配置）/ render 174（+2 真钉，均变异验红）/ pool-route 29（+2）/ provider 256 / contract 92 / retry 24 / panel 78（zh/en parity）/ snapshot-aggregate / duplication 14 全绿；routes 与 e2e 删钉面本机结构性 SKIP、node --check 语法过。真机生效 = 完整重启 DSH。
+
 ## 0.1.50（2026-11-04）
 
 - **U9 视觉与出图链审计处置（台账全部终态零挂账，仅能力覆盖双层注入一笔转总审）**：

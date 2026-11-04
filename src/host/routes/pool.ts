@@ -38,6 +38,12 @@ export interface PoolAdmin {
   accounts(): Promise<Array<{ id: string; label: string | null }>>;
   /** 单账号相位（面板停用/删除的账号读作 absent）。 */
   phaseOf(id: string): "running" | "blocked" | "absent";
+  /** 管理面行，与快照 pool 块**同一份** poolKeyRows（label=脱敏名、note=备注）——
+   * U11 顺带1（2026-11-04 拍板案 a）：GET 与快照单源，消灭两套形状。 */
+  keyRows: () => Promise<Array<{
+    id: string; label: string | null; note: string | null;
+    phase: "running" | "blocked" | "absent"; disabled: boolean; deleted: boolean;
+  }>>;
   /** 执行停用/恢复/删除的池侧动作。 */
   apply(action: "disable" | "restore" | "delete", id: string): Promise<void>;
   /** 把一把新 key 存入凭据服务（ref 由实现分配，返回稳这篇档的 id）。 */
@@ -76,28 +82,17 @@ export function registerPoolRoute(ctx: any, wiring: Pick<Wiring, "settings" | "l
       }
       try {
         if (method === "GET") {
-          const record = await poolAdmin.store.read();
-          // 管理面列的是「配置了什么」（store 清单），不是「凭据解析成功了
-          // 什么」——解析失败时列表不能变空，否则加过的 key 在面板上消失
-          // （2026-10-24 事故）。
-          const keys = [];
-          for (const entry of record.keys) {
-            // name 字段现在是「备注」。存量数据里旧的默认名（Key1/Key2…）
-            // 不算备注：匹配 ^Key\d+$ 的旧默认名显示为空备注。
-            const isLegacyDefault = /^Key\d+$/.test(entry.name);
-            keys.push({
-              id: entry.id,
-              label: isLegacyDefault ? "" : entry.name,
-              phase: poolAdmin.phaseOf(entry.id),
-              disabled: record.disabledIds.includes(entry.id),
-              deleted: record.deletedIds.includes(entry.id)
-            });
-          }
+          // U11 顺带1（2026-11-04 拍板案 a）：GET 行与快照 pool 块**同一份实现**
+          // （index 的 poolKeyRows，经 poolAdmin.keyRows 注入）——label=脱敏名
+          // （maskKey）、note=备注、相位走 seed 感知的 statusById。两套形状曾经
+          // 相反（此处 label 装备注、无 note 字段），无消费者的潜伏分叉在此单源
+          // 收口；「配置了什么就列什么，凭据解析失败列表不变空」（2026-10-24
+          // 事故）由 poolKeyRows 自身的回退语义保证（label 回落 entry.id）。
           writeJson(response, 200, {
             ok: true,
-            keys,
+            keys: await poolAdmin.keyRows(),
             globalConcurrency: await poolAdmin.effectiveConcurrency(),
-            concurrencyFromPanel: record.globalConcurrency
+            concurrencyFromPanel: (await poolAdmin.store.read()).globalConcurrency
           }, { "cache-control": "no-store" });
           return;
         }

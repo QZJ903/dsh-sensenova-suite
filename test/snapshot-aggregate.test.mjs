@@ -732,11 +732,11 @@ function harness({ stateOverrides = {}, published = [], publishResult = { ok: tr
     net.restore();
   }
   check("H1 a resolved key fetches the catalog and reports no catalogError",
-    (body.catalogError === null || body.catalogError === undefined) && body.catalogAvailable === true,
-    JSON.stringify({ err: body.catalogError, avail: body.catalogAvailable }));
-  check("H2 the fetched entries reach the body and the store",
-    JSON.stringify(body.catalogModels) === JSON.stringify(["brand-new-model"]) && replaceCalls.length === 1,
-    JSON.stringify({ models: body.catalogModels, writes: replaceCalls.length }));
+    body.catalogError === null || body.catalogError === undefined,
+    JSON.stringify({ err: body.catalogError }));
+  check("H2 the fetched entries reach the store (exactly one write)",
+    replaceCalls.length === 1,
+    JSON.stringify({ writes: replaceCalls.length }));
 }
 {
   const { params, replaceCalls } = harness({ apiKey: "" });
@@ -752,8 +752,8 @@ function harness({ stateOverrides = {}, published = [], publishResult = { ok: tr
       typeof body.catalogError?.message === "string" && body.catalogError.message !== "",
     JSON.stringify(body.catalogError));
   check("H4 no key means no fetch and no store write",
-    body.catalogAvailable === false && replaceCalls.length === 0,
-    JSON.stringify({ avail: body.catalogAvailable, writes: replaceCalls.length }));
+    replaceCalls.length === 0,
+    JSON.stringify({ writes: replaceCalls.length }));
 }
 {
   const { params } = harness({ apiKey: "sk-test" });

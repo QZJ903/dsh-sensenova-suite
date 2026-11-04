@@ -242,9 +242,11 @@ export function defaultThinkingLevels(modelId: string): string[] {
 /**
  * 存储记录 ∪ 目录内缺键模型的默认集——面板勾选与 DSH 可选档位共同读的视图。
  * 目录里出现的新模型在 pool.json 没有键（播种只发生在写盘时刻），缺键在这里
- * 按 {@link defaultThinkingLevels} 补默认；**已存键原样尊重**（含显式空数组，
- * 面板「全不勾」的保存不被翻案）。纯函数：ids 由调用方给（index 的发布在服
- * 目录），本模块不读目录。
+ * 按 {@link defaultThinkingLevels} 补默认；**已存键原样尊重**（含显式空数组——
+ * U11-D1A 后面板有「最后一档不可取消」守卫、不再产出空勾选集，直写状态文件的
+ * 空数组仍被本视图尊重。注意「零档位」在存储模型里没有拼法：adapter 侧
+ * withUserThinking 把空数组折叠回目录档位）。纯函数：ids 由调用方给（index 的
+ * 发布在服目录），本模块不读目录。
  */
 export function thinkingWithDefaults(stored: Record<string, string[]>, modelIds: Iterable<string>): Record<string, string[]> {
   const out: Record<string, string[]> = { ...stored };

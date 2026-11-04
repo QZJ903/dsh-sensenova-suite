@@ -34,7 +34,7 @@ export const SNAPSHOT_PATH = `/api/${name}/snapshot`;
  *   size counts the names, or asks `tsc` by adding a key.
  * @returns {Function} the `off()` unregister callback.
  */
-export function registerSnapshotRoute(ctx: any, wiring: Pick<Wiring, "settings" | "configError" | "cache" | "inflight" | "tokenStore" | "resolveCatalogApiKey" | "publisher" | "catalogStore" | "providerStore" | "logger"> & { poolSnapshot?: () => unknown; thinkingOverrides?: () => Record<string, string[]> }) {
+export function registerSnapshotRoute(ctx: any, wiring: Pick<Wiring, "settings" | "configError" | "cache" | "inflight" | "tokenStore" | "resolveCatalogApiKey" | "publisher" | "catalogStore" | "providerStore" | "logger"> & { poolSnapshot?: () => unknown }) {
   const { settings, configError, cache, inflight, tokenStore, publisher, catalogStore, providerStore, logger } = wiring;
   const poolSnapshot = wiring.poolSnapshot;
 
@@ -68,7 +68,6 @@ export function registerSnapshotRoute(ctx: any, wiring: Pick<Wiring, "settings" 
           catalogStore,
           panelSwitch: () => optional(providerStore.enabled()),
           ...(typeof poolSnapshot === "function" ? { poolSnapshot } : {}),
-          ...(typeof wiring.thinkingOverrides === "function" ? { thinkingOverrides: wiring.thinkingOverrides() } : {}),
           onShapeDrift: (message: string) => degrade(message, null, logger, null)
         });
         writeJson(response, 200, body, { "cache-control": "no-store" });

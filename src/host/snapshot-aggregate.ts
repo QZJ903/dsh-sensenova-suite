@@ -169,7 +169,6 @@ export async function buildSnapshotBody({
   catalogStore,
   panelSwitch,
   poolSnapshot,
-  thinkingOverrides,
   wireProtocol,
   onShapeDrift,
   onQuotaPools
@@ -195,8 +194,6 @@ export async function buildSnapshotBody({
   panelSwitch: () => Promise<boolean | null>;
   /** Key 池诊断快照（可选；测试可省略）。key 打码为尾 4 位。 */
   poolSnapshot?: () => unknown;
-  /** 每模型可用思考档位（pool.json `thinking` 分区；面板行内勾选）。可选。 */
-  thinkingOverrides?: Record<string, string[]> | null;
   /** provider 配置的 wire 模式（per-model-protocol-chain：强制值=单线链，进生效链合成）。可选，缺省 auto。 */
   wireProtocol?: import("./wire/plan.ts").WireProtocol;
   /**
@@ -533,7 +530,7 @@ export async function buildSnapshotBody({
     // the operator's pseudo `×N` under the SAME matcher the trend rows use —
     // the badge and the consumption chart quote one computed fact, and an
     // unmatched model simply gets no badge (never a guessed 1).
-    models: rosterWithAvailability(offered, pools, settings.maxTokensOverrides, thinkingOverrides, settings.contextWindowOverrides).map((row) => {
+    models: rosterWithAvailability(offered, pools, settings.maxTokensOverrides, settings.contextWindowOverrides).map((row) => {
       const multiplier = matchMultiplier(row.id, settings.trendMultipliers);
       return multiplier === undefined ? row : { ...row, multiplier };
     }),
@@ -589,14 +586,6 @@ export async function buildSnapshotBody({
     // Token state, with no secret in it: the panel uses this to say whether
     // the token renews itself or is waiting on an account.
     auth: (await tokenStore.state()) as import("../shared/wire.ts").AuthData,
-    catalogAvailable: Array.isArray(catalog),
-    catalogModels: catalogIds,
-    // With the console unreachable the pools are empty, so every catalogue
-    // model would read as "uncounted" — noise that blames the models for the
-    // missing quota data. The `quotaError` line already explains the blank.
-    uncountedModels: quotaError === null && Array.isArray(catalog)
-      ? catalogIds.filter((model) => !pools.pools.some((pool) => pool.modelIds.includes(model)))
-      : [],
     // Step three status: key presence/source, opt-in, registration state, and
     // model/vision counts — never the key itself.
     llm: llmStatus,

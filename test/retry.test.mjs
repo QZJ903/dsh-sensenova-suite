@@ -239,13 +239,10 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       byId.m1.maxOutputLength === 65536, String(byId.m1.maxOutputLength));
     check("an undeclared ceiling projects as 0, not a guessed number",
       byId.m2.maxOutputLength === 0, String(byId.m2.maxOutputLength));
-    // The selectable ladder the row quotes must be EXACTLY what pi-ai's
-    // getSupportedThinkingLevels computes over our map (null drops) — the
-    // DSH selector's effort list source. 2026-10-26: 只含 off/low/medium/high/max
+    // The row no longer carries `thinkingLevels` (U11 死字段删除，2026-11-04)；
+    // the ladder the DSH selector offers is pinned DIRECTLY below through
+    // `supportedThinkingLevels` — 2026-10-26: 只含 off/low/medium/high/max
     // （xhigh/minimal 彻底移除）。
-    check("the row projects the full thinking ladder (xhigh/minimal removed)",
-      JSON.stringify(byId.m1.thinkingLevels) === JSON.stringify(["off", "low", "medium", "high", "max"]),
-      JSON.stringify(byId.m1.thinkingLevels));
     check("every model offers the same full ladder (2026-10-26)",
       supportedThinkingLevels({ id: "glm-5.2" }).join(",") === "off,low,medium,high,max" &&
       supportedThinkingLevels({ id: "deepseek-v4-flash" }).join(",") === "off,low,medium,high,max" &&

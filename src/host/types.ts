@@ -150,8 +150,6 @@ export interface Wiring {
   resolveCatalogApiKey: () => Promise<string>;
   /** Key 池诊断快照（snapshot 路由只读块；测试可省略）。 */
   poolSnapshot?: () => unknown;
-  /** 每模型可用思考档位（pool.json `thinking` 分区；snapshot 路由/发布链读取）。 */
-  thinkingOverrides?: () => Record<string, string[]>;
   /** Key 池管理面（pool 路由；测试可省略）。 */
   poolAdmin?: import("./routes/pool.ts").PoolAdmin;
   /** 池状态刷新（models 路由保存协议后调用；测试可省略）。 */

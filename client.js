@@ -180,6 +180,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"mm.img2imgHint": "让对话模型对图片进行编辑，第 1 张为主编辑图，至多另附 5 张参考图；出图以链接返回，保存目录填了才落盘（目录会自动创建）。",
 			"mm.visionHint": "为没有原生看图能力的模型转述图片；有原生看图能力的模型（即已勾选「可看图」）不做转述。",
 			"mm.catalogEmpty": "（目录暂无此模型）",
+			"mm.savedModelMissing": "已保存的模型不在当前目录中",
 			"poolMng.concurrent": "并发",
 			"poolMng.note": "备注",
 			"poolMng.saveName": "保存",
@@ -346,6 +347,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			"mm.img2imgHint": "Let chat models edit images: the first image is the main image to edit, with up to 5 more as references. Images return as links; files land on disk only when a save directory is set (created automatically).",
 			"mm.visionHint": "Relay images for models without native vision; models with native vision (checked \"vision\") are not relayed.",
 			"mm.catalogEmpty": " (no such model in the catalogue yet)",
+			"mm.savedModelMissing": "The saved model is not in the current catalogue",
 			"poolMng.concurrent": "Concurrency",
 			"poolMng.note": "note",
 			"poolMng.saveName": "save",
@@ -1998,19 +2000,20 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 					color: "var(--dsw-alias-label-secondary)"
 				} }, tt("llm.rosterThinkingLevels") + "："), ...THINKING_CHOICES.map((level) => {
 					const picking = Array.isArray(thinkingById?.[id]) && thinkingById[id].includes(level);
+					const locked = lastLevelGuard(thinkingById?.[id], level);
 					return h("label", {
 						key: level,
 						style: {
 							display: "inline-flex",
 							gap: 4,
 							alignItems: "center",
-							cursor: busy ? "default" : "pointer",
+							cursor: busy || locked ? "default" : "pointer",
 							fontSize: 12
 						}
 					}, h("input", {
 						type: "checkbox",
 						checked: picking,
-						disabled: busy === true,
+						disabled: busy === true || locked,
 						style: S.modelCheck,
 						"aria-label": `${label} 档位 ${level}`,
 						onChange: () => {
@@ -2101,6 +2104,19 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			for (const wire of base.slice(slot + 1)) if (!head.includes(wire)) head.push(wire);
 		}
 		return head;
+	}
+	/**
+	* 思考档位复选框的「最后一档不可取消」守卫（纯函数，复选框与 render 套件共用）。
+	*
+	* D1A（2026-11-04 拍板）：存储模型没有「显式零档位」的拼法——宿主
+	* thinkingLevelMapFor（llm-models.ts）与 adapter withUserThinking 都把空数组
+	* 折叠回全档位，「全不勾」无处落地（U11-D1：全不勾保存后静默弹回的根因）。
+	* UI 不构造无处落的状态：只剩一档时禁用取消该档（勾别的档不受影响）。先例 =
+	* 协议三槽的槽 1 无空选项（链必非空）。可看图无此守卫——visionModels 的
+	* 显式空数组是宿主尊重的合法状态（pool.test 显式 [] 钉）。
+	*/
+	function lastLevelGuard(levels, level) {
+		return Array.isArray(levels) && levels.length <= 1 && levels.includes(level);
 	}
 	/**
 	* The curated model allow-list: which of this key's models get pushed to
@@ -2624,8 +2640,9 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 				}
 				setConcurrency(null);
 				onDone?.();
-			} catch {
-				setError(tt("auth.network"));
+			} catch (caught) {
+				const message = caught instanceof Error ? caught.message : "";
+				setError(/non-JSON HTTP 4\d\d/.test(message) ? tt("poolMng.routeMissing") : message || tt("auth.network"));
 			}
 		}, [
 			concurrencyValue,
@@ -2659,7 +2676,13 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			},
 			value: String(concurrencyValue),
 			disabled: busyId !== null,
-			onChange: (event) => setConcurrency(Math.max(0, Math.floor(Number(event.target.value) || 0)))
+			onChange: (event) => setConcurrency(Math.max(0, Math.floor(Number(event.target.value) || 0))),
+			onKeyDown: (event) => {
+				if (event.key === "Enter") {
+					event.preventDefault?.();
+					if (concurrencyDirty) saveConcurrency();
+				}
+			}
 		}), concurrencyDirty ? h("button", {
 			type: "button",
 			style: S.button,
@@ -3334,19 +3357,30 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 			label,
 			onChange: () => setKey(section, key, !(savedBool(section, key) ?? fallback))
 		}));
-		/** 模型下拉（imageGen / vision 清单）。 */
-		const modelSelect = (section, label, list, fallback) => h(Field, { label }, h("select", {
-			style: {
-				...S.input,
-				width: "auto"
-			},
-			value: saved(section, "model") !== "" ? saved(section, "model") : fallback,
-			disabled: busySection === section,
-			onChange: (event) => setKey(section, "model", event.target.value)
-		}, list.length === 0 ? h("option", { value: fallback }, fallback + tt("mm.catalogEmpty")) : list.map((model) => h("option", {
-			key: String(model.id),
-			value: String(model.id)
-		}, String(model.name ?? model.id)))));
+		/** 模型下拉（imageGen / vision 清单）。S2（2026-11-04 拍板）：已存模型 id 暂缺于
+		* 目录时补一行提示——选项来自当前目录、值来自已存设置，脱档时下拉显示不出它，
+		* 而适配器仍拿旧 id 发请求（400+30s 冷却）；分叉别静默。saved 为空（走
+		* fallback）不提示：fallback 缺席是另一回事（空目录分支自己有文案）。 */
+		const modelSelect = (section, label, list, fallback) => {
+			const savedModel = saved(section, "model");
+			const staleSaved = savedModel !== "" && !list.some((model) => String(model?.id ?? "") === savedModel);
+			return h("div", null, h(Field, { label }, h("select", {
+				style: {
+					...S.input,
+					width: "auto"
+				},
+				value: savedModel !== "" ? savedModel : fallback,
+				disabled: busySection === section,
+				onChange: (event) => setKey(section, "model", event.target.value)
+			}, list.length === 0 ? h("option", { value: fallback }, fallback + tt("mm.catalogEmpty")) : list.map((model) => h("option", {
+				key: String(model.id),
+				value: String(model.id)
+			}, String(model.name ?? model.id))))), staleSaved ? h("p", { style: {
+				...S.formNote,
+				color: "var(--dsw-alias-state-warn-primary)",
+				margin: "2px 0 0"
+			} }, tt("mm.savedModelMissing")) : null);
+		};
 		/** 文本草稿（key = section.key；常驻输入框用）。 */
 		const [drafts, setDrafts] = useState({});
 		const [focusedField, setFocusedField] = useState(null);
@@ -3811,12 +3845,16 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 	* its exhaustion — to the general pool, i.e. show a full meter for a model that
 	* still has an untouched quota behind it.
 	*
-	* That observation does not prove the platform charges the dedicated pool
-	* FIRST: a "general pool until it runs dry, then the dedicated one" rule would
-	* have produced the same numbers. The pill can therefore read healthy while a
-	* request still comes back 429. That is the same bet the Host's all-pools rule
-	* makes (`exhaustedModelIds`), so the pill and the picker never disagree — only
-	* the inference about the console's billing order stays unverified.
+	* CONFIRMED 2026-11-04 (the operator's live machine): the billing map is
+	* EXCLUSIVE — `sensenova-6.8-flash-lite` draws from the dedicated pool only,
+	* every other model from the general pool only, and neither ever crosses over.
+	* The 2026-10-18 numbers alone could not show that: a "general first, then
+	* dedicated on drain" rule would have looked identical, and under that reading
+	* a pill could have read healthy while a request still came back 429. With the
+	* exclusive mapping that gap is closed — what the pill points at is what the
+	* platform bills — and the Host's all-pools rule (`exhaustedModelIds`) stays
+	* consistent with it: a drained dedicated pool blocks only the Flash-Lite
+	* model, never the others.
 	*
 	* A Token Plan model that names no pool falls back to the first pool — never to
 	* an invented aggregate.
@@ -4275,7 +4313,7 @@ var dsh_connect_sensenova_token_plan_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-11-04T04:36";
+		const CLIENT_BUILD = "2026-11-04T23:06";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			try {

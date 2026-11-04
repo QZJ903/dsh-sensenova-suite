@@ -58,11 +58,6 @@ export const zh = {
   // decoration — and it follows the UI language, so the English UI does not
   // wear Chinese characters the model picker would never show.
   "composer.planPrefix": "商汤",
-  // The unit rides the number rather than standing alone: "浣熊 · 4,215 分"
-  // reads as a quantity, "浣熊 · 4,215" as an id.
-  // The heading over the gateway's own split of the total. It exists so the
-  // parts read as a composition OF the balance above them, not as three more
-  // unrelated figures.
   "composer.poolHit": "本模型计入此池",
   // Says HOW the pool was chosen, never WHAT KIND it is. The previous wording
   // ("按通用池计") asserted a general pool, which `poolFor` cannot know: it falls
@@ -74,19 +69,6 @@ export const zh = {
   // selection, and the fallback is deliberately worded as "not a
   // confirmed attribution, the sentence describes the selection".
   "composer.poolFallback": "本模型未列入任何池，此处按平台顺序取第一个池",
-  // The roster's "something appeared" marker. It rides BESIDE the balance
-  // because a new model is a fact about what the gateway offers, not about
-  // what is left — and it is the only surface that can say it without the user
-  // having to open the Raccoon tab on the day it happens (the 1017 addition
-  // went unseen for weeks). Wording is a count noun, so the number in front
-  // composes in both languages: "1 新模型" / "2 新模型", "1 new" / "2 new".
-  //
-  // The tooltip says 本机首次见到, NOT 网关新增: the plugin has no gateway
-  // "listed since" field (ADR-017 复核条件), so what it actually knows is the
-  // moment THIS profile first saw the id. Claiming "网关新增" would state a
-  // gateway fact on the plugin's behalf — the same overclaim ADR-016 exists to
-  // stop. A second profile legitimately shows its own first-sightings, which
-  // "本机" makes true and "网关" would make a lie.
   "auth.title": "账号管理",
   "auth.registerHint": "还没有账号？前往官网注册，免费开通 Token Plan 额度 →",
   "auth.portalHint": "前往官网管理额度 / 获取 API Key →",
@@ -219,6 +201,7 @@ export const zh = {
   "mm.img2imgHint": "让对话模型对图片进行编辑，第 1 张为主编辑图，至多另附 5 张参考图；出图以链接返回，保存目录填了才落盘（目录会自动创建）。",
   "mm.visionHint": "为没有原生看图能力的模型转述图片；有原生看图能力的模型（即已勾选「可看图」）不做转述。",
   "mm.catalogEmpty": "（目录暂无此模型）",
+  "mm.savedModelMissing": "已保存的模型不在当前目录中",
   "poolMng.concurrent": "并发",
   "poolMng.note": "备注",
   "poolMng.saveName": "保存",
@@ -233,21 +216,6 @@ export const zh = {
   "poolMng.delete": "删除",
   "poolMng.deleteConfirm": "确定删除这把 key？凭据本体将一并删除，恢复需要重新粘贴。",
   "poolMng.cancel": "取消",
-  // Zero multiplier: a statement about the model, not a rate of zero.
-  // NOT `llm.rosterRateTitle`: that one says the rate is the operator's own
-  // pseudo figure ("非官方"). This one IS the gateway catalogue's own field,
-  // and quoting the other tooltip here would libel real data as invented.
-  // Promotion states the gateway declares (`billing_status`): the row's
-  // multiplier is already the EFFECTIVE price, and the list price + the
-  // gateway's note ride along so the chip can say what the strike-through
-  // would, in one tooltip. `{note}` may be empty — the format tolerates it.
-  // The three terminal outcomes of a QR walk. They are EVENTS the tab reports
-  // once (the route clears them as it hands them over), not a persistent state:
-  // "signed in" is `loggedIn`, which the credential answers on every poll.
-  // The number of minutes used to be spelled here ("5 分钟内未确认") while the
-  // Host held `RACCOON_LOGIN_TIMEOUT_MS` as the real deadline: the text is a
-  // copy nobody pins, so a tuned deadline would have made the panel lie. The
-  // sentence now states the outcome without restating the Host's number.
 } satisfies Record<string, string>;
 
 /** English dictionary, mirroring every zh key. */
@@ -272,11 +240,6 @@ export const en: typeof zh = {
   "composer.planPrefix": "SenseNova",
   "composer.poolHit": "this model draws from this pool",
   "composer.poolFallback": "no pool lists this model — showing the first pool the platform returned",
-  // "1 new" / "2 new" reads as a toolbar chip; the tooltip and the popover row
-  // carry the names, so the pill itself stays a count. The tooltip says "first
-  // seen on this device", not "new in the gateway" — there is no gateway
-  // "listed since" field, and stating a gateway fact the plugin cannot know is
-  // the overclaim ADR-016 exists to stop (see the zh note for the same rule).
   "auth.title": "Account management",
   "auth.registerHint": "No account yet? Register on the official site for a free Token Plan quota →",
   "auth.portalHint": "Manage quota / get API keys on the official site →",
@@ -407,6 +370,7 @@ export const en: typeof zh = {
   "mm.img2imgHint": "Let chat models edit images: the first image is the main image to edit, with up to 5 more as references. Images return as links; files land on disk only when a save directory is set (created automatically).",
   "mm.visionHint": 'Relay images for models without native vision; models with native vision (checked "vision") are not relayed.',
   "mm.catalogEmpty": " (no such model in the catalogue yet)",
+  "mm.savedModelMissing": "The saved model is not in the current catalogue",
   "poolMng.concurrent": "Concurrency",
   "poolMng.note": "note",
   "poolMng.saveName": "save",

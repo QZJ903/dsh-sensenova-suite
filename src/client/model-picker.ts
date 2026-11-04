@@ -167,14 +167,15 @@ const THINKING_CHOICES = ["off", "low", "medium", "high", "max"];
               h("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" } }, tt("llm.rosterThinkingLevels") + "："),
               ...THINKING_CHOICES.map((level) => {
                 const picking = Array.isArray(thinkingById?.[id]) && (thinkingById[id] as string[]).includes(level);
+                const locked = lastLevelGuard(thinkingById?.[id], level);
                 return h("label", {
                   key: level,
-                  style: { display: "inline-flex", gap: 4, alignItems: "center", cursor: busy ? "default" : "pointer", fontSize: 12 },
+                  style: { display: "inline-flex", gap: 4, alignItems: "center", cursor: busy || locked ? "default" : "pointer", fontSize: 12 },
                 },
                 h("input", {
                   type: "checkbox",
                   checked: picking,
-                  disabled: busy === true,
+                  disabled: busy === true || locked,
                   style: S.modelCheck,
                   "aria-label": `${label} 档位 ${level}`,
                   onChange: () => { if (onThinkingToggle) onThinkingToggle(id, level, !picking); }
@@ -269,6 +270,20 @@ export function applyChainSlotEdit(base: readonly string[], slot: number, value:
     }
   }
   return head;
+}
+
+/**
+ * 思考档位复选框的「最后一档不可取消」守卫（纯函数，复选框与 render 套件共用）。
+ *
+ * D1A（2026-11-04 拍板）：存储模型没有「显式零档位」的拼法——宿主
+ * thinkingLevelMapFor（llm-models.ts）与 adapter withUserThinking 都把空数组
+ * 折叠回全档位，「全不勾」无处落地（U11-D1：全不勾保存后静默弹回的根因）。
+ * UI 不构造无处落的状态：只剩一档时禁用取消该档（勾别的档不受影响）。先例 =
+ * 协议三槽的槽 1 无空选项（链必非空）。可看图无此守卫——visionModels 的
+ * 显式空数组是宿主尊重的合法状态（pool.test 显式 [] 钉）。
+ */
+export function lastLevelGuard(levels: string[] | undefined, level: string): boolean {
+  return Array.isArray(levels) && levels.length <= 1 && levels.includes(level);
 }
 
 /**

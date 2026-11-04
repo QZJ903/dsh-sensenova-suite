@@ -464,16 +464,15 @@ export const HIDE_ALL_MODELS = "__hide_all__";
  *   a descriptor build gets. Positionally third and optional, so a caller written
  *   before the field existed keeps compiling; omitting it makes every row quote
  *   the catalogue figure, which is what a deployment with no overrides wants.
- * @param {object} [thinkingOverrides] - the pool.json `thinking` partition.
  * @param {object} [contextWindowOverrides] - `{ "<model id>": tokens }`, the
  *   settings row the adapter's resolveModel reads too (contextWindowForId) —
  *   the badge and the request-side window stay one fact.
- * @returns {{id: string, name: string, vision: boolean, imageGen: boolean, available: boolean, quotaExhausted: boolean, contextWindow: number, maxOutputLength: number, thinkingLevels: string[]}[]}
+ * @returns {{id: string, name: string, vision: boolean, imageGen: boolean, available: boolean, quotaExhausted: boolean, contextWindow: number, maxOutputLength: number}[]}
  */
-export function rosterWithAvailability(entries: unknown, pools: { pools?: unknown }, maxTokensOverrides?: Record<string, number> | null, thinkingOverrides?: Record<string, string[]> | null, contextWindowOverrides?: Record<string, number> | null) {
+export function rosterWithAvailability(entries: unknown, pools: { pools?: unknown }, maxTokensOverrides?: Record<string, number> | null, contextWindowOverrides?: Record<string, number> | null) {
   const blocked = new Set(exhaustedModelIds(pools));
   const position = new Map();
-  const out: { id: string; name: string; vision: boolean; imageGen: boolean; available: boolean; quotaExhausted: boolean; contextWindow: number; maxOutputLength: number; thinkingLevels: string[] }[] = [];
+  const out: { id: string; name: string; vision: boolean; imageGen: boolean; available: boolean; quotaExhausted: boolean; contextWindow: number; maxOutputLength: number }[] = [];
   for (const entry of Array.isArray(entries) ? entries : []) {
     // 治本：出图模型（imageGen）从面板清单整行划走——它不属于对话模型，
     // 不该出现在「接入 API 的推送清单」里（此清单是供对话模型勾选的）。
@@ -498,12 +497,7 @@ export function rosterWithAvailability(entries: unknown, pools: { pools?: unknow
       // claim a ceiling the request does not send. Widening the projection here
       // is deliberate: the raw entry stays Host-side, and the panel quotes only
       // these two parameter figures plus the vision verdict.
-      maxOutputLength: maxTokensFor(entry, maxTokensOverrides),
-      // What the DSH selector will really offer this model (same rule pi-ai
-      // applies to the registered descriptor) — the per-model fact worth
-      // repeating on a row, unlike the provider-wide default, which the panel
-      // states once in its header. 用户勾选的档位（thinking 分区）优先。
-      thinkingLevels: supportedThinkingLevels(entry, thinkingOverrides?.[id])
+      maxOutputLength: maxTokensFor(entry, maxTokensOverrides)
     };
     if (position.has(id)) {
       out[position.get(id)] = row;

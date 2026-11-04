@@ -589,13 +589,13 @@ async function seedPoolKey(credentials, key) {
 }
 
 // === L2. the snapshot's contract fields are present and correct ===========
-// Four fields ride on every successful snapshot and the panel branches on each:
+// Two fields ride on every successful snapshot and the panel branches on each:
 // `shapeWarnings` (PITFALLS §12 — a renamed console field must read as drift,
-// not "no usage"), `catalogAvailable` / `uncountedModels` (the optional model
-// catalog), and `traceFile` (the sanitized login trace a failed sign-in leaves
-// behind). None had a direct assertion before, so a rename or a dropped field
-// stayed invisible until it reached a user. This drives them through the real
-// route with the network stubbed.
+// not "no usage") and `traceFile` (the sanitized login trace a failed sign-in
+// leaves behind). None had a direct assertion before, so a rename or a dropped
+// field stayed invisible until it reached a user. This drives them through the
+// real route with the network stubbed. (`catalogAvailable` / `uncountedModels`
+// were deleted 2026-11-04 — U11 死字段清理，无 UI 消费者。)
 {
   // A drifted pool body: the parsers still return what they understood, but
   // `plan` and `pools` are gone from the top level.
@@ -674,19 +674,14 @@ async function seedPoolKey(credentials, key) {
       pool.window5h.used === 0 && pool.window5h.limit === 0, JSON.stringify(pool.window5h));
   }).catch((error) => fail("L2b: nested shapeWarnings", error));
 
-  // The healthy path: no drift, and no API key means the catalog degrades to
-  // `catalogAvailable:false` with an empty uncounted list (never undefined).
+  // The healthy path: no drift (the catalog degradation itself is pinned in
+  // snapshot-aggregate.test H3/H4 via catalogError).
   await withNetwork(consoleStub(), async () => {
     const call = await mount(makeCredentials(storedGrant(l2Token, "r", 7200)));
     const snapshot = await call(SNAPSHOT_PATH, makeRequest());
     check("a clean poll reports no drift",
       Array.isArray(snapshot.payload.shapeWarnings) && snapshot.payload.shapeWarnings.length === 0,
       JSON.stringify(snapshot.payload.shapeWarnings));
-    check("without an API key the catalog is unavailable", snapshot.payload.catalogAvailable === false,
-      String(snapshot.payload.catalogAvailable));
-    check("uncountedModels is an empty array when there is no catalog",
-      Array.isArray(snapshot.payload.uncountedModels) && snapshot.payload.uncountedModels.length === 0,
-      JSON.stringify(snapshot.payload.uncountedModels));
   }).catch((error) => fail("L2: clean + no-catalog", error));
 
   // traceFile: a rejected password must leave the caller a pointer to the
@@ -1138,16 +1133,12 @@ async function seedPoolKey(credentials, key) {
       // `maxOutputLength` is 0 (nothing declared); `multiplier: 1` rides
       // because the DEFAULT trendMultipliers match "sensenova" — the same
       // pseudo rate the trend rows would get, one matcher for both.
-      // `thinkingLevels` is the proven-only set: these fake-catalog ids are
-      // not in the probe table (PROBED_EFFORT), so no level beyond the
-      // platform default rides — the roster quotes off/高 and nothing the
-      // platform never answered 200 for on THIS id.
       const snapshot = await call(SNAPSHOT_PATH, makeRequest());
       check("Q2 the snapshot hands the picker the whole roster with a vision verdict",
         JSON.stringify(snapshot.payload.llm?.models) === JSON.stringify([
-          { id: "SenseNova-Lite", name: "SenseNova-Lite", vision: false, available: true, quotaExhausted: false, contextWindow: 128000, maxOutputLength: 0, thinkingLevels: ["off", "high"], multiplier: 1 },
-          { id: "SenseNova-Vision", name: "SenseNova-Vision", vision: true, available: true, quotaExhausted: false, contextWindow: 128000, maxOutputLength: 0, thinkingLevels: ["off", "high"], multiplier: 1 },
-          { id: "SenseNova-Pro", name: "SenseNova-Pro", vision: false, available: true, quotaExhausted: false, contextWindow: 128000, maxOutputLength: 0, thinkingLevels: ["off", "high"], multiplier: 1 }
+          { id: "SenseNova-Lite", name: "SenseNova-Lite", vision: false, available: true, quotaExhausted: false, contextWindow: 128000, maxOutputLength: 0, multiplier: 1 },
+          { id: "SenseNova-Vision", name: "SenseNova-Vision", vision: true, available: true, quotaExhausted: false, contextWindow: 128000, maxOutputLength: 0, multiplier: 1 },
+          { id: "SenseNova-Pro", name: "SenseNova-Pro", vision: false, available: true, quotaExhausted: false, contextWindow: 128000, maxOutputLength: 0, multiplier: 1 }
         ]), JSON.stringify(snapshot.payload.llm?.models));
       check("Q2 the snapshot quotes the profile's pinned thinking default",
         snapshot.payload.llm?.thinkingDefault === "high",

@@ -100,8 +100,6 @@ export interface ModelData {
   imageGen?: boolean;
   /** Operator pseudo credit multiplier (×N); absent when no config key matched. */
   multiplier?: number;
-  /** Thinking levels the DSH selector offers for this model, escalation order. */
-  thinkingLevels?: string[];
 }
 
 export interface AuthData {
@@ -217,9 +215,6 @@ export interface SnapshotData {
   cacheSeconds?: number;
   pollSeconds?: number;
   auth?: AuthData | null;
-  catalogAvailable?: boolean;
-  catalogModels?: string[];
-  uncountedModels?: string[];
   llm?: LlmData | null;
   pools?: PoolsData | null;
   trend?: TrendData | null;

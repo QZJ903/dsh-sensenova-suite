@@ -48,6 +48,23 @@ try {
     secrets: [],
     store,
     phaseOf: () => "running",
+    // U11 顺带1（案 a）：GET 行与快照 poolKeyRows 同契约——桩按同一形状从
+    // 真 store + 内存 vault 现算（label=脱敏名回落 id、note=备注）。
+    keyRows: async () => {
+      const record = await store.read();
+      return record.keys.map((entry) => {
+        const isLegacyDefault = /^Key\d+$/.test(entry.name);
+        const value = vault.get(`dsh_pool_${entry.id.replace(/^key-/, "key_")}`);
+        return {
+          id: entry.id,
+          label: typeof value === "string" && value !== "" ? maskKey(value) : entry.id,
+          note: entry.name !== "" && !isLegacyDefault ? entry.name : null,
+          phase: "running",
+          disabled: record.disabledIds.includes(entry.id),
+          deleted: record.deletedIds.includes(entry.id)
+        };
+      });
+    },
     refresh: async () => {},
     refreshKeys: async () => { admin.refreshKeysCalls += 1; },
     effectiveConcurrency: async () => {
@@ -139,6 +156,11 @@ try {
   check("GET 列出 store 清单（不解析凭据也列）",
     got.ok === true && Array.isArray(got.keys) && got.keys.some((k) => k.id === "key-3"),
     out.slice(0, 120));
+  check("GET keys 行形状与快照投影同源（label 回落 id、note 字段在；U11 顺带1）",
+    got.keys.every((k) => "note" in k)
+      && got.keys.find((k) => k.id === "key-3")?.label === "key-3"
+      && got.keys.find((k) => k.id === "key-3")?.note === null,
+    JSON.stringify(got.keys).slice(0, 200));
 
   // 6. add：编号续接（现有最大号 +1）、凭据与清单各落一份、refreshKeys 触发。
   const refreshBeforeAdd = admin.refreshKeysCalls;
@@ -154,6 +176,18 @@ try {
   check("add 后触发 refreshKeys",
     admin.refreshKeysCalls > refreshBeforeAdd,
     `${refreshBeforeAdd} -> ${admin.refreshKeysCalls}`);
+
+  // 6b. 有凭据的行 label=maskKey（与快照同一份 poolKeyRows 语义；U11 顺带1）。
+  {
+    let outG = "";
+    const getResponse2 = { writeHead: (code) => { outG += `status=${code} `; }, end: (p) => { outG += String(p); } };
+    await def.handler({ method: "GET", headers: { host: "127.0.0.1:19387", origin: "" } }, getResponse2);
+    const gotG = JSON.parse(outG.slice(outG.indexOf("{")));
+    const addedRow = gotG.keys.find((k) => k.id === "key-4");
+    check("GET 有凭据行 label=maskKey、无备注 note=null（与快照单源）",
+      addedRow?.label === maskKey("sk-newpoolkeyvalue") && addedRow?.note === null,
+      JSON.stringify(gotG.keys).slice(0, 240));
+  }
 
   // 7. add 同值查重（2026-10-29 定案根因的钉）：同值再贴 → 拒并报持有行的
   //    脱敏名（与行首 maskKey 文字一致，id 不上屏——行上没有 id 可对）。

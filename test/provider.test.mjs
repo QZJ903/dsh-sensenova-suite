@@ -360,7 +360,7 @@ const BASE_URL = "https://token.sensenova.cn/v1";
     check("the roster drops id-less entries, junk and image-generation rows",
       roster.map((r) => r.id).join(",") === "a,b,c", roster.map((r) => r.id).join(","));
     check("the roster keeps only the projected fields",
-      JSON.stringify(Object.keys(roster[0]).sort()) === JSON.stringify(["available", "contextWindow", "id", "imageGen", "maxOutputLength", "name", "quotaExhausted", "thinkingLevels", "vision"]),
+      JSON.stringify(Object.keys(roster[0]).sort()) === JSON.stringify(["available", "contextWindow", "id", "imageGen", "maxOutputLength", "name", "quotaExhausted", "vision"]),
       JSON.stringify(Object.keys(roster[0]).sort()));
     check("a missing name falls back to the id", roster[2].name === "c");
     check("the roster dedupes last-wins at the first-seen position",
