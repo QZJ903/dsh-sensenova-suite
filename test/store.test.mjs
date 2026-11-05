@@ -763,19 +763,8 @@ async function withNetwork(stub, body) {
   }).catch((error) => fail("switching accounts replaces a fresh grant", error));
 }
 
-// --- 11. forgetAccount clears the refs but keeps the grant --------------
-{
-  const credentials = fakeCredentials(grant(jwtExpiring(120), "keep", 7200), {
-    refs: { SENSENOVA_USERNAME: "u", SENSENOVA_PASSWORD: "p" }
-  });
-  const store = createTokenStore({ credentials, credentialKey: credentialKeyFn, env: {} });
-  await store.forgetAccount();
-  check("the username ref is gone", credentials.refs.get("SENSENOVA_USERNAME") === undefined);
-  const state = await store.state();
-  check("the account is forgotten", state.hasAccount === false);
-  check("the grant survives the forget", state.hasRefreshToken === true);
-  check("the panel is not asked for setup", state.needsAccount === false);
-}
+// --- 11. (retired) forgetAccount 的公开面随清除按钮退役（2026-10-29），方法体
+// 与本场景 2026-11-06 一并删除——身份拆除由 removeAccount 编排直调 impl。
 
 // --- 12. an env username plus a vault password configures the account -----
 // 方案 C 后：username 仍可来自 env（readUsername 回退），但密码只查清单——
@@ -822,9 +811,6 @@ async function withNetwork(stub, body) {
     check("a refused in-memory token is replaced", second !== first);
     check("renewal used the refresh token, not a login", stub.log.tokens === 2 && stub.log.logins === 1,
       `tokens=${stub.log.tokens} logins=${stub.log.logins}`);
-
-    await store.forgetAccount();
-    check("forget works in memory", (await store.state()).hasAccount === false);
   }).catch((error) => fail("a Host without credentials can still sign in", error));
 }
 

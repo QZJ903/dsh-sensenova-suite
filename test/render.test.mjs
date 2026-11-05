@@ -163,6 +163,27 @@ const bar = (tree) => findElement(tree, (props) => props["aria-valuenow"] !== un
     texts(tree).includes("42.5") && texts(tree).includes("0"), texts(tree).join("\n"));
 }
 
+// === E3. the ×N chip mirrors the operator config, ×1 included ============
+// The roster marks every configured factor (model-picker, ×0 included);
+// the chart used to gate ×1 out, so the same config showed on one surface
+// and vanished on the other. A configured factor is a fact — show it.
+{
+  const tree = treeOf(render.TrendTable, {
+    trend: { models: [{ model: "Alpha", credits: 42.5, multiplier: 1 }, { model: "Beta", credits: 3, multiplier: 2 }, { model: "Gamma", credits: 1 }] },
+    tt
+  });
+  const text = texts(tree).join("\n");
+  const chips = findAll(tree, (props) => props.title === "trend.multiplierLegend");
+  check("a configured ×1 labels the row like any other factor", text.includes("×1"), text);
+  check("a non-1 factor still labels the row", text.includes("×2"), text);
+  check("every labelled row carries the honesty tooltip", chips.length === 2, String(chips.length));
+  const bare = texts(treeOf(render.TrendTable, {
+    trend: { models: [{ model: "Alpha", credits: 42.5 }, { model: "Beta", credits: 3 }] },
+    tt
+  })).join("\n");
+  check("unconfigured rows stay unlabelled", !bare.includes("×"), bare);
+}
+
 // === F. an empty trend says so instead of rendering an empty table ========
 {
   const out = rendered(render.TrendTable, { trend: { models: [] }, tt });

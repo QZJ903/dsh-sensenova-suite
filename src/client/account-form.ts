@@ -294,8 +294,8 @@ export function AccountForm({ auth, onDone, tt, bare, snapshotAt }: {
             format(tt("auth.retryAfter"), { minutes: coolingMinutes }))
         : null,
       // 已存账号列表（方案 C）：一行 = 用户名 + 当前徽标 + 切换/移除。
-      // 当前号的「切换」不渲染（已是它）；移除随时可用（删的是存档，
-      // 活动会话不动，重新登录一次即回槽）。
+      // 当前号的「切换」不渲染（已是它）；移除随时可用——删别的号只清存档，
+      // 删当前号则自动顶上清单里下一个存续账号（全失败/无存续才回登录态）。
       accounts.length > 0
         ? h(
             "div",

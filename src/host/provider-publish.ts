@@ -15,7 +15,7 @@
  * so the offline suites can substitute a fake factory without touching the
  * Host's node_modules.
  *
- * 跨切面行为指路：catalog 变化 / switch 翻转 / Key 清除 → 重注册 = `index.ts` seed poll + provider route handler + `publishProvider` 调用链。
+ * 跨切面行为指路：catalog 内容变化 / 配额集合翻转 / switch 翻转 / 面板清单保存 → 重注册 = `index.ts` seed poll（snapshot-aggregate 两分支）+ provider/models 路由处理器 + `publishProvider` 调用链。Key 清除不直接触发重注册（pool/account 路由零发布调用）——目录按新 key 重拉后仅内容变化（签名翻转）才走上述链。
  * 看到"为什么 catalog 一小时缓存"的疑问，先读 `ARCHITECTURE.md` §5.2 的快照去抖与 `catalog-store.ts` 头注。
  *
  * @module dsh-sensenova-suite/provider-publish
@@ -87,7 +87,7 @@ export interface PublishResult {
  * Holds the live registration state (`state`); the publish queue, the
  * `disposed` gate and the single-point `registerPair` are the shared
  * `publish-core.ts` bones. The caller drives `publish` from the mount seed, the
- * catalog poll, the provider switch, the roster save and the api-key forget;
+ * catalog poll (content and quota branches), the provider switch and the roster save;
  * it calls `dispose` from the `ctx.effect` teardown.
  *
  * The `getLlm` resolver is a FUNCTION, not a snapshot, because the `llm`
@@ -319,8 +319,8 @@ export function createProviderPublisher(deps: ProviderPublisherDeps = {}) {
    * Publish, queued behind every other publish in flight.
    *
    * The wrapper exists so no caller has to remember the queue: the mount seed,
-   * a catalog poll, an api-key forget and a provider switch all reach the same
-   * critical section, and any one of them racing another is the bug above.
+   * a catalog poll (content or quota branch), a provider switch and a roster save
+   * all reach the same critical section, and any one of them racing another is the bug above.
    * @param {object[]} entries - the normalized catalog entries.
    * @param {string[]} enabledIds - the curated allow-list (empty = all).
    * @param {string[]} [unavailableModelIds] - quota-exhausted model ids.

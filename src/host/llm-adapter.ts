@@ -38,6 +38,12 @@ export interface PoolFacade {
   /** 用户「可看图」勾选集实时读（pool.json vision.visionModels）——图像能力唯一真源：
    * 目录申报边界（listModels/resolveModel）与请求期 entry 注记都从这里读。 */
   visionModelIds?: () => readonly string[];
+  /** 落盘目录底座（catalog.json 的 { entries, fetchedAt }）——adapter 冷启动认领，
+   * 拉取失败时选择器永远有目录可显（2026-11-06 拍板）。缺省 = 不认领。 */
+  catalogFallback?: () => Promise<{ entries: unknown[]; fetchedAt: number } | null>;
+  /** 适配器实例创建回传（发布链异步建实例后调用）——index 据此在卸载时逐个
+   * dispose（停目录自动重试时钟）。缺省 = 不收集。 */
+  onAdapterCreated?: (adapter: { dispose?: () => void }) => void;
 }
 
 /**
@@ -216,7 +222,11 @@ export function createAdapterFactory(pool: PoolFacade) {
       // 模型时以文档为准）：resolveModel 经 contextWindowForId 同序现算
       // context.contextWindow——与面板「上下文」徽章同一判据。
       contextWindowOverrides: () => contextWindowOverrides ?? null,
+      // 落盘目录底座（catalog.json）：冷启动认领 + 失败回落（2026-11-06 拍板）。
+      ...(pool.catalogFallback !== undefined ? { catalogFallback: pool.catalogFallback } : {}),
     });
+    // 实例回传：index 据此在卸载时 dispose（停目录自动重试时钟）。
+    pool.onAdapterCreated?.(adapter);
     return { adapter, providerIds: [LLM_PROVIDER_ID] };
   };
 }

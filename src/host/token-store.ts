@@ -355,25 +355,12 @@ export function createTokenStore(options: {
     },
 
     /**
-     * Forget the stored account.
-     *
-     * The grant is left alone at first: the panel keeps working on the refresh
-     * token until that runs out, and only then asks for the account again. With
-     * no account left to recover a dead refresh token, `acquire` also reaps the
-     * expired grant then, so nothing ownerless is left behind.
-     * @returns {Promise<void>}
-     */
-    async forgetAccount() {
-      const result = await forgetAccountImpl(wiring, state);
-      // Clearing the account supersedes any earlier login failure: the grant
-      // (or its absence) is what the panel should read, not an old error.
-      state.lastError = null;
-      return result;
-    },
-
-    /**
      * 已存账号清单（无密码）：槽号/用户名/是否有令牌快照/是否当前。
      * 面板账号卡的列表与切换按钮的数据源。
+     *
+     * 历史（2026-11-06 死码清除）：公共 `forgetAccount()` 随本清单更新一并删除
+     * ——清除按钮 2026-10-29 退役后它零生产调用方，身份拆除语义由 removeAccount
+     * 的拆场编排直调 forgetAccountImpl 承担。
      */
     async listAccounts() {
       return listAccounts();
@@ -436,9 +423,15 @@ export function createTokenStore(options: {
     },
 
     /**
-     * 移除一个存档账号。**移除的就是当前登录账号 = 退出登录语义**（2026-10-29
-     * 用户拍板 B）：孤儿会话不允许存在——清单条目、活动令牌记录、身份引用一并
-     * 清除，面板回到登录态；其余账号的存档不受影响。移除非当前号时活动会话不动。
+     * 移除一个存档账号。移除的就是当前登录账号时：先拆当前会话（身份引用、
+     * 内存令牌、活动令牌记录一并清除——拍板 B 的清场语义保留为第一步），再按
+     * vault 清单顺序把存续账号逐个顶上（2026-11-06 拍板：还有号就不进未登录态；
+     * switchAccount 装 grant + 当场取令牌验货，死快照用存档密码自动重登），一个
+     * 落地即停；全失败（或无存续）终态 = 干净未登录。移除非当前号时活动会话不动。
+     *
+     * 孤儿会话仍然不存在：终态只有「身份指向存续存档」与「干净未登录」两种。
+     * 先拆后顶的顺序还堵住一个复活洞——留着旧会话直接 switch 的话，
+     * switchAccount 的旧会话回写会把刚删的账号当无密码残档塞回 vault。
      */
     async removeAccount(id: string) {
       await removeAccountRecord(wiring, id);
@@ -446,6 +439,21 @@ export function createTokenStore(options: {
       if (target !== "" && target === await readUsername()) {
         await forgetAccountImpl(wiring, state); // 身份引用 + 内存令牌
         await purgeGrant();                      // 活动令牌记录（无参 = 无条件删）
+        // 存续账号逐个顶上：失败换下一个，直到没有号（终态已是干净未登录，
+        // 失败尝试留下的身份/死快照瞬态由收尾清场兜住）。
+        let switched = false;
+        for (const candidate of await listVaultEntries(wiring)) {
+          if (str(candidate.username, "").trim() === "") continue;
+          try {
+            await this.switchAccount(candidate.username);
+            switched = true;
+            break;
+          } catch { /* 换下一个存续账号 */ }
+        }
+        if (!switched) {
+          await forgetAccountImpl(wiring, state); // 幂等清场：循环失败尝试的瞬态
+          await purgeGrant();
+        }
       }
     },
 

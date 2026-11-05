@@ -1466,6 +1466,81 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       check("T3 without overrides the catalogue figure rides through",
         noOverride.defaultMaxTokens === 65536, String(noOverride.defaultMaxTokens));
 
+      // 默认档兜底（2026-11-05 拍板「新模型兜底勾 high 且实际用 high」）：勾选集
+      // 视图恒给未收录模型补 ["high"]，但那只是可选集——没有已申报默认的模型新
+      // 会话停在宿主 "Provider default" 上、请求不带档位。withUserThinking 在
+      // 勾选集含 high 且无人申报默认时把 defaultEffort 兜成 high；两道闸：已申报
+      // 的默认原样尊重，用户划掉 high 的自选集不越权代选。
+      const thinkAdapter = (overrides, catalog) => {
+        const adapter = new SensenovaAdapter({
+          options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1 }),
+          resolveApiKey: async () => "sk-test",
+          resolveApiKeyForRequest: async () => "sk-test",
+          requestSlot: async () => () => {},
+          thinkingOverrides: () => overrides,
+        });
+        adapter.catalog = catalog;
+        return adapter;
+      };
+      const freshModel = await thinkAdapter(
+        { "brand-new-model": ["high"] },
+        [{ id: "brand-new-model", name: "brand-new-model" }],
+      ).resolveModel("sensenova-suite", "brand-new-model");
+      check("新模型无申报默认 → defaultEffort 兜 high（对话页当前档=high，请求带档）",
+        freshModel.reasoning?.efforts?.length === 1 && freshModel.reasoning?.efforts?.[0]?.id === "high" &&
+        freshModel.reasoning?.defaultEffort === "high",
+        JSON.stringify(freshModel.reasoning));
+      const trimmed = await thinkAdapter(
+        { "brand-new-model": ["off", "low"] },
+        [{ id: "brand-new-model", name: "brand-new-model" }],
+      ).resolveModel("sensenova-suite", "brand-new-model");
+      check("用户划掉 high 的自选集不代选（defaultEffort 不兜，Provider default 维持）",
+        trimmed.reasoning?.defaultEffort === undefined && trimmed.reasoning?.efforts?.length === 2,
+        JSON.stringify(trimmed.reasoning));
+      const declared = await thinkAdapter(
+        { "declared-model": ["low", "max"] },
+        [{ id: "declared-model", name: "declared-model", reasoning: { efforts: [{ id: "low", name: "low" }, { id: "max", name: "max" }], defaultEffort: "max" } }],
+      ).resolveModel("sensenova-suite", "declared-model");
+      check("目录已申报的默认档原样尊重（不盖成 high）",
+        declared.reasoning?.defaultEffort === "max" && declared.reasoning?.efforts?.length === 2,
+        JSON.stringify(declared.reasoning));
+
+      // 目录底座三钉（2026-11-06 拍板「失败即回落本地 + 自动重试 + 删冷却」）：
+      // (a) 冷启动认领 catalog.json——网络一直失败 listModels 仍回落盘条目；
+      // (b) 失败后自动重试按缩尺间隔真发（不再有 60s 死窗）；
+      // (c) 底座恢复：网络转好后自动重试拉到新目录，后续调用吃缓存。
+      const catalogAttempts = [];
+      let failModels = true;
+      const mkCatalog = () => new SensenovaAdapter({
+        options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1 }),
+        resolveApiKey: async () => "sk-cat",
+        resolveApiKeyForRequest: async () => "sk-cat",
+        requestSlot: async () => () => {},
+        catalogAutoRetryMs: 5,
+        catalogFallback: async () => ({ entries: [{ id: "m-disk", name: "m-disk", output_modalities: ["text"] }], fetchedAt: 0 }),
+        fetchImpl: async () => {
+          catalogAttempts.push(1);
+          if (failModels) throw new Error("catalog timeout（缩尺）");
+          return new Response(JSON.stringify({ data: [{ id: "m-net", name: "m-net", output_modalities: ["text"] }] }), { status: 200, headers: { "content-type": "application/json" } });
+        },
+      });
+      const coldAdapter = mkCatalog();
+      const coldList = await coldAdapter.listModels("sensenova-suite");
+      check("冷启动认领落盘底座：网络失败也回目录条目（不再回空/抛失败行）",
+        coldList.some((m) => m.id === "m-disk"),
+        JSON.stringify(coldList.map((m) => m.id)));
+      check("拉取失败不算终态：立即真发过一次（无 60s 冷却门）",
+        catalogAttempts.length === 1, String(catalogAttempts.length));
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      check("自动重试按缩尺间隔真发（失败后排 5ms 重试，成功前不叠加）",
+        catalogAttempts.length >= 2, String(catalogAttempts.length));
+      failModels = false;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      const recovered = await coldAdapter.listModels("sensenova-suite");
+      check("底座恢复：自动重试拉到网络目录，后续调用吃缓存",
+        recovered.some((m) => m.id === "m-net") && !recovered.some((m) => m.id === "m-disk"),
+        JSON.stringify(recovered.map((m) => m.id)));
+
       // 轮界推进不漏并发槽（2026-11-03 真机事故钉）：轮界 continue 曾覆盖 release
       // 变量，上一轮最后一把 key 的槽位永久泄漏——真机形态第 4 发泄漏、第 7 发
       // 排队 90s 静默超时、宿主 10 次重试全数撞墙 ≈15min。单 key 池跨轮界二次

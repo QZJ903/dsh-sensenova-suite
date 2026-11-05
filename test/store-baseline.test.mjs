@@ -450,20 +450,9 @@ define("S9c legacy password reference is left untouched", async ({ frame, servic
   await frame("state sweeps the legacy password reference", () => s.state(), deps);
 });
 
-// S10 — [login lifecycle] saveAccount persists the username only and logs in;
-// forgetAccount drops the username but the grant keeps serving.
-define("S10 saveAccount then forgetAccount leaves the grant serving", async ({ frame, service, throttle, auth, store }) => {
-  const svc = service();
-  const thr = throttle();
-  const a = auth({ login: async () => ({ accessToken: "AT1", refreshToken: "RT1", expiresIn: 10800 }) });
-  const s = store({ service: svc, auth: a, env: {}, throttleStore: thr });
-  const deps = { service: svc, throttleStore: thr };
-  await frame("saveAccount stores the username and logs in", () => s.saveAccount({ username: "alice", password: "pw" }), deps);
-  await frame("state after saveAccount", () => s.state(), deps);
-  await frame("forgetAccount removes the username", () => s.forgetAccount(), deps);
-  await frame("state after forgetAccount still shows the grant", () => s.state(), deps);
-  await frame("getToken keeps serving the surviving grant", () => s.getToken(), deps);
-});
+// S10 — RETIRED with the public forgetAccount (clear button retired 2026-10-29;
+// method removed 2026-11-06 with zero production callers — identity teardown
+// lives in removeAccount's retire-and-promote orchestration via the impl).
 
 // S11 — [throttle->login] an explicit corrected resubmit is the one path
 // that clears a park; the countdown disappears.
@@ -553,11 +542,10 @@ const FROZEN_SCENARIOS = [
   "S7b dead refresh with a vault account re-logs-in",
   "S8 invalidated token is renewed once, never replayed",
   "S9c legacy password reference is left untouched",
-  "S10 saveAccount then forgetAccount leaves the grant serving",
   "S11 wrong-password park is cleared by a corrected resubmit",
   "S12 no credentials service still works, marked ephemeral"
 ];
-const FROZEN_FRAME_COUNT = 42;
+const FROZEN_FRAME_COUNT = 37;
 const scenarioNames = defs.map((def) => def.name);
 const frameCount = actual.reduce((n, s) => n + s.frames.length, 0);
 if (JSON.stringify(scenarioNames) !== JSON.stringify(FROZEN_SCENARIOS)) {

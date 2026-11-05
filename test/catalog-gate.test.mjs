@@ -1,63 +1,46 @@
 /**
- * catalog-gate 纯判定单测——目录抓取的「发不发、发之前能回什么」。
+ * catalog-gate 纯判定单测——目录抓取的「发不发」一个判据源。
  *
- * 背景（2026-10-31）：失败退避（60s）期内旧实现无条件回现有缓存，实例从未成功
- * 过时那是空数组——DSH 侧表现为「错误横幅消失但模型列表空白干等一分钟」（真机
- * 横幅：`SenseNova 加载失败：The operation was aborted due to timeout`，10s 目录
- * 超时后进入退避期）。现钉：退避期内空缓存的种子回落与每段一次补发、正常路径
- * 重置补发额度、TTL/凭据变化守卫。纯 Node 无 peer。
+ * 2026-11-06 重构（他拍板）：失败退避（60s）整个拆除——拉模型不占上游限额，
+ * 冷却防的风暴无害，代价却是真机事故（拉取失败后 60s 内每次问询瞬时回空，
+ * 选择器失败/消失、重试按了等于没按，重启才恢复）。现钉：TTL/凭据/端点三守卫、
+ * 失败不做任何门槛（每次调用都真发）、自动重试间隔常量。失败回落与自动重试的
+ * 行为钉在 provider.test.mjs 的 adapter island（需要假 fetch 与时钟缩尺）。
+ * 纯 Node 无 peer。
  */
-import { planCatalogFetch, MODELS_TIMEOUT_MS, CATALOG_TTL_MS, CATALOG_FAILURE_RETRY_MS } from "../src/host/catalog-gate.ts";
+import { planCatalogFetch, MODELS_TIMEOUT_MS, CATALOG_TTL_MS, CATALOG_AUTO_RETRY_MS } from "../src/host/catalog-gate.ts";
 import { results, check, fail } from "./harness.mjs";
 
 const NOW = 10_000_000;
-const baseInput = { now: NOW, credential: "sk-a", apiBase: "https://token.sensenova.cn/v1", cacheCredential: "sk-a", cacheApiBase: "https://token.sensenova.cn/v1", seed: undefined };
-const baseState = { cachedEntries: 0, fetchedAt: 0, nextRetryAt: 0, emptyRetryUsed: false };
-const seed = (entries = ["m1"]) => ({ credential: "sk-a", apiBase: "https://token.sensenova.cn/v1", entries });
-const inBackoff = (extraState = {}) => ({ ...baseState, nextRetryAt: NOW + 60_000, ...extraState });
+const baseInput = { now: NOW, credential: "sk-a", apiBase: "https://token.sensenova.cn/v1", cacheCredential: "sk-a", cacheApiBase: "https://token.sensenova.cn/v1" };
+const baseState = { fetchedAt: 0 };
 
 try {
   // ── 1. 常量（数值被 adapter 依赖，漂移即红）──────────────────────────────
   check("目录超时 10s", MODELS_TIMEOUT_MS === 10_000);
   check("目录 TTL 24h", CATALOG_TTL_MS === 86_400_000);
-  check("失败退避 60s", CATALOG_FAILURE_RETRY_MS === 60_000);
+  check("自动重试间隔 30s", CATALOG_AUTO_RETRY_MS === 30_000);
 
-  // ── 2. TTL / 凭据守卫 ──────────────────────────────────────────────────
-  check("TTL 内回缓存", planCatalogFetch({ ...baseState, cachedEntries: 5, fetchedAt: NOW - 1_000 }, baseInput).action === "serve-cache");
+  // ── 2. TTL / 凭据 / 端点守卫 ────────────────────────────────────────────
+  check("TTL 内回缓存", planCatalogFetch({ fetchedAt: NOW - 1_000 }, baseInput).action === "serve-cache");
   check("TTL 过期 → send（不清 404 失败缓存）",
-    JSON.stringify(planCatalogFetch({ ...baseState, cachedEntries: 5, fetchedAt: NOW - CATALOG_TTL_MS - 1 }, baseInput)) ===
+    JSON.stringify(planCatalogFetch({ fetchedAt: NOW - CATALOG_TTL_MS - 1 }, baseInput)) ===
     JSON.stringify({ action: "send", invalidateFailedModels: false }));
   check("凭据变 → send 但不清 404 失败缓存（D1 层 2：下线是服务端路由状态，与 key 无关；TTL 仍不护跨凭据）",
-    JSON.stringify(planCatalogFetch({ ...baseState, cachedEntries: 5, fetchedAt: NOW - 1_000 }, { ...baseInput, credential: "sk-b" })) ===
+    JSON.stringify(planCatalogFetch({ fetchedAt: NOW - 1_000 }, { ...baseInput, credential: "sk-b" })) ===
     JSON.stringify({ action: "send", invalidateFailedModels: false }));
   check("apiBase 变 → send 且清 404 失败缓存",
-    JSON.stringify(planCatalogFetch({ ...baseState, cachedEntries: 5, fetchedAt: NOW - 1_000 }, { ...baseInput, apiBase: "https://other.example/v1" })) ===
+    JSON.stringify(planCatalogFetch({ fetchedAt: NOW - 1_000 }, { ...baseInput, apiBase: "https://other.example/v1" })) ===
     JSON.stringify({ action: "send", invalidateFailedModels: true }));
-  check("从未成功且无退避 → send（首拉）", planCatalogFetch(baseState, baseInput).action === "send");
+  check("从未成功 → send（首拉）", planCatalogFetch(baseState, baseInput).action === "send");
 
-  // ── 3. 失败退避期 ──────────────────────────────────────────────────────
-  check("退避期内有缓存 → 回缓存（现状不变）",
-    planCatalogFetch(inBackoff({ cachedEntries: 5, fetchedAt: NOW - CATALOG_TTL_MS - 1 }), baseInput).action === "serve-cache");
-  check("退避期内空缓存 + 可用种子 → serve-seed",
-    planCatalogFetch(inBackoff(), { ...baseInput, seed: seed() }).action === "serve-seed");
-  check("种子凭据不符 → 不可用（退避期内空缓存未用补发 → send-forced）",
-    JSON.stringify(planCatalogFetch(inBackoff(), { ...baseInput, seed: { ...seed(), credential: "sk-b" } })) ===
-    JSON.stringify({ action: "send-forced", invalidateFailedModels: false }));
-  check("种子 apiBase 不符 → 不可用",
-    planCatalogFetch(inBackoff(), { ...baseInput, seed: { ...seed(), apiBase: "https://other.example/v1" } }).action === "send-forced");
-  check("种子空数组 → 不可用",
-    planCatalogFetch(inBackoff(), { ...baseInput, seed: seed([]) }).action === "send-forced");
-  check("退避期内空缓存 + 无种子 + 补发未用 → send-forced（每段一次）",
-    JSON.stringify(planCatalogFetch(inBackoff(), baseInput)) ===
-    JSON.stringify({ action: "send-forced", invalidateFailedModels: false }));
-  check("退避期内空缓存 + 补发已用 → serve-empty（不再补，防秒级循环）",
-    planCatalogFetch(inBackoff({ emptyRetryUsed: true }), baseInput).action === "serve-empty");
-  check("退避到期 → send（新失败段补发额度由调用方重置）",
-    JSON.stringify(planCatalogFetch({ ...baseState, nextRetryAt: NOW - 1, emptyRetryUsed: true }, baseInput)) ===
-    JSON.stringify({ action: "send", invalidateFailedModels: false }));
-  // 退避期内种子可用但缓存非空：缓存优先（种子只是空缓存的降级路）。
-  check("退避期内缓存非空时不看种子",
-    planCatalogFetch(inBackoff({ cachedEntries: 3 }), { ...baseInput, seed: seed() }).action === "serve-cache");
+  // ── 3. 失败不做门槛（2026-11-06 拍板：拉模型不占限额，冷却只制造死窗）────
+  // 判据里没有「失败状态」输入：gate 只回答发不发，失败回落/自动重试全在
+  // adapter 侧——这里钉的是「gate 不可能拦住一次重试」。
+  check("判据输入不含失败/退避状态（结构钉）",
+    JSON.stringify(Object.keys(baseState).sort()) === JSON.stringify(["fetchedAt"]) &&
+    !("nextRetryAt" in planCatalogFetch(baseState, baseInput)) &&
+    !("seed" in baseInput));
 } catch (e) { fail("catalog-gate", e); }
 
 console.log(JSON.stringify(results, null, 2));

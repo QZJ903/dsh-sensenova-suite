@@ -38,7 +38,7 @@ import type {
 import { parseRetryAfterMs, classify429Body, classify429Full, bucketCountsStrike, probeFloorFor, summarize429Body, PROVIDER_RETRY_AFTER_CAP_MS } from './rate-classify.ts';
 import { shouldRotateUnclassified } from './key-health.ts';
 import { retryableCodes, ANTHROPIC_TRUNCATED_CODE, QUOTA_CODES, LLM_CODES } from './llm-retry.ts';
-import { MODELS_TIMEOUT_MS, CATALOG_FAILURE_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
+import { MODELS_TIMEOUT_MS, CATALOG_AUTO_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
 import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
 import { KNOWN_UNROUTABLE_MODELS, CONTEXT_WINDOW_FIELDS, MAX_OUTPUT_FIELDS, maxTokensForId, contextWindowForId } from './llm-models.ts';
 import { IMAGE_INPUT_MODALITIES, inputModalitiesFor } from './modality.ts';
@@ -173,6 +173,18 @@ export interface SensenovaAdapterDeps {
    * 额度标记语义在 wire 适配器上的落点。缺省 undefined = 不过滤。
    */
   catalogFilter?: () => { enabledIds: string[]; unavailableIds: string[] };
+  /**
+   * 落盘目录底座（dsh-sensenova-suite 扩展，可选）：catalog.json（发布侧最后
+   * 一次成功拉取，{ entries, fetchedAt }）。缓存空时冷启动认领一次——重启后
+   * 选择器从第一刻起就有目录可显；此后 TTL/实发照常。按「上游对所有 key 同待」
+   * 的已知条件，底座不绑凭据（2026-11-06 他拍板）。缺省 undefined = 不认领。
+   */
+  catalogFallback?: () => Promise<{ entries: unknown[]; fetchedAt: number } | null>;
+  /**
+   * 拉取失败后的后台自动重试间隔（毫秒）；缺省 30s（catalog-gate 常量）。
+   * 测试缝：调小以缩尺验证重试循环。
+   */
+  catalogAutoRetryMs?: number;
   /**
    * 每模型降级链覆盖（dsh-sensenova-suite 扩展，可选）：面板"协议"三槽链，
    * pool.json modelProtocols[model]（有序子集，≤3）。经 resolveWirePlan 生效链
@@ -422,7 +434,10 @@ function reasoningInfoFrom(raw: Record<string, unknown>, modelId: string): LlmMo
 
 /** 用户思考档位覆盖（pool.json `thinking` 分区）的现算投影：有勾选集时该模型
  * reasoning.efforts 改为「用户勾选集」（DSH 对话界面的可选思考档位 = 用户勾选集），
- * defaultEffort 维持目录解析结果（不在新集内也保留——不影响可选集，只影响默认档）。
+ * defaultEffort 维持目录解析结果（不在新集内也保留——不影响可选集，只影响默认档）；
+ * 无人申报默认且勾选集含 high 时兜 defaultEffort=high（2026-11-05 拍板：新模型
+ * 兜底勾 high 且**实际用** high——此前视图只造可选集不造默认档，新会话悬在宿主
+ * "Provider default" 上、请求不带档位，上游各自为政）。
  * 在 listModels/resolveModel/stream 三个读取边界调用，不写回目录缓存（热更新）。 */
 function withUserThinking(
   entry: CatalogEntry | undefined,
@@ -433,10 +448,14 @@ function withUserThinking(
   const userList = overrides?.[model];
   if (!Array.isArray(userList) || userList.length === 0) return entry;
   const efforts = effortsAscending(userList);
-  return {
-    ...entry,
-    reasoning: entry.reasoning !== undefined ? { ...entry.reasoning, efforts } : { efforts },
-  };
+  const reasoning = entry.reasoning !== undefined ? { ...entry.reasoning, efforts } : { efforts };
+  // 兜底两道闸：目录/静态表已申报的默认原样尊重（平台口径比我们的兜底权威）；
+  // 用户划掉 high 的自选集不越权代选（high 不在可选集内就不兜，Provider default
+  // 现状维持）。两闸都过才落 defaultEffort=high。
+  if (reasoning.defaultEffort === undefined && efforts.some((effort) => effort.id === ReasoningEffortId("high"))) {
+    return { ...entry, reasoning: { ...reasoning, defaultEffort: ReasoningEffortId("high") } };
+  }
+  return { ...entry, reasoning };
 }
 
 /** 解析 OpenAI 模型目录为目录条目；应用自动过滤与失败缓存。
@@ -996,12 +1015,12 @@ export class SensenovaAdapter extends LlmAdapter {
   private catalogApiBase: string | undefined;
   /** 目录缓存时间戳（毫秒 epoch）；与 TTL 共同决定下次调用是否实发 HTTP。 */
   private catalogFetchedAt = 0;
-  /** 目录刷新失败后的下次重试时间（毫秒 epoch）；仅失败时写入。 */
-  private catalogNextRetryAt = 0;
-  /** 本段失败退避期内「空缓存补发一次」是否已用掉（语义见 catalog-gate.ts）。 */
-  private catalogEmptyRetryUsed = false;
   /** 目录单飞去重：并发的 listModels 共享同一 in-flight Promise。 */
   private catalogInflight: Promise<CatalogEntry[]> | undefined;
+  /** 落盘底座（catalog.json）只认领一次的标记：文件没有就别每次都读盘。 */
+  private catalogFallbackClaimed = false;
+  /** 拉取失败后的后台自动重试时钟（单槽不叠加；成功即清，卸载即停）。 */
+  private catalogRetryTimer: ReturnType<typeof setTimeout> | undefined;
   /**
    * 配额类 429 粘住 key（design D5，仅 quotaRotation 开启时读写）：
    * 有 sessionId 的请求按会话分桶（同一会话后续请求粘住切换后的 key）；
@@ -1087,9 +1106,10 @@ export class SensenovaAdapter extends LlmAdapter {
 
   /**
    * 目录获取入口（listModels 专用）：TTL 内从缓存应答，过期后单飞实发 HTTP。
-   * 成功刷新 TTL=CATALOG_TTL_MS（24h）；失败退避 CATALOG_FAILURE_RETRY_MS（60s）
-   * 并维持旧缓存可读，避免宿主秒级问询在故障时退化为秒级重试循环。
-   * 凭据或 apiBase 变化立即失效（换 key/换端点后旧目录不再可信）。
+   * 成功刷新 TTL=CATALOG_TTL_MS（24h）；**失败不设门槛**（2026-11-06 拍板：拉
+   * 模型不占上游限额，冷却只制造选择器死窗）——失败即回落本地底座（冷启动认领
+   * 的 catalog.json）并排 30s 后台自动重试，成功即清。凭据或 apiBase 变化立即
+   * 实发（换 key/换端点后旧目录不再可信）。
    */
   private async fetchCatalog(): Promise<CatalogEntry[]> {
     const connection = this.deps.options();
@@ -1112,58 +1132,92 @@ export class SensenovaAdapter extends LlmAdapter {
       this.catalogApiBase = catalogSeed.apiBase;
       this.catalogFetchedAt = catalogSeed.fetchedAt;
     }
-    // 发/不发/发之前回什么——判定走 catalog-gate 纯模块（peer-free 单测钉），
-    // TTL、失败退避与退避期内的两条降级路（种子回落 / 空缓存每段补发一次）
-    // 一个判据源，见 catalog-gate.ts 模块头。
-    const seed = catalogSeed;
+    // 落盘底座认领（每实例一次，2026-11-06 他拍板）：缓存空时先拿 catalog.json
+    // （发布侧最后一次成功拉取）——重启后选择器从第一刻起就有目录可显。底座不
+    // 绑凭据（上游对所有 key 同待）；fetchedAt 用落盘值，TTL 过期照样实发。
+    if (this.catalog.length === 0 && !this.catalogFallbackClaimed && this.deps.catalogFallback !== undefined) {
+      this.catalogFallbackClaimed = true;
+      const persisted = await this.deps.catalogFallback().catch(() => undefined);
+      if (persisted !== undefined && persisted !== null && Array.isArray(persisted.entries) && persisted.entries.length > 0) {
+        const seeded = parseCatalog({ data: persisted.entries }, this.failedModels);
+        if (seeded.length > 0) {
+          this.catalog = seeded;
+          this.catalogCredential = apiKey;
+          this.catalogApiBase = connection.apiBase;
+          this.catalogFetchedAt = typeof persisted.fetchedAt === 'number' && persisted.fetchedAt > 0 ? persisted.fetchedAt : 0;
+          traceLog(`[dsh-sensenova-suite] 目录冷启动认领落盘底座：${seeded.length} 条（fetchedAt=${this.catalogFetchedAt}）`);
+        }
+      }
+    }
+    // 发/不发——判定走 catalog-gate 纯模块（peer-free 单测钉）。失败不做任何
+    // 门槛：每次调用都真发（单飞去重仍在），失败即回落本地底座 + 30s 自动重试
+    // （见下方 catch 与 catalog-gate.ts 模块头）。
     const gate = planCatalogFetch(
-      {
-        cachedEntries: this.catalog.length,
-        fetchedAt: this.catalogFetchedAt,
-        nextRetryAt: this.catalogNextRetryAt,
-        emptyRetryUsed: this.catalogEmptyRetryUsed,
-      },
+      { fetchedAt: this.catalogFetchedAt },
       {
         now,
         credential: apiKey,
         apiBase: connection.apiBase,
         cacheCredential: this.catalogCredential,
         cacheApiBase: this.catalogApiBase,
-        seed,
       },
     );
     if (gate.action === "serve-cache") return this.catalog;
-    if (gate.action === "serve-seed") {
-      // 退避期内的种子回落按冷启动认领同款语义落进实例：后续调用走缓存/TTL
-      // 判定；fetchedAt 保持种子原值，种子过期照样实发，不会无限续命。gate 只
-      // 在种子可用时返回本分支——防御性兜底：seed 缺席（不可能）时回现有缓存。
-      if (seed !== undefined) {
-        this.catalog = seed.entries;
-        this.catalogCredential = apiKey;
-        this.catalogApiBase = connection.apiBase;
-        this.catalogFetchedAt = seed.fetchedAt;
-      }
-      return this.catalog;
-    }
-    if (gate.action === "serve-empty") return this.catalog;
-    // send = 正常路径（补发额度重置，新失败段又有一次）；send-forced = 退避期
-    // 内空缓存的每段一次补发（标记置位，本段不再补）。
-    this.catalogEmptyRetryUsed = gate.action === "send-forced";
-    // 单飞去重：并发调用共享同一请求。
+    // 单飞去重：并发调用共享同一请求（含失败回落后的同一份应答）。
     if (this.catalogInflight !== undefined) {
       return this.catalogInflight;
     }
-    const inflight = this.fetchCatalogUncached(connection, apiKey, gate.invalidateFailedModels);
-    this.catalogInflight = inflight;
-    // 完成后无论成败都清掉 inflight；失败时设定退避时间戳。
-    inflight.then(
-      () => { this.catalogInflight = undefined; },
-      () => {
-        this.catalogInflight = undefined;
-        this.catalogNextRetryAt = Date.now() + CATALOG_FAILURE_RETRY_MS;
+    const inflight: Promise<CatalogEntry[]> = this.fetchCatalogUncached(connection, apiKey, gate.invalidateFailedModels).then(
+      (models) => {
+        // 失败之后的第一次成功：清自动重试时钟，落一行恢复日志。
+        if (this.catalogRetryTimer !== undefined) {
+          this.clearCatalogRetry();
+          traceLog(`[dsh-sensenova-suite] 目录拉取恢复（重试成功）：${models.length} 条`);
+        }
+        return models;
+      },
+      (error: unknown) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        this.armCatalogRetry();
+        // 失败即回落本地底座（2026-11-06 他拍板）：不再退避、不再回空/失败行。
+        // 缓存（冷启动已认领落盘份）非空就静默用它；真的一无所有（全新安装且
+        // 从未成功过）才把错误交给 host——失败行是那时唯一诚实的呈现。
+        traceLog(`[dsh-sensenova-suite] 目录拉取失败 key=${maskKey(apiKey)} err=${reason} → 回落本地目录（${this.catalog.length} 条${this.catalog.length === 0 ? '，无底座可回落' : ''}）`);
+        if (this.catalog.length > 0) return this.catalog;
+        throw error;
       },
     );
+    this.catalogInflight = inflight;
+    // 完成后无论成败都清掉 inflight：下次调用按 gate 重新判定（无退避，即时实发）。
+    void inflight.then(
+      () => { this.catalogInflight = undefined; },
+      () => { this.catalogInflight = undefined; },
+    );
     return inflight;
+  }
+
+  /** 拉取失败后排一次后台自动重试（单槽不叠加；成功即清，unref 不拽住进程）。 */
+  private armCatalogRetry(): void {
+    if (this.catalogRetryTimer !== undefined) return;
+    this.catalogRetryTimer = setTimeout(() => {
+      this.catalogRetryTimer = undefined;
+      // 失败路径在 fetchCatalog 内部已兜底（回落/再排），此处 catch 只防意外。
+      void this.fetchCatalog().catch(() => undefined);
+    }, this.deps.catalogAutoRetryMs ?? CATALOG_AUTO_RETRY_MS);
+    (this.catalogRetryTimer as { unref?: () => void }).unref?.();
+  }
+
+  /** 清自动重试时钟（成功后/卸载时）。 */
+  private clearCatalogRetry(): void {
+    if (this.catalogRetryTimer !== undefined) {
+      clearTimeout(this.catalogRetryTimer);
+      this.catalogRetryTimer = undefined;
+    }
+  }
+
+  /** 卸载钩子：停掉自动重试时钟（适配器随发布链释放后不得再发请求）。 */
+  dispose(): void {
+    this.clearCatalogRetry();
   }
 
   /** 实际发起 HTTP 目录请求并更新缓存（仅 fetchCatalog 调用）。 */
@@ -1465,10 +1519,12 @@ export class SensenovaAdapter extends LlmAdapter {
           const priorHits = this.probeHitCounts.get(options.sessionId);
           const trailLen = this.session429Trail.get(options.sessionId)?.length ?? 0;
           if (priorHits !== undefined || trailLen > 0) {
-            traceLog(`[dsh-sensenova-suite] 429 恢复 model=${options.model} key=${maskKey(apiKey)} ` +
+            // trail 已改记完整尝试序列（含重复）：连续 N 次 = 真实限流发数，
+            // 旧「去重清单长度」会把 2 把 key 的 5 连失败读成 1 次。
+            traceLog(`[dsh-sensenova-suite] 429 model=${options.model} 恢复 key ${maskKey(apiKey)} ` +
               (priorHits !== undefined
-                ? "连续限流结束，探测档归零"
-                : `连续 ${trailLen} 次限流后成功`));
+                ? "（连续限流结束，探测档归零）"
+                : `（连续 ${trailLen} 次限流后成功）`));
           }
           this.probeHitCounts.delete(options.sessionId);
           this.session429Trail.delete(options.sessionId);
@@ -1590,13 +1646,23 @@ export class SensenovaAdapter extends LlmAdapter {
         // body 摘要（2026-11-03 批 C）：pool 误分类破案（2026-11-02 事故）全程被
         // 「429 行不打 body」卡住——积分池耗尽形状零样本，摘要落日志后下次真撞即可识别。
         const trail429 = this.session429Trail.get(options.sessionId) ?? [];
-        if (!trail429.includes(apiKey)) trail429.push(apiKey);
+        trail429.push(apiKey); // 完整链（含重复）：恢复计数与轮尽链都要真实尝试序列
         this.session429Trail.set(options.sessionId, trail429);
-        traceLog(`[dsh-sensenova-suite] 429 model=${options.model} key=${maskKey(apiKey)} ` +
-          `kind=${pool429 ? "pool" : classified.quota ? classified.kind : "unknown"} ` +
-          `bucket=${full.bucket ?? "-"} round=${round}/${FINAL_ROUND} ` +
-          `退避=${dynamicFloorMs !== undefined ? `${Math.round(dynamicFloorMs / 1000)}s` : retryAfterMs !== undefined ? `${Math.round(retryAfterMs / 1000)}s(retry-after)` : "宿主默认"} ` +
-          `body=${summarize429Body(errText)}`);
+        // 429 一行制（2026-11-06 他拍板重写）：一次 429 一行——换 key 用箭头并入
+        // 主行，不再拆两行重复 model/轮次；kind/bucket 并成 桶（rpm/tpm/pool/
+        // unknown，行为判据都在桶）；round→轮、退避→等；body 全文保留（新 429
+        // 形状的收集样本正是从这里来）。无会话标识（低 rpm 下没有并发读日志的
+        // 场景）。主行在轮换已决后打：箭头 = 换了 key，无箭头 = 没换。
+        const attemptNo = totalAttempts;
+        const bucketText = pool429 ? "pool" : full.bucket !== undefined ? full.bucket : "unknown";
+        const waitText = dynamicFloorMs !== undefined ? `${Math.round(dynamicFloorMs / 1000)}s`
+          : retryAfterMs !== undefined ? `${Math.round(retryAfterMs / 1000)}s(retry-after)` : "宿主";
+        const bodyText = summarize429Body(errText);
+        const trace429 = (keyPart: string): void => {
+          traceLog(`[dsh-sensenova-suite] ${attempt.status === 429 ? "429" : `HTTP ${attempt.status}`} model=${options.model} 第${attemptNo}发 key ${keyPart} ` +
+            `桶${bucketText} 轮${round}/${FINAL_ROUND} 等${waitText} body=${bodyText}`);
+        };
+        let logged429 = false;
         // 配额类 429 且开关开启：轮换到下一把本请求本轮未试过的 key（tried 集合做
         // 本轮内防乒乓——轮边界处清空，各 key 在下一轮重新获得一次机会）。
         // 积分池类（pool）同样参与换 key，但**只打标不打断流程**：格子由池层在选
@@ -1625,7 +1691,8 @@ export class SensenovaAdapter extends LlmAdapter {
             const previousKey = apiKey;
             apiKey = next;
             totalAttempts += 1;
-            traceLog(`[dsh-sensenova-suite] 429 换 key model=${options.model} ${maskKey(previousKey)} → ${maskKey(next)}（轮 ${round}/${FINAL_ROUND}，本轮已试 ${tried.size} 把，累计 ${totalAttempts} 次）`);
+            trace429(`${maskKey(previousKey)}→${maskKey(next)}`);
+            logged429 = true;
             if (quotaRotate) {
               // 有界（U4 审计顺带②）：超上限先删最早插入的条目再写。
               if (!this.quotaStickyKeys.has(options.sessionId) && this.quotaStickyKeys.size >= QUOTA_STICKY_KEYS_MAX) {
@@ -1639,6 +1706,9 @@ export class SensenovaAdapter extends LlmAdapter {
             }
             continue;
           }
+          // 换无可换（或候选已在 tried）：主行无箭头，随后轮尽行收尾。
+          trace429(maskKey(apiKey));
+          logged429 = true;
         }
         // 兜底轮换（key-health.ts shouldRotateUnclassified）：401 / 配额 429 / 池 429
         // 之外的失败里，只有「分类器不认识的 429」（旧实现原地重试到预算耗尽，
@@ -1660,8 +1730,15 @@ export class SensenovaAdapter extends LlmAdapter {
             apiKey = next;
             totalAttempts += 1;
             if (attempt.status !== 429) unclassifiedFallbackUsed = true;
-            traceLog(`[dsh-sensenova-suite] 未分类失败换 key model=${options.model} ` +
-              `status=${attempt.status} ${maskKey(previousKey)} → ${maskKey(next)}（${attempt.status === 429 ? "本请求内轮满池" : "仅兜底一次"}，轮 ${round}/${FINAL_ROUND}，累计 ${totalAttempts} 次）`);
+            if (attempt.status === 429) {
+              // 未识别形状的 429：主行由这里承担（带箭头 + body 原文——未知形状
+              // 的收集样本正是 body 全文）。
+              trace429(`${maskKey(previousKey)}→${maskKey(next)}`);
+              logged429 = true;
+            } else {
+              traceLog(`[dsh-sensenova-suite] 未分类失败换 key model=${options.model} ` +
+                `status=${attempt.status} ${maskKey(previousKey)} → ${maskKey(next)}（仅兜底一次，轮 ${round}/${FINAL_ROUND}，累计 ${totalAttempts} 发）`);
+            }
             continue;
           }
         }
@@ -1680,7 +1757,7 @@ export class SensenovaAdapter extends LlmAdapter {
           // 第 4 轮之后不再等待（「最大主动等待次数 1 次」）。
           if (round === MAX_POLL_ROUNDS) {
             const waitMs = JITTER_WAIT_MIN_MS + Math.floor(Math.random() * (JITTER_WAIT_MAX_MS - JITTER_WAIT_MIN_MS));
-            traceLog(`[dsh-sensenova-suite] 429 轮间等待 model=${options.model} ${Math.round(waitMs / 100) / 10}s（${MAX_POLL_ROUNDS} 轮全 429，抖动等待后进第 ${FINAL_ROUND} 轮）`);
+            traceLog(`[dsh-sensenova-suite] 429 model=${options.model} 轮间等 ${Math.round(waitMs / 100) / 10}s（${MAX_POLL_ROUNDS}轮全429→第${FINAL_ROUND}轮）`);
             release?.();
             release = undefined;
             await abortableSleep(waitMs, options.signal);
@@ -1688,6 +1765,11 @@ export class SensenovaAdapter extends LlmAdapter {
             // 的 :1418 姿态一致）——不再映射 TRANSPORT 冒充「传输错误」。宿主
             // 重试层零危害不变（backoff 首行查 abort，aborted 零安排）。
             if (options.signal?.aborted === true) throw options.signal.reason;
+          }
+          // 本发无轮换（轮界推进）：主行在此补打（无箭头），下一行即轮起点。
+          if (!logged429) {
+            trace429(maskKey(apiKey));
+            logged429 = true;
           }
           round += 1;
           tried.clear();
@@ -1702,28 +1784,30 @@ export class SensenovaAdapter extends LlmAdapter {
           // 起点轮换：把上一轮起点排除（裸轮转组从它的下一位环回）。
           const nextStart = await this.pickRoundStart(options, roundStartKey);
           if (nextStart === undefined) {
-            traceLog(`[dsh-sensenova-suite] 429 轮 ${round} 无可用 key model=${options.model}（池空或该组全标）`);
+            traceLog(`[dsh-sensenova-suite] 429 model=${options.model} 轮${round} 无可用 key（池空或该组全标）`);
             throw httpError(attempt.status, errText, retryAfterMs, dynamicFloorMs, wire, allPoolMarked);
           }
           apiKey = nextStart;
           roundStartKey = nextStart;
           tried.add(apiKey);
-          traceLog(`[dsh-sensenova-suite] 429 进入第 ${round}/${FINAL_ROUND} 轮 model=${options.model} 起点 key=${maskKey(apiKey)}`);
+          traceLog(`[dsh-sensenova-suite] 429 model=${options.model} 轮${round}/${FINAL_ROUND} 起 key ${maskKey(apiKey)}`);
           continue;
         }
+        // 兜底/轮界都没打的（轮尽前的最后一发、无轮换的 402/403）：主行补打。
+        if (!logged429) trace429(maskKey(apiKey));
         if (attempt.status === 429) {
-          // 轮尽（或池全标）的收尾行：已试列表 = 跨宿主重试累计的脱敏 key。
+          // 轮尽（或池全标）的收尾行：链 = 跨宿主重试累计的真实尝试序列（含重复）。
           // pool 全标走 QUOTA 出口（宿主不重试）；其余交宿主重试层（预算内自动重试）。
           const label = allPoolMarked
-            ? `429 该组全池耗尽（${round} 轮终止）`
+            ? `该组全池耗尽（${round}轮终止）抛QUOTA宿主不重试`
             : quota429 || pool429
-              ? (quotaRotation ? `429 ${round} 轮换无可换` : "429 未轮换（quotaRotation 未开）")
+              ? (quotaRotation ? "轮尽交宿主" : "未轮换（quotaRotation未开）交宿主")
               : totalAttempts > 1
-                ? `429 未识别形状，已换 ${totalAttempts - 1} 次 key`
-                : "429 未识别形状，无可轮换";
-          traceLog(`[dsh-sensenova-suite] ${label} model=${options.model} ` +
-            `已试 ${trail429.map((key) => maskKey(key)).join("/")} 共 ${trail429.length} 把、${totalAttempts} 次，` +
-            `${allPoolMarked ? "抛 QUOTA（宿主不重试）" : "交宿主重试层（预算内自动重试）"}`);
+                ? "未识别形状轮尽交宿主"
+                : "未识别形状无可轮换交宿主";
+          const uniqueKeys = [...new Set(trail429)];
+          traceLog(`[dsh-sensenova-suite] 429 model=${options.model} ${label}：` +
+            `${totalAttempts}发/${uniqueKeys.length}把 链 ${trail429.map((key) => maskKey(key)).join("→")}`);
         }
         release();
         release = undefined;

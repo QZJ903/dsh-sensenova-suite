@@ -255,6 +255,18 @@ export function createFileCatalogStore(options: StoreOptions = {}) {
 
   return {
     /**
+     * The whole persisted record (`{ entries, fetchedAt, ... }`), or `null`
+     * when nothing usable is stored. The catalog-FALLBACK seam's read face
+     * (adapter cold-start claim): `fetchedAt` lets the adapter's TTL judge
+     * the fallback's age naturally.
+     * @returns {Promise<{version: number, fetchedAt: number, entries: object[], enabledModelIds: string[]} & Record<string, unknown>|null>}
+     */
+    async listRecord() {
+      const record = await seen();
+      return record;
+    },
+
+    /**
      * The stored entries, or `[]` when nothing usable is stored.
      * @returns {Promise<object[]>}
      */
@@ -397,6 +409,11 @@ export function createMemoryCatalogStore(now = Date.now) {
         : { unavailableIds: held.unavailableIds, unavailableAt: Math.max(0, num(held.unavailableAt, 0)) })
     : { unavailableIds: normalizeEnabledIds(unavailableIds), unavailableAt: now() };
   return {
+    /** 整条记录（目录底座认领的读面；null = 无记录）——与 file store 的
+     * listRecord 同名同形状，测试替身与真实现不漂移。 */
+    async listRecord() {
+      return held ?? null;
+    },
     async list() {
       return held === null ? [] : held.entries;
     },

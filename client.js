@@ -3147,7 +3147,7 @@ var dsh_connect_sensenova_suite_client = (function() {
 			}, h("div", { style: S.trendRowHead }, h("span", {
 				style: S.trendModel,
 				title: row.model
-			}, row.model, typeof row.multiplier === "number" && row.multiplier !== 1 ? h("span", {
+			}, row.model, typeof row.multiplier === "number" ? h("span", {
 				style: S.chip,
 				title: tt("trend.multiplierLegend")
 			}, `×${row.multiplier}`) : null), h("span", { style: S.trendCredits }, count(credits))), drawsBar ? QuotaBar({

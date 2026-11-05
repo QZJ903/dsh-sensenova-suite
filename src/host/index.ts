@@ -169,8 +169,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   // the peer-free `provider-publish.ts` module: the `publishChain` that
   // serialises publishes, the `disposed` gate, the single-point `registerPair`
   // and the rollback path (PITFALLS §18 / §19). `index.ts` drives it from the
-  // mount seed, the catalog poll, the provider switch, the roster save and the
-  // api-key forget, and reads its `state` for the snapshot's `llm` block.
+  // mount seed, the catalog poll (content and quota branches), the provider
+  // switch and the roster save, and reads its `state` for the snapshot's `llm` block.
   // `llm` is an OPTIONAL service (this plugin injects only `webServer`), read
   // through `ctx.get` like the other optional services: on a Host without an
   // LLM runtime the panel still works and `llm.providerRegistered` simply
@@ -318,6 +318,17 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   /** 原生出图通路的图像解析：附件 → base64（失败 → undefined → 占位出站）。 */
   const resolveImageAccess = (ref: unknown) =>
     loadImageAttachment(ref).then((img) => ({ base64: img.base64, mediaType: img.mediaType })).catch(() => undefined);
+  /** 落盘目录底座（catalog.json 整条记录）：adapter 冷启动认领 + 拉取失败回落
+   * 的唯一来源（2026-11-06 拍板）。读失败/无记录 = null。 */
+  const catalogFallbackView = async (): Promise<{ entries: unknown[]; fetchedAt: number } | null> => {
+    return await catalogStore.listRecord().catch(() => null);
+  };
+  // 目录自动重试时钟的卸载钩子：适配器实例由发布链异步创建（工厂回传），
+  // 收集在 createdAdapters；卸载时逐个 dispose（停 30s 自动重试时钟）。
+  const createdAdapters: Array<{ dispose?: () => void }> = [];
+  const onAdapterCreated = (adapter: { dispose?: () => void }): void => {
+    createdAdapters.push(adapter);
+  };
   const loadAdapterModule = deps.loadAdapterModule ?? (async () => {
     const module = await import("./llm-adapter.ts");
     // 图片桥换图器（请求边界换图；vision/bridge.ts createImageSwapper）。
@@ -349,7 +360,7 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
       },
       loadImage: loadImageAttachment,
     });
-    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, protocolOverrides: () => poolRecord.modelProtocols, thinkingOverrides: () => thinkingView(), visionSwapper: imageSwapper as (messages: unknown, context: { model: string }) => Promise<unknown>, resolveImageAccess, visionModelIds: () => visionView() }) };
+    return { createSensenovaAdapter: module.createAdapterFactory({ orchestrator, protocolOverrides: () => poolRecord.modelProtocols, thinkingOverrides: () => thinkingView(), visionSwapper: imageSwapper as (messages: unknown, context: { model: string }) => Promise<unknown>, resolveImageAccess, visionModelIds: () => visionView(), catalogFallback: catalogFallbackView, onAdapterCreated }) };
   });
   const publisher = createProviderPublisher({
     settings,
@@ -748,6 +759,14 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   }, 15_000);
   probeTimer.unref?.();
   ctx.effect(() => () => clearInterval(probeTimer), `${name}: probe timer`);
+
+  // 卸载即停：发布链创建的每个适配器的目录自动重试时钟（createdAdapters 由
+  // onAdapterCreated 回传填充）。卸载后不得再发目录请求。
+  ctx.effect(() => () => {
+    for (const adapter of createdAdapters) {
+      try { adapter.dispose?.(); } catch { /* 卸载失败静默。 */ }
+    }
+  }, `${name}: catalog retry dispose`);
 
   ctx.effect(() => {
     // The effect callback returns the unmount cleanup: Cordis runs it when

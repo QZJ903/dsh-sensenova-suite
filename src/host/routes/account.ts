@@ -104,7 +104,8 @@ export function registerAccountRoute(ctx: any, wiring: Pick<Wiring, "settings" |
           writeJson(response, 200, { ...(await tokenStore.state()), ok: true }, { "cache-control": "no-store" });
           return;
         }
-        // 移除存档：只删侧槽（密码+令牌快照），活动会话不动。
+        // 移除存档：删侧槽（密码+令牌快照）；删的是当前号时由 store 编排收尾——
+        // 拆当前会话后按清单顺序把存续账号逐个顶上（全失败/无存续才停在未登录态）。
         if (body.value.action === "remove" && typeof body.value.id === "string") {
           await tokenStore.removeAccount(body.value.id);
           clearCoalescedFetch(cache, inflight);

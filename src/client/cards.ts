@@ -275,7 +275,9 @@ export function TrendTable({ trend, tt }: { trend?: TrendData | null; tt: Tt }):
           // Long model ids truncate; the full name is one hover away. A
           // configured pseudo multiplier (×N) rides beside the name: the
           // raw credits stay verbatim, the factor is a comparison aid only.
-          h("span", { style: S.trendModel, title: row.model }, row.model, typeof row.multiplier === "number" && row.multiplier !== 1 ? h("span", { style: S.chip, title: tt("trend.multiplierLegend") }, `×${row.multiplier}`) : null),
+          // ×1 and ×0 label too — the roster marks every configured factor
+          // (model-picker), and this chart must not diverge from it.
+          h("span", { style: S.trendModel, title: row.model }, row.model, typeof row.multiplier === "number" ? h("span", { style: S.chip, title: tt("trend.multiplierLegend") }, `×${row.multiplier}`) : null),
           h("span", { style: S.trendCredits }, count(credits))
         ),
         drawsBar

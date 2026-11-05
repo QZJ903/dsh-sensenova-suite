@@ -195,6 +195,79 @@ try {
     check("移除当前号后：清单为空",
       (await store1.listAccounts()).length === 0,
       JSON.stringify(await store1.listAccounts()));
+    // （5b 钉的终态在 2026-11-06 新规则下仍是「无存续」分支的行为：删当前号且
+    // 没有别的存续账号 = 干净未登录，拍板 B 的清场语义保留为编排第一步。）
+
+    // ── 场景 5c：删当前号 + 有存续 → 清单第一个自动顶上（2026-11-06 拍板）──
+    // 先拆当前会话再顶上：switchAccount 的旧会话回写若在删除后运行，会把刚删的
+    // 账号当无密码残档塞回 vault（复活洞）——清场后身份为空，回写分支整体跳过。
+    const backend5c = fakeBackend();
+    const auth5c = fakeAuth();
+    const vstore5c = fakeAccountsStore();
+    const store5c = buildStore({ env: {}, auth: auth5c, backend: backend5c.backend, accountsStore: vstore5c }).store;
+    await store5c.saveAccount({ username: "m1", password: "pw-m1" });
+    await store5c.saveAccount({ username: "m2", password: "pw-m2" });
+    await store5c.saveAccount({ username: "m3", password: "pw-m3" }); // 后保存者=当前
+    const logins5cBefore = auth5c.logins.length;
+    await store5c.removeAccount("m3");
+    check("删当前号且有存续：清单第一个自动顶上（热切换，不触发登录）",
+      backend5c.refs.get(USERNAME_REF) === "m1"
+        && (await store5c.getToken()) === "at-m1-1"
+        && auth5c.logins.length === logins5cBefore
+        && (await store5c.listAccounts()).some((a) => a.username === "m1" && a.active === true),
+      `user=${backend5c.refs.get(USERNAME_REF)} logins=${JSON.stringify(auth5c.logins)}`);
+    check("被删的当前号不复活（无密码残档也不留，清单恰剩两个）",
+      (await store5c.listAccounts()).every((a) => a.username !== "m3")
+        && Array.isArray(vstore5c.data) && vstore5c.data.length === 2,
+      JSON.stringify(vstore5c.data?.map((r) => ({ u: r.username, p: r.password }))));
+
+    // ── 场景 5d：顶上的号登录失败 → 换下一个，直到落地 ──
+    // n1 造冷：快照过期（expiresAt 拨到过去）+ 刷新被拒 + 存档密码也被平台拒
+    // → switchAccount 抛；换 n2（快照还热）热切换落地。逐个尝试、一个成功即停。
+    // 注意 deadRefreshes 单独不够——acquire 对新鲜的存档快照直接返回不碰刷新
+    // （acquire.ts isFresh 短路），必须把快照拨成过期才走冷链。
+    const backend5d = fakeBackend();
+    const auth5d = fakeAuth();
+    const vstore5d = fakeAccountsStore();
+    const store5d = buildStore({ env: {}, auth: auth5d, backend: backend5d.backend, accountsStore: vstore5d }).store;
+    await store5d.saveAccount({ username: "n1", password: "pw-n1" });
+    await store5d.saveAccount({ username: "n2", password: "pw-n2" });
+    await store5d.saveAccount({ username: "n3", password: "pw-n3" }); // 当前 = n3
+    vstore5d.data.find((a) => a.username === "n1").grant.expiresAt = 1;
+    auth5d.deadRefreshes = ["rt-n1-1"];
+    auth5d.loginFailsFor = { n1: true };
+    await store5d.removeAccount("n3");
+    check("顶上失败换下一个：n1 被拒后 n2 落地（身份/grant 跟人）",
+      backend5d.refs.get(USERNAME_REF) === "n2"
+        && (await store5d.getToken()) === "at-n2-2"
+        && auth5d.logins.some((l) => l.username === "n1" && l.password === "pw-n1"),
+      `user=${backend5d.refs.get(USERNAME_REF)} logins=${JSON.stringify(auth5d.logins)}`);
+
+    // ── 场景 5e：全部存续都顶不上 → 终态干净未登录（存续档原样保留）──
+    const backend5e = fakeBackend();
+    const auth5e = fakeAuth();
+    const vstore5e = fakeAccountsStore();
+    const store5e = buildStore({ env: {}, auth: auth5e, backend: backend5e.backend, accountsStore: vstore5e }).store;
+    await store5e.saveAccount({ username: "p1", password: "pw-p1" });
+    await store5e.saveAccount({ username: "p2", password: "pw-p2" });
+    await store5e.saveAccount({ username: "p3", password: "pw-p3" }); // 当前 = p3
+    for (const name of ["p1", "p2"]) vstore5e.data.find((a) => a.username === name).grant.expiresAt = 1;
+    // fake seq 全局递增：p1 首登 seq1 → rt-p1-1，p2 首登 seq2 → rt-p2-2。
+    auth5e.deadRefreshes = ["rt-p1-1", "rt-p2-2"];
+    auth5e.loginFailsFor = { p1: true, p2: true };
+    await store5e.removeAccount("p3");
+    let err5e = null;
+    try { await store5e.getToken(); } catch (e) { err5e = e; }
+    check("全部顶上失败：终态干净未登录（身份与活动令牌记录清空）",
+      backend5e.refs.get(USERNAME_REF) === undefined
+        && backend5e.records.get(ACTIVE) === undefined
+        && err5e?.code === "not_configured",
+      `user=${backend5e.refs.get(USERNAME_REF)} err=${err5e?.code}`);
+    check("全失败不清存续档：两个存档原样保留（密码还在）",
+      Array.isArray(vstore5e.data) && vstore5e.data.length === 2
+        && vstore5e.data.find((a) => a.username === "p1")?.password === "pw-p1"
+        && vstore5e.data.find((a) => a.username === "p2")?.password === "pw-p2",
+      JSON.stringify(vstore5e.data?.map((r) => ({ u: r.username, p: r.password }))));
 
     // ── 场景 6：清单制不限数量（2026-10-29 用户拍板）——7 个号全部落清单 ──
     const backend6 = fakeBackend();
