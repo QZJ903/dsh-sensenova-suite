@@ -188,17 +188,31 @@ export function createProviderPublisher(deps: ProviderPublisherDeps = {}) {
    * functions onto `target`.
    *
    * The body is the shared `registerProviderPair` (PITFALLS §19) — one copy
-   * for both publishers and both paths; this wrapper only supplies which
-   * provider the row is for.
+   * for both publishers and both paths; this wrapper supplies which provider
+   * the row is for, and retires the REPLACED adapter: only a registration
+   * that landed retires permanently, so the previous adapter's catalog retry
+   * timer is disposed here and not at plugin unmount (a re-registered
+   * rollback survivor reaches this line with `target.built === null` — the
+   * catch in `swapRegistration` clears it first — and keeps its timer).
    * @param {object} llm - the registration service.
    * @param {{providerIds: string[], adapter: unknown}} built - what to register.
    * @param {object} target - where the release functions are recorded (`state`).
    * @returns {void}
    */
-  const registerPair = (llm: { registerAdapter: (providerIds: string[], adapter: unknown) => () => void; registerConfigurableProviders?: (rows: object[]) => () => void }, built: { providerIds: string[]; adapter: unknown }, target: import("./publish-core.ts").PublisherStateBase) => registerProviderPair(llm, built, target, {
-    providerId: LLM_PROVIDER_ID,
-    displayName: LLM_DISPLAY_NAME
-  });
+  const registerPair = (llm: { registerAdapter: (providerIds: string[], adapter: unknown) => () => void; registerConfigurableProviders?: (rows: object[]) => () => void }, built: { providerIds: string[]; adapter: unknown }, target: import("./publish-core.ts").PublisherStateBase) => {
+    // 此刻 target.built 还是被替换者（swapRegistration 的 release() 只清
+    // releaseAdapter/releaseDirectory，不动 built）。
+    const retiring = target.built as { adapter?: { dispose?: () => void } } | null;
+    registerProviderPair(llm, built, target, {
+      providerId: LLM_PROVIDER_ID,
+      displayName: LLM_DISPLAY_NAME
+    });
+    // 走到这里没抛 = 新对已注册成功 = retiring 永久退役：当场清它的目录重试
+    // 时钟（0.1.1 起适配器带 30s 自续重试时钟，滞留实例会在被替换后继续后台
+    // 拉 /models；退役即清，卸载数组只剩兜底职责）。退役时旧实例可能有在途
+    // 流——dispose 只清时钟不碰流，安全。
+    try { retiring?.adapter?.dispose?.(); } catch { /* 退役清理失败静默。 */ }
+  };
 
   /**
    * (Re)build and register the provider for one catalog/allow-list snapshot.

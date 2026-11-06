@@ -23,6 +23,7 @@ import {
   swapRegistration,
   createAdapterFactoryResolver,
   resolveRegistrationService,
+  unregister,
   NO_LLM_SERVICE_ERROR
 } from "../src/host/publish-core.ts";
 
@@ -164,9 +165,10 @@ function check(name, condition, detail = "") {
 // that clears it.
 {
   let releasedCount = 0;
+  let disposedCount = 0;
   const state = {
     registered: true,
-    built: { adapter: { id: "adapter-A" }, providerIds: [PROVIDER_ID] },
+    built: { adapter: { id: "adapter-A", dispose: () => { disposedCount += 1; } }, providerIds: [PROVIDER_ID] },
     error: null,
     llmAvailable: true,
     releaseAdapter: () => { releasedCount += 1; },
@@ -185,6 +187,36 @@ function check(name, condition, detail = "") {
     state.error === NO_LLM_SERVICE_ERROR, String(state.error));
   check("the stale built adapter was cleared (no dead rollback target)",
     state.built === null, JSON.stringify(state.built));
+  check("the retired adapter's dispose ran (unregister is a permanent retirement: retry timer cleared)",
+    disposedCount === 1, `disposed=${disposedCount}`);
+}
+
+// --- `unregister` 直接钉（switch-off 路径的退役清场）------------------------
+// switch-off（面板关掉接入/registerProvider 翻 false）不经 registerPair 的
+// 退役钩子——unregister 是那条路径上唯一能清被撤 adapter 时钟的点
+// （2026-11-07 复查缺陷 1 残余面）。dispose 只清时钟；在途流不碰。
+{
+  let disposedCount = 0;
+  const state = {
+    registered: true,
+    built: { adapter: { dispose: () => { disposedCount += 1; } }, providerIds: [PROVIDER_ID] },
+    error: null,
+    llmAvailable: true,
+    releaseAdapter: null,
+    releaseDirectory: null
+  };
+  const outcome = unregister({ state, release: createPairReleaser(state) });
+  check("unregister reports a deliberate skip",
+    outcome.ok === true && outcome.skipped === true && state.error === null,
+    JSON.stringify(outcome));
+  check("unregister disposes the displaced adapter exactly once and clears built",
+    disposedCount === 1 && state.built === null && state.registered === false,
+    `disposed=${disposedCount} built=${JSON.stringify(state.built)}`);
+  // 幂等/空态：built 已空时不得误抛（no-llm 首装也会走到这里）。
+  const second = unregister({ state, release: createPairReleaser(state) });
+  check("unregister on an already-empty state is a safe no-op",
+    second.ok === true && disposedCount === 1,
+    `disposed=${disposedCount} ok=${second.ok}`);
 }
 
 console.log(`\nprovider-rollback-guard: ${passed} passed, ${failed} failed`);

@@ -2,7 +2,7 @@
   "name": "dsh-sensenova-suite",
   "displayName": "DSH SenseNova Suite",
   "icon": "./icon.svg",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Multi-account key pool with 429 rate-limit scheduling (RPM/TPM classification, key state machine with kick-out and time-gate recovery, per-credit-group isolation and quota ledger, multi-round rotation/retry with a unified backoff ladder), tri-protocol adapter (anthropic/responses/chat-completions) with per-model protocol downgrade chains, credits and usage monitoring, and multimodal tools (image generation/editing and vision relay)",
   "keywords": [
     "dsh-plugin",

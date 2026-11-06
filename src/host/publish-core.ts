@@ -303,6 +303,13 @@ export function resolveRegistrationService({ state, getLlm, release }: { state: 
  * publish would re-register an adapter whose release has already been called.
  * (The removed Raccoon publisher's "no credential" branch used to leave it
  * standing — the history this clearing pins.)
+ *
+ * Retirement (2026-11-07): unregister is the ONE retirement path that bypasses
+ * the publishers' `registerPair` retire hook (switch-off, no-llm service), so
+ * the displaced adapter's dispose runs HERE — an armed catalog retry timer
+ * would otherwise keep polling from a retired adapter until the plugin
+ * unmounts. Same semantics as the hook: dispose only clears the timer; an
+ * in-flight stream is untouched.
  * @param {object} job
  * @param {object} job.state - the publisher state.
  * @param {() => void} job.release - the publisher's releaser.
@@ -312,6 +319,10 @@ export function resolveRegistrationService({ state, getLlm, release }: { state: 
  */
 export function unregister({ state, release, error = null }: { state: PublisherStateBase; release: () => void; error?: string | null }) {
   release();
+  // 退役即清：本函数是唯一绕过 registerPair 退役钩子的退役路径（switch-off /
+  // no-llm），被撤 adapter 的 dispose 在这里补——武装的重试时钟否则会滞留到
+  // 插件卸载。与钩子同语义：dispose 只清时钟，在途流不受影响。
+  try { (state.built as { adapter?: { dispose?: () => void } } | null)?.adapter?.dispose?.(); } catch { /* 退役清理失败静默。 */ }
   state.registered = false;
   state.built = null;
   state.error = error;

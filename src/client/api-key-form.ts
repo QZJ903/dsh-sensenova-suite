@@ -305,7 +305,7 @@ export function PoolManager({ pool, onDone, tt }: {
             }
           }),
           concurrencyDirty
-            ? h("button", { type: "button", style: S.button, onClick: () => void saveConcurrency() }, tt("llm.save"))
+            ? h("button", { type: "button", style: S.button, onClick: () => void saveConcurrency() }, tt("poolMng.saveConcurrent"))
             : null,
           h("span", { style: { ...S.muted, fontSize: 12 } }, tt("poolMng.concurrentHint"))
         )

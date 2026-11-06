@@ -230,7 +230,11 @@ export class KeyOrchestrator {
     return true;
   }
 
-  /** 面板恢复：把该账号的 key 重新种回池（若凭据仍可解析）。 */
+  /** 面板恢复：把该账号的 key 重新种回池（若凭据仍可解析）。
+   * blocked 相位时 `!isRunning` 成立但 seed 幂等跳过 ⇒ 本方法对它 no-op——该
+   * 分支面板不可达（恢复按钮只渲染在 deleted/disabled 行，api-key-form.ts；
+   * 停用即 pool.remove 出池，「停用+阻塞」不可能并存），真走到也只是「不绕过
+   * 考验状态」的正确行为；权威重种在路由侧 refreshKeys（pool.ts apply 尾）。 */
   async restoreById(id: string): Promise<boolean> {
     const known = this.idToKey.get(id);
     if (known !== undefined && !this.pool.isRunning(known)) {
@@ -288,7 +292,9 @@ export class KeyOrchestrator {
 
   private writeAffinity(sessionId: string | undefined, key: string): void {
     if (sessionId === undefined || sessionId === "") return;
-    // LRU：超上限删最旧（Map 迭代序 = 插入序）。
+    // 逐出按**插入序 FIFO**，不是 LRU：Map 迭代序=插入序，对已存在键 set 不挪位
+    // （活跃老会话反而排最前、最先被逐）；与 TTL 的按 at 滑动对「新旧」定义不同。
+    // affinityMax=512 常量级，逐出实际不触发——不值得为真 LRU 挪码。
     if (!this.affinity.has(sessionId) && this.affinity.size >= Math.max(1, this.params().affinityMax)) {
       const oldest = this.affinity.keys().next().value;
       if (oldest !== undefined) this.affinity.delete(oldest);
@@ -423,8 +429,12 @@ export class KeyOrchestrator {
   }
 
   /**
-   * 记一次 429（额度耗尽计时的统一入口，2026-11-04 批 E）——**与桶无关**：
-   * tpm/rpm/unknown/an 线的 429 都进来（rpm/an 线的持续耗尽此前零隔离）。
+   * 记一次被拒（额度耗尽计时的统一入口，2026-11-04 批 E）——**与桶无关**：
+   * tpm/rpm/unknown/an 线的 429 都进来（rpm/an 线的持续耗尽此前零隔离）；
+   * **402/403 也进来**——它们与 unknown 429 共用 rotateApiKey 的
+   * 'rate-unclassified' 通道（key-health 三状态同判据）：持续欠费/禁用的
+   * key 攒满 30min 同样升级池格自隔离（比 401 移除温和）。口径注：池格是
+   * (key,组) 维，402 是账号级事实——只标被观测的组，其余组由各自观测路径补标。
    *
    * 断流重置：与上次 429 间隔超过 LIMITED_SUSTAIN_MS ⇒ 翻篇（firstLimitedAt
    * 重置，闲置不算持续——「过了一段时间第一次请求 429 对 key1 不公平」）。

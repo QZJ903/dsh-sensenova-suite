@@ -438,6 +438,9 @@ export function createTokenStore(options: {
       const target = str(id, "").trim();
       if (target !== "" && target === await readUsername()) {
         await forgetAccountImpl(wiring, state); // 身份引用 + 内存令牌
+        // 清账号 supersede 旧登录失败：面板该读 grant（或缺席），不是旧错误
+        // （被删公共包装的语义，直调 impl 后由调用方自带）。
+        state.lastError = null;
         await purgeGrant();                      // 活动令牌记录（无参 = 无条件删）
         // 存续账号逐个顶上：失败换下一个，直到没有号（终态已是干净未登录，
         // 失败尝试留下的身份/死快照瞬态由收尾清场兜住）。
@@ -452,6 +455,9 @@ export function createTokenStore(options: {
         }
         if (!switched) {
           await forgetAccountImpl(wiring, state); // 幂等清场：循环失败尝试的瞬态
+          // 全失败/无存续的终态 = 干净未登录：失败候选的登录错误不挂上屏（各号
+          // park 里自查，分钥本意）。
+          state.lastError = null;
           await purgeGrant();
         }
       }

@@ -184,6 +184,7 @@ var dsh_connect_sensenova_suite_client = (function() {
 			"poolMng.concurrent": "并发",
 			"poolMng.note": "备注",
 			"poolMng.saveName": "保存",
+			"poolMng.saveConcurrent": "保存",
 			"poolMng.routeMissing": "Host 未加载本插件的池路由：正在运行的是旧构建。请完全退出 DSH（含托盘图标）后重新启动。",
 			"poolMng.concurrentHint": "全局在途上限（0代表跟随key数）",
 			"poolMng.phaseRunning": "运行",
@@ -351,6 +352,7 @@ var dsh_connect_sensenova_suite_client = (function() {
 			"poolMng.concurrent": "Concurrency",
 			"poolMng.note": "note",
 			"poolMng.saveName": "save",
+			"poolMng.saveConcurrent": "Save",
 			"poolMng.routeMissing": "The Host is not serving this plugin's pool route: an older build is running. Fully quit DSH (including the tray icon) and start it again.",
 			"poolMng.concurrentHint": "global in-flight cap (0 = follow key count)",
 			"poolMng.phaseRunning": "running",
@@ -2620,7 +2622,7 @@ var dsh_connect_sensenova_suite_client = (function() {
 			type: "button",
 			style: S.button,
 			onClick: () => void saveConcurrency()
-		}, tt("llm.save")) : null, h("span", { style: {
+		}, tt("poolMng.saveConcurrent")) : null, h("span", { style: {
 			...S.muted,
 			fontSize: 12
 		} }, tt("poolMng.concurrentHint"))) : null, keys.length > 0 ? h("ul", {
@@ -4244,7 +4246,7 @@ var dsh_connect_sensenova_suite_client = (function() {
 		* 旧 bundle / 真网络故障」说成同一句话，排查只能靠猜。每次改客户端**改这一行**
 		* 并重新构建，控制台就能回答「浏览器到底加载了哪一版」。
 		*/
-		const CLIENT_BUILD = "2026-11-05T00:20";
+		const CLIENT_BUILD = "2026-11-07T04:26";
 		function clientFactory(loaderRequire) {
 			provideClientReact(loaderRequire("react"));
 			try {

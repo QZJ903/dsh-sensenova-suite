@@ -323,11 +323,19 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   const catalogFallbackView = async (): Promise<{ entries: unknown[]; fetchedAt: number } | null> => {
     return await catalogStore.listRecord().catch(() => null);
   };
-  // 目录自动重试时钟的卸载钩子：适配器实例由发布链异步创建（工厂回传），
-  // 收集在 createdAdapters；卸载时逐个 dispose（停 30s 自动重试时钟）。
+  // 目录自动重试时钟：被替换适配器的退役清理由发布链 registerPair 负责
+  // （注册成功才清，回滚复活者保留）。这里只留卸载兜底，数组修剪到
+  // 「可能在位的实例（publisher.state.built——发布中途它=回滚候选）+ 本次
+  // 新实例」：其余要么已退役要么从未注册（零时钟），不再为它们保留引用。
+  // publisher 在下方才赋值；本回调只在发布链里被调（晚于赋值），闭包引用
+  // 无 TDZ 面。
   const createdAdapters: Array<{ dispose?: () => void }> = [];
   const onAdapterCreated = (adapter: { dispose?: () => void }): void => {
     createdAdapters.push(adapter);
+    const live = (publisher.state.built as { adapter?: { dispose?: () => void } } | null | undefined)?.adapter;
+    for (let i = createdAdapters.length - 1; i >= 0; i--) {
+      if (createdAdapters[i] !== live && createdAdapters[i] !== adapter) createdAdapters.splice(i, 1);
+    }
   };
   const loadAdapterModule = deps.loadAdapterModule ?? (async () => {
     const module = await import("./llm-adapter.ts");
@@ -760,8 +768,8 @@ function apply(ctx: any, config: any = {}, deps: HostDeps = {}) {
   probeTimer.unref?.();
   ctx.effect(() => () => clearInterval(probeTimer), `${name}: probe timer`);
 
-  // 卸载即停：发布链创建的每个适配器的目录自动重试时钟（createdAdapters 由
-  // onAdapterCreated 回传填充）。卸载后不得再发目录请求。
+  // 卸载即停：仍在数组的适配器（在位实例 + 最近未注册的创建物；退役者已由
+  // registerPair/unregister 清过时钟）逐个 dispose。卸载后不得再发目录请求。
   ctx.effect(() => () => {
     for (const adapter of createdAdapters) {
       try { adapter.dispose?.(); } catch { /* 卸载失败静默。 */ }

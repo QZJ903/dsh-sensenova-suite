@@ -171,8 +171,11 @@ export function createAdapterFactory(pool: PoolFacade) {
           orchestrator.reportAuthRejected(rejectedKey);
           return orchestrator.pickNext(exclude, group, { borrow: false });
         }
-        // 持续限流记账（2026-11-04 批 E）：**所有** 429 形状统一入账（tpm/rpm/
-        // unknown/an 线——rpm 与 an 线的持续耗尽此前零隔离），判定与桶解耦。
+        // 持续限流记账（2026-11-04 批 E）：**所有**被拒形状统一入账——429 全形状
+        // （tpm/rpm/unknown/an 线；rpm 与 an 线的持续耗尽此前零隔离）加 402/403
+        // （与 unknown 429 共用 'rate-unclassified' 通道，key-health 三状态同判据）：
+        // 持续欠费/禁用同样升级池格自隔离（比 401 移除温和）。口径细节见
+        // noteLimited JSDoc；判定与桶解耦。
         orchestrator.noteLimited(rejectedKey, group);
         // 耗尽升级（2026-11-03 批 C 建、2026-11-04 批 E 扩全量）：连续限流段攒满
         // 30min（断流重置式——间隔超 30min 翻篇、格中空闲豁免，见 noteLimited）

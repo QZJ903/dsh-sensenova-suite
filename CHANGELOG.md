@@ -1,5 +1,14 @@
 # 更新日志（Changelog）
 
+## 0.1.2（2026-11-07，独立全量复查处置轮）
+
+- **适配器退役时钟三路闭合**——0.1.1 引入的滞留：每次发布新建适配器实例追加进 createdAdapters 只增不清，被替换实例的 30s 自续目录重试时钟无人清（僵尸实例在被替换后继续后台拉 /models，实例连同目录缓存滞留到插件卸载）。三处收口：registerPair 退役钩子（注册成功才清被替换者；回滚复活者保留时钟——swapRegistration 的 catch 先清 state.built 再重注册，retiring=null 天然短路）；unregister 同款清场（switch-off / no-llm 是仅有的两条不经 registerPair 的退役路径，此处为唯一共同点）；createdAdapters 修剪为「在位实例 + 本次新实例」（其余要么已退役要么从未注册，不再滞留引用）。dispose 只清时钟，在途流不碰。
+- **删号顶上错误残留**——removeAccount 两处直调 forgetAccountImpl 后补 state.lastError=null（0.1.1 删公共 forgetAccount 包装时丢了它的 supersede 行）：删当前号且顶上全失败/无存续的终态回到「干净未登录」，失败候选的登录错误不再挂上屏（各号 park 自查，分钥本意）。
+- **目录恢复日志判据换标记**——catalogRetryPending 失败段标记替代时钟句柄判据：时钟回调先自清句柄再拉取，旧判据漏掉「后台重试自身成功」这条主恢复路径；标记 arm 时置位、任意路径成功命中清除，失败段可重复。
+- **换线重发计数**——0B 断尾换线与 400 兜底各补 totalAttempts += 1（重发是真实上游尝试，后续 429 行「第N发」不再少 1；400 处系预存在缺口同批补）。
+- **全量复查注释改真话**（独立走查三发现，行为零改动）：记账口径写明 402/403 经 'rate-unclassified' 通道同样入额度账本、持续欠费/禁用升级池格自隔离（比 401 移除温和；池格 (key,组) 维与账号级事实的覆盖边界）；affinity 逐出是插入序 FIFO 不是 LRU（set 不挪位、与 TTL 的 at 滑动对「新旧」定义不同、512 常量级下逐出不触发）；restoreById 对 blocked 相位 no-op 落真话（面板不可达：恢复按钮只渲染 deleted/disabled 行，停用即出池与阻塞互斥；不绕过考验状态是有意设计，权威重种在路由侧 refreshKeys）；withUserThinking 读取边界「三个」改「两个」（listModels 的 LlmModelInfo 无 reasoning 面，0.1.15 起预存在失实）。
+- **测试**：provider 264→267、rollback-guard 15→19（+7 退役/回滚/switch-off 钉，全部变异验红——摘 dispose 行、dispose 挪到注册前、unregister 摘行三种突变各自变红）；typecheck 3 配置 0 错；provider 267 / rollback-guard 19 / pool 127 / store 138 / account-vault 45 / wiring 51 / catalog-gate 9 / retry 24 / config 151 / panel 78 / render 202 / render-dom 55 全绿。
+
 ## 0.1.1（2026-11-06，真机反馈五连修 + 卫生轮）
 
 - **目录拉取失败不再死窗**——真机事故（拉取失败后 60s 冷却期内每次问询瞬时回空：对话页选择器 provider 失败/消失、重试按了等于没按，重启才恢复）：**删 60s 失败冷却**（拉模型不占上游限额，冷却防的风暴无害、代价是死窗）；失败即回落**落盘 catalog.json 底座**（adapter 冷启动认领一次、不绑凭据——上游对所有 key 同待）；失败后 **30s 后台自动重试**直到成功（单槽不叠加、unref、卸载即停）；失败/恢复各落一行诊断日志（目录路径此前零留痕，事故无从查起）。选择器自第一刻起永远有目录可显。

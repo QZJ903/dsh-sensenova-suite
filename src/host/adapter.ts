@@ -195,9 +195,10 @@ export interface SensenovaAdapterDeps {
   /**
    * 每模型可用思考档位（dsh-sensenova-suite 扩展点，可选）：从 pool.json
    * `thinking` 分区读取（{ modelId → ["off","low",...] }）。在读取边界
-   * （listModels/resolveModel/stream）经 withUserThinking 现算覆盖
-   * reasoning.efforts——DSH 对话界面的思考档位可选集 = 用户勾选集，改勾选
-   * 即生效（不烘焙进目录缓存，无需重启）。缺省 undefined = 目录词表。
+   * （resolveModel/stream）经 withUserThinking 现算覆盖 reasoning.efforts
+   * （listModels 的 LlmModelInfo 无 reasoning 面，无可覆盖）——DSH 对话界面
+   * 的思考档位可选集 = 用户勾选集，改勾选即生效（不烘焙进目录缓存，无需
+   * 重启）。缺省 undefined = 目录词表。
    */
   thinkingOverrides?: () => Record<string, string[]>;
   /**
@@ -438,7 +439,8 @@ function reasoningInfoFrom(raw: Record<string, unknown>, modelId: string): LlmMo
  * 无人申报默认且勾选集含 high 时兜 defaultEffort=high（2026-11-05 拍板：新模型
  * 兜底勾 high 且**实际用** high——此前视图只造可选集不造默认档，新会话悬在宿主
  * "Provider default" 上、请求不带档位，上游各自为政）。
- * 在 listModels/resolveModel/stream 三个读取边界调用，不写回目录缓存（热更新）。 */
+ * 在 resolveModel/stream 两个读取边界调用（listModels 返回的 LlmModelInfo 无
+ * reasoning 字段，无可套用），不写回目录缓存（热更新）。 */
 function withUserThinking(
   entry: CatalogEntry | undefined,
   model: string,
@@ -1021,6 +1023,10 @@ export class SensenovaAdapter extends LlmAdapter {
   private catalogFallbackClaimed = false;
   /** 拉取失败后的后台自动重试时钟（单槽不叠加；成功即清，卸载即停）。 */
   private catalogRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 失败段标记（arm 置位、任意路径成功清除）：恢复日志的判据。判时钟句柄会
+   * 漏掉「后台重试自身成功」这条主恢复路径——时钟回调先自清句柄再拉取；
+   * 标记不受影响，宿主问询或后台重试的成功都能命中。 */
+  private catalogRetryPending = false;
   /**
    * 配额类 429 粘住 key（design D5，仅 quotaRotation 开启时读写）：
    * 有 sessionId 的请求按会话分桶（同一会话后续请求粘住切换后的 key）；
@@ -1169,8 +1175,11 @@ export class SensenovaAdapter extends LlmAdapter {
     }
     const inflight: Promise<CatalogEntry[]> = this.fetchCatalogUncached(connection, apiKey, gate.invalidateFailedModels).then(
       (models) => {
-        // 失败之后的第一次成功：清自动重试时钟，落一行恢复日志。
-        if (this.catalogRetryTimer !== undefined) {
+        // 失败之后的第一次成功：清失败段标记与重试时钟，落一行恢复日志。
+        // 判 pending 标记不判时钟句柄（句柄在时钟触发时已自清）；成功后再
+        // 失败重新置位，恢复行按失败段可重复。
+        if (this.catalogRetryPending) {
+          this.catalogRetryPending = false;
           this.clearCatalogRetry();
           traceLog(`[dsh-sensenova-suite] 目录拉取恢复（重试成功）：${models.length} 条`);
         }
@@ -1199,6 +1208,7 @@ export class SensenovaAdapter extends LlmAdapter {
   /** 拉取失败后排一次后台自动重试（单槽不叠加；成功即清，unref 不拽住进程）。 */
   private armCatalogRetry(): void {
     if (this.catalogRetryTimer !== undefined) return;
+    this.catalogRetryPending = true;
     this.catalogRetryTimer = setTimeout(() => {
       this.catalogRetryTimer = undefined;
       // 失败路径在 fetchCatalog 内部已兜底（回落/再排），此处 catch 只防意外。
@@ -1563,6 +1573,7 @@ export class SensenovaAdapter extends LlmAdapter {
               // （与 400 兜底同款）。bytes>0 或已换过一次：原样抛宿主。
               if (receivedBytes === 0 && nextWire !== undefined && !truncationFallbackUsed) {
                 truncationFallbackUsed = true;
+                totalAttempts += 1; // 换线重发是一次真实上游尝试（后续 429 行「第N发」要数它）
                 wire = nextWire;
                 body = await buildBody(wire);
                 release();
@@ -1601,6 +1612,7 @@ export class SensenovaAdapter extends LlmAdapter {
           wire = nextWire;
           body = await buildBody(wire);
           responsesFallbackUsed = true;
+          totalAttempts += 1; // 同 0B 断尾换线：重发计入尝试数（预存在缺口同批补）
           release();
           release = undefined;
           continue;

@@ -1414,6 +1414,87 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
 }
 
+// --- 退役钩子：注册成功才清被替换者的时钟，回滚复活者不清 -------------------
+// 0.1.1 起适配器带 30s 自续目录重试时钟：被替换实例若只在插件卸载时清，会在
+// 退役后继续后台拉 /models 并滞留到卸载（2026-11-07 复查缺陷 1）。清点必须在
+// 「注册成功」这一刻（provider-publish registerPair 闭包）：失败发布回滚复活
+// 的 previousBuilt 还在位，它的时钟是它的后台重试，不能被清。
+{
+  try {
+    const disposed = [];
+    const mkAdapter = (name) => ({ name, dispose: () => { disposed.push(name); } });
+    const adapters = {};
+    let regN = 0;
+    const pub = createProviderPublisher({
+      settings: { registerProvider: true },
+      loadAdapterModule: async () => ({
+        createSensenovaAdapter: async () => {
+          const name = `adapter-${++regN}`;
+          adapters[name] = mkAdapter(name);
+          return { providerIds: ["sensenova-suite"], adapter: adapters[name] };
+        }
+      }),
+      getLlm: () => ({ registerAdapter: () => () => {}, registerConfigurableProviders: () => () => {} })
+    });
+    await pub.publish([{ id: "m-x" }], ["m-x"], []);
+    await pub.publish([{ id: "m-y" }], ["m-y"], []);
+    check("a successful re-publish permanently retires the replaced adapter (disposed once; the new survivor untouched)",
+      JSON.stringify(disposed) === JSON.stringify(["adapter-1"]) && pub.state.built?.adapter?.name === "adapter-2",
+      JSON.stringify({ disposed, built: pub.state.built?.adapter?.name }));
+
+    // 回滚：第二次注册抛错 → previousBuilt 复活 → 其时钟原样保留（dispose 零调用）。
+    // 按对象身份断言（regN 计数器跨发布器共享，硬编码名会漂）。
+    let rbFirst = null;
+    const pubRollback = createProviderPublisher({
+      settings: { registerProvider: true },
+      loadAdapterModule: async () => ({
+        createSensenovaAdapter: async () => {
+          const a = mkAdapter(`rb-adapter-${++regN}`);
+          if (rbFirst === null) rbFirst = a;
+          return { providerIds: ["sensenova-suite"], adapter: a };
+        }
+      }),
+      getLlm: (() => {
+        let n = 0;
+        return () => ({
+          registerAdapter: () => { n += 1; if (n === 2) throw new Error("register boom"); return () => {}; },
+          registerConfigurableProviders: () => () => {}
+        });
+      })()
+    });
+    await pubRollback.publish([{ id: "m-1" }], ["m-1"], []); // 首个实例在位
+    await pubRollback.publish([{ id: "m-2" }], ["m-2"], []); // 第二个注册抛 → 回滚复活首个
+    check("a failed publish does NOT dispose the revived previous adapter (its retry timer survives)",
+      pubRollback.state.built?.adapter === rbFirst && !disposed.includes(rbFirst.name),
+      JSON.stringify({ disposed, built: pubRollback.state.built?.adapter?.name }));
+
+    // switch-off（关接入开关）：退役走 unregister，不经 registerPair 钩子——
+    // 在位 adapter 的时钟必须在 unregister 里清（2026-11-07 复查缺陷 1 残余面）。
+    let switchOn = true;
+    const pubOff = createProviderPublisher({
+      settings: { registerProvider: true },
+      panelSwitch: async () => switchOn,
+      loadAdapterModule: async () => ({
+        createSensenovaAdapter: async () => {
+          const a = mkAdapter(`off-adapter-${++regN}`);
+          return { providerIds: ["sensenova-suite"], adapter: a };
+        }
+      }),
+      getLlm: () => ({ registerAdapter: () => () => {}, registerConfigurableProviders: () => () => {} })
+    });
+    await pubOff.publish([{ id: "m-on" }], ["m-on"], []); // 在位
+    const servingAdapter = pubOff.state.built?.adapter;
+    switchOn = false;
+    const offOutcome = await pubOff.publish([{ id: "m-off" }], ["m-off"], []);
+    check("switching OFF disposes the serving adapter through unregister (no zombie retry timer)",
+      offOutcome.skipped === true && pubOff.state.built === null
+        && disposed.includes(servingAdapter?.name) === true,
+      JSON.stringify({ skipped: offOutcome.skipped, built: pubOff.state.built, disposed }));
+  } catch (error) {
+    fail("retire-on-successful-registration dispose semantics", error);
+  }
+}
+
 // --- T3: the wire half of the ceiling order, exercised at runtime ----------
 // maxTokensForId and the wiring are pinned above at unit/source level; this
 // island constructs the REAL adapter (peer-dependent: `LlmAdapter` base +
