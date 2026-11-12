@@ -7,10 +7,11 @@
  * 仍由宿主重试层退避后原 key 重试，此闸只是从源头抑制并发超限。
  *
  * 队列与在途计数均以 key 为键；key 条目在排空后惰性删除。排队等待受
- * `queueTimeoutMs`（默认 90s，2026-09-04 定 60s、2026-11-02 提到 90s 见下，
- * fix-sensenova-429-quota-retry design D4）约束：超时以可重试 TimeoutError
+ * `queueTimeoutMs`（默认 150s，沿革见常量注：09-04 定 60s、11-02 提到 90s、
+ * 11-13 随建连分档提到 150s）约束：超时以可重试 TimeoutError
  * reject 且不占额度，交宿主重试层退避后重试。本模块刻意不依赖 cordis，
- * node 测试可直接驱动。
+ * node 测试可直接驱动。建连/首包预算的分档判定（connectTimeoutFor）同为
+ * 请求路径的时间预算，也住这里。
  *
  * @module dsh-sensenova-suite/concurrency
  */
@@ -25,8 +26,32 @@ export type Release = () => void;
  * 30-50s（16 次 RTT + 10s 抖动等待）。globalConcurrency=2 时两个会话同时
  * 全 429，第 3 个排队者的等待会逼近 60s；90s 留出余量，避免排队者因别人的
  * 限流重试而超时失败。
+ * 2026-11-13 提到 150s：建连/首包档分档化后，大包预算 120s 超过旧 90s——挂死
+ * 的占槽者还没被建连闸放出来，排队的先被本闸判死（占槽的没死排队的先死）。
+ * 150s 恢复「排队预算 > 单次占槽」的顺序（120s + 调度余量）。
  */
-export const DEFAULT_QUEUE_TIMEOUT_MS = 90_000;
+export const DEFAULT_QUEUE_TIMEOUT_MS = 150_000;
+
+/**
+ * 建连/首包预算分档（毫秒）——freeapi 底座 2026-09-04 定 45s 单档（实测传输
+ * 挂起 ≈1/5 且无 RST），2026-11-13 分档化：
+ *
+ *   - 小包（< {@link CONNECT_TIER_BODY_BYTES}）→ 60s：挂起几乎必是死连接，
+ *     快砍保槽位卫生（per-key=1，挂死的连接占的是整把 key）；
+ *   - 大包 → 120s：响应头时间 ≈ 上行 + 服务器预处理，都正比于包大小（请求体
+ *     是纯文本 JSON——图片走宿主附件引用不进请求体），45s 对老会话长历史是
+ *     冤枉砍（真机反馈 45000ms 报错的直接成因）。
+ *
+ * 恰等阈值归大档（≥ 语义，钉在 connectTimeoutFor）。
+ */
+export const CONNECT_TIMEOUT_MS = 60_000;
+export const CONNECT_TIMEOUT_BIG_MS = 120_000;
+export const CONNECT_TIER_BODY_BYTES = 256 * 1024;
+
+/** 建连/首包预算按请求体字节分档（纯函数，peer-free 直钉）。 */
+export function connectTimeoutFor(bodyBytes: number): number {
+  return bodyBytes >= CONNECT_TIER_BODY_BYTES ? CONNECT_TIMEOUT_BIG_MS : CONNECT_TIMEOUT_MS;
+}
 
 /** 把配置的并发上限归一化为正整数：非整数、负数或无法解析一律回退 1。 */
 export function normalizeConcurrencyLimit(value: unknown): number {

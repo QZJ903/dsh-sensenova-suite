@@ -1495,6 +1495,24 @@ const BASE_URL = "https://token.sensenova.cn/v1";
   }
 }
 
+// ── 建连/首包预算分档（connectTimeoutFor，peer-free）——2026-11-13 批 ──────
+// freeapi 底座 09-04 的 45s 单档分档化：小包 60s 快砍（挂起≈死连接，保槽位卫生）、
+// 大包 120s（头部时间≈上行+预处理，正比于包大小；真机反馈 45000ms 冤枉砍的直接
+// 成因）。恰等阈值归大档（≥ 语义）。
+{
+  const { connectTimeoutFor, CONNECT_TIMEOUT_MS, CONNECT_TIMEOUT_BIG_MS, CONNECT_TIER_BODY_BYTES } =
+    await import("../src/host/concurrency.ts");
+  check("建连分档常量：小包 60s / 大包 120s / 阈值 256KB",
+    CONNECT_TIMEOUT_MS === 60_000 && CONNECT_TIMEOUT_BIG_MS === 120_000 && CONNECT_TIER_BODY_BYTES === 256 * 1024,
+    `${CONNECT_TIMEOUT_MS}/${CONNECT_TIMEOUT_BIG_MS}/${CONNECT_TIER_BODY_BYTES}`);
+  check("建连分档判定：小包 60s、恰等阈值归大档、大包 120s",
+    connectTimeoutFor(0) === 60_000
+      && connectTimeoutFor(256 * 1024 - 1) === 60_000
+      && connectTimeoutFor(256 * 1024) === 120_000
+      && connectTimeoutFor(5 * 1024 * 1024) === 120_000,
+    `${connectTimeoutFor(0)}/${connectTimeoutFor(256 * 1024)}/${connectTimeoutFor(5 * 1024 * 1024)}`);
+}
+
 // --- T3: the wire half of the ceiling order, exercised at runtime ----------
 // maxTokensForId and the wiring are pinned above at unit/source level; this
 // island constructs the REAL adapter (peer-dependent: `LlmAdapter` base +
@@ -1848,12 +1866,205 @@ const BASE_URL = "https://token.sensenova.cn/v1";
       check("S2a：抖动等待中 abort 透传（上屏取消原因，不再冒充传输错误）",
         s2aAttempts.length === 12 && s2aError === "用户停止",
         JSON.stringify({ attempts: s2aAttempts.length, error: s2aError.slice(0, 90) }));
+
+      // ── 建连/首包超时：一次性换 key 转向（2026-11-13 分档+转向批）─────────
+      // fetch 桩：挂起发 = promise 挂着直到建连闸砍（注入 connectMs=50ms，
+      // real-time，三次挂起共 ~150ms）；成功发 = 最小 chat SSE 收尾。
+      // rotateApiKey 桩监听 rejection 形状——'connect-timeout' 才放行第二把。
+      // 「不记账」由独立块钉：llm-adapter 接线对 connect-timeout 不经 noteLimited。
+      const ctSseOk = () => {
+        const enc = new TextEncoder();
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(enc.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'));
+            controller.enqueue(enc.encode("data: [DONE]\n\n"));
+            controller.close();
+          }
+        }), { status: 200 });
+      };
+      const ctHang = (signal) => new Promise((_resolve, reject) => {
+        const onAbort = () => reject(signal.reason);
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      });
+      const mkCtAdapter = (rotate, behavior, log) => new SensenovaAdapter({
+        options: () => ({ apiBase: "https://token.sensenova.cn/v1", accountCount: 1, concurrency: 1, wireProtocol: "auto" }),
+        resolveApiKey: async () => "sk-first",
+        resolveApiKeyForRequest: async () => "sk-first",
+        requestSlot: async () => () => {},
+        rotateApiKey: rotate,
+        timeouts: { connectMs: 50, streamIdleMs: 1000 },
+        fetchImpl: (async (_url, init) => {
+          log.push(String(init?.headers?.authorization ?? "").replace("Bearer ", ""));
+          return behavior(log.length, init?.signal);
+        }),
+      });
+
+      // 钉 1：第 1 发挂起 → 转向第二把 → 第 2 发成功（finish 落地）。
+      {
+        const ctFetches = [];
+        const ctRotate = [];
+        const a1 = mkCtAdapter(
+          async (rejectedKey, rejection, _model, roundExclude) => {
+            ctRotate.push({ rejectedKey, rejection, excluded: roundExclude instanceof Set && roundExclude.has(rejectedKey) });
+            return rejection === "connect-timeout" ? "sk-second" : undefined;
+          },
+          (n, signal) => (n === 1 ? ctHang(signal) : ctSseOk()),
+          ctFetches,
+        );
+        let ctError = "";
+        const ctChunks = [];
+        try {
+          for await (const chunk of a1.stream({
+            model: "unknown-model-x", sessionId: "sess-ct1",
+            messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+          })) { ctChunks.push(chunk.type); }
+        } catch (error) { ctError = String(error?.message ?? error); }
+        check("建连超时本请求内换 key 转向：第二发成功、rejection=connect-timeout 且排除被拒 key",
+          ctError === "" && ctChunks.includes("finish") && ctFetches.join() === "sk-first,sk-second"
+            && ctRotate.length === 1 && ctRotate[0].rejection === "connect-timeout"
+            && ctRotate[0].rejectedKey === "sk-first" && ctRotate[0].excluded === true,
+          JSON.stringify({ fetches: ctFetches, rotate: ctRotate, chunks: ctChunks, error: ctError.slice(0, 90) }));
+      }
+
+      // 钉 2：转向后第二发仍挂起 → 一次性门耗尽，抛宿主且消息是新文案（无「并发额度」）。
+      {
+        const ctFetches2 = [];
+        let ctRotateCount = 0;
+        const a2 = mkCtAdapter(
+          async () => { ctRotateCount += 1; return "sk-second"; },
+          (_n, signal) => ctHang(signal),
+          ctFetches2,
+        );
+        let a2Error = "";
+        try {
+          for await (const chunk of a2.stream({
+            model: "unknown-model-x", sessionId: "sess-ct2",
+            messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+          })) { void chunk; }
+        } catch (error) { a2Error = `${error?.code ?? ""}|${String(error?.message ?? error)}`; }
+        check("转向后第二次仍挂起：一次性门耗尽抛宿主，新文案无「并发额度」",
+          a2Error.includes("TIMEOUT") && a2Error.includes("未返回响应头") && !a2Error.includes("并发额度")
+            && ctRotateCount === 1 && ctFetches2.length === 2,
+          JSON.stringify({ fetches: ctFetches2.length, rotate: ctRotateCount, error: a2Error.slice(0, 140) }));
+      }
+
+      // 钉 3：池空（rotateApiKey 返回 undefined）→ 不转向直接抛，仅一发。
+      {
+        const ctFetches3 = [];
+        const a3 = mkCtAdapter(async () => undefined, (_n, signal) => ctHang(signal), ctFetches3);
+        let a3Error = "";
+        try {
+          for await (const chunk of a3.stream({
+            model: "unknown-model-x", sessionId: "sess-ct3",
+            messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+          })) { void chunk; }
+        } catch (error) { a3Error = `${error?.code ?? ""}|${String(error?.message ?? error)}`; }
+        check("池空不转向：首挂起即抛宿主（TIMEOUT），仅一发",
+          a3Error.includes("TIMEOUT") && a3Error.includes("未返回响应头") && ctFetches3.length === 1,
+          JSON.stringify({ fetches: ctFetches3.length, error: a3Error.slice(0, 120) }));
+      }
     } catch (error) {
       fail("T3 resolveModel runtime pin", error);
     }
   } else {
     check("T3 resolveModel runtime pin loud-skipped (peer not resolvable here)",
       true, skipReason);
+  }
+}
+
+// ── 建连超时转向的接线级钉（llm-adapter rotateApiKey 闭包，2026-11-13 批）────
+// 适配器钉（T3 岛内）把 deps.rotateApiKey 整个换桩，接线的 connect-timeout
+// 分支（不记账不踢、borrow:false、组按模型现算）没有被它们跑到——本钉走真
+// 装配（createAdapterFactory + 假 orchestrator 监听）堵这个缝。挂起不用真等
+ // 60s：fetch 桩第一发同步 reject 一个 TimeoutError，走的就是建连闸的同一条
+ // catch 路径。
+{
+  let wiringMod = null;
+  let wiringSkip = "";
+  try {
+    wiringMod = await import("../src/host/llm-adapter.ts");
+  } catch (error) {
+    const message = String(error?.message ?? error);
+    if (error?.code === "ERR_MODULE_NOT_FOUND" || message.includes("@deepseek-ai/dsh-llm")) {
+      wiringSkip = message.slice(0, 120);
+    } else {
+      fail("wiring pin the llm-adapter module failed to import (not a peer gap)", error);
+    }
+  }
+  if (wiringMod !== null) {
+    const realFetch = globalThis.fetch;
+    try {
+      const { createAdapterFactory } = wiringMod;
+      const wiringCalls = [];
+      const fakeOrchestrator = {
+        groupOf: () => "general",
+        pickStart: async () => ({ key: "sk-first", group: "general" }),
+        pickNext: async (exclude, group, opts) => {
+          wiringCalls.push({
+            excludeHasRejected: exclude instanceof Set && exclude.has("sk-first"),
+            group,
+            borrow: opts?.borrow,
+          });
+          return "sk-second";
+        },
+        noteLimited: () => { wiringCalls.noteLimited = true; },
+        reportRateLimited: () => { wiringCalls.reportRateLimited = true; },
+        reportAuthRejected: () => { wiringCalls.reportAuthRejected = true; },
+        reportPoolExhausted: () => {},
+        groupFullyPoolMarked: () => false,
+        reportSuccess: () => {},
+        snapshot: () => ({ running: ["sk-first", "sk-second"], blocked: [] }),
+        acquireSlot: async () => () => {},
+      };
+      const realAuth = [];
+      let fetchNo = 0;
+      globalThis.fetch = async (_url, init) => {
+        fetchNo += 1;
+        realAuth.push(String(init?.headers?.authorization ?? "").replace("Bearer ", ""));
+        if (fetchNo === 1) {
+          return Promise.reject(new DOMException("connect timed out", "TimeoutError"));
+        }
+        const enc = new TextEncoder();
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(enc.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'));
+            controller.enqueue(enc.encode("data: [DONE]\n\n"));
+            controller.close();
+          }
+        }), { status: 200 });
+      };
+      const createSensenovaAdapter = createAdapterFactory({
+        orchestrator: fakeOrchestrator,
+        protocolOverrides: () => ({}),
+        thinkingOverrides: () => ({}),
+      });
+      const adapter = (await createSensenovaAdapter({
+        baseUrl: "https://token.sensenova.cn/v1",
+        entries: [],
+        enabledIds: [],
+      })).adapter;
+      let wiringErr = "";
+      try {
+        for await (const chunk of adapter.stream({
+          model: "unknown-model-x", sessionId: "sess-wiring",
+          messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        })) { void chunk; }
+      } catch (error) { wiringErr = String(error?.message ?? error); }
+      check("接线级：connect-timeout 不记账不踢（三 spy 零调用）、pickNext borrow:false、真用了第二把 key",
+        wiringErr === "" && wiringCalls.noteLimited !== true && wiringCalls.reportRateLimited !== true
+          && wiringCalls.reportAuthRejected !== true
+          && wiringCalls.length === 1 && wiringCalls[0].borrow === false
+          && wiringCalls[0].group === "general" && wiringCalls[0].excludeHasRejected === true
+          && realAuth.join() === "sk-first,sk-second",
+        JSON.stringify({ wiringCalls, auth: realAuth, error: wiringErr.slice(0, 90) }));
+    } catch (error) {
+      fail("wiring pin connect-timeout semantics", error);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  } else {
+    check("wiring pin loud-skipped (peer not resolvable here)", true, wiringSkip);
   }
 }
 

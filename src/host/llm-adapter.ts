@@ -152,7 +152,8 @@ export function createAdapterFactory(pool: PoolFacade) {
       poolFullyMarked: (model) => orchestrator.groupFullyPoolMarked(orchestrator.groupOf(model)),
       // 全局在途上限：排队等待而非报错。
       requestSlot: async (signal?: AbortSignal) => orchestrator.acquireSlot(signal),
-      // 轮换：401 → 永久移除并取下一把；rate/pool 类 429 → 记数/记格并取下一把。
+      // 轮换：401 → 永久移除并取下一把；rate/pool 类 429 → 记数/记格并取下一把；
+      // connect-timeout（建连/首包挂起，2026-11-13）→ 不记账不踢，仅换下一把。
       // 组一律按 groupOf(本次请求模型) 现算（2026-10-31 修：此前写侧硬编码
       // "general"，读侧按请求模型的组查——专属池模型的格子写读两侧组名错位，
       // 专属池耗尽拦不住自己、反而误伤通用组的健康 key）。额度侧的主动记/清走
@@ -169,6 +170,12 @@ export function createAdapterFactory(pool: PoolFacade) {
           : new Set([rejectedKey]);
         if (rejection === "invalid-credential") {
           orchestrator.reportAuthRejected(rejectedKey);
+          return orchestrator.pickNext(exclude, group, { borrow: false });
+        }
+        if (rejection === "connect-timeout") {
+          // 建连/首包挂起≠限流/账号态：不记账（额度账本只收 429/账号态）、不踢、
+          // 不清——只是换一把连接重试（adapter 内一次性转向，2026-11-13）。
+          // borrow:false 与轮内换 key 同纪律：阻塞 key 不进轮询。
           return orchestrator.pickNext(exclude, group, { borrow: false });
         }
         // 持续限流记账（2026-11-04 批 E）：**所有**被拒形状统一入账——429 全形状

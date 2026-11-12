@@ -35,11 +35,12 @@ import type {
   StreamChunk,
   TokenUsage,
 } from '@deepseek-ai/dsh-llm';
+import { Buffer } from "node:buffer";
 import { parseRetryAfterMs, classify429Body, classify429Full, bucketCountsStrike, probeFloorFor, summarize429Body, PROVIDER_RETRY_AFTER_CAP_MS } from './rate-classify.ts';
 import { shouldRotateUnclassified } from './key-health.ts';
 import { retryableCodes, ANTHROPIC_TRUNCATED_CODE, QUOTA_CODES, LLM_CODES } from './llm-retry.ts';
 import { MODELS_TIMEOUT_MS, CATALOG_AUTO_RETRY_MS, planCatalogFetch } from './catalog-gate.ts';
-import { DEFAULT_QUEUE_TIMEOUT_MS, KeyedConcurrencyGate, type Release } from './concurrency.ts';
+import { DEFAULT_QUEUE_TIMEOUT_MS, connectTimeoutFor, KeyedConcurrencyGate, type Release } from './concurrency.ts';
 import { KNOWN_UNROUTABLE_MODELS, CONTEXT_WINDOW_FIELDS, MAX_OUTPUT_FIELDS, maxTokensForId, contextWindowForId } from './llm-models.ts';
 import { IMAGE_INPUT_MODALITIES, inputModalitiesFor } from './modality.ts';
 import { traceLog } from './trace-log.ts';
@@ -84,9 +85,8 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
-/** 生成请求连接/首字节超时（毫秒）。2026-09-04 实测：传输挂起 ≈1/5 且无 RST，45s 覆盖大 prompt 建连+首包（design D4/D6）。 */
-export const CONNECT_TIMEOUT_MS = 45_000;
-/** SSE 流空闲看门狗（毫秒）：距上一事件 ≥ 该值无任何 chunk/事件即按停摆结束。2026-09-04 实测：思考期渠道有空事件/心跳自然重置计时（design D4/D6）。 */
+/** 生成请求连接/首字节超时已迁至 concurrency.ts 并分档化（2026-11-13：小包 60s / 大包 120s / 阈值 256KB，connectTimeoutFor）——
+ * freeapi 底座 09-04 定 45s 单档的沿革随迁。 */
 export const STREAM_IDLE_TIMEOUT_MS = 60_000;
 /** 明确的模型不可用错误码（不在默认可重试集合内，故不触发 provider 重试）。 */
 const MODEL_NOT_FOUND_CODE = LLM_CODES.modelNotFound;
@@ -127,7 +127,7 @@ export interface SensenovaConnection {
 
 /** 生成请求三段超时注入（毫秒，测试用）；缺省用模块级常量/并发闸默认。 */
 export interface SensenovaTimeouts {
-  /** 连接/首字节超时；缺省 CONNECT_TIMEOUT_MS。 */
+  /** 连接/首字节超时；缺省按请求体分档（connectTimeoutFor：小包 60s / 大包 120s，阈值 256KB）。 */
   connectMs?: number;
   /** SSE 流空闲看门狗；缺省 STREAM_IDLE_TIMEOUT_MS。 */
   streamIdleMs?: number;
@@ -143,7 +143,9 @@ export interface SensenovaAdapterDeps {
   /**
    * 轮换到下一个 key：401（'invalid-credential'）永久禁用被拒账号；
    * 速率/TPM 类 429（'quota-exhausted'）与积分池类 429（'pool-exhausted'，
-   * dsh-sensenova-suite 扩展）不写任何账号状态，仅用于换 key。
+   * dsh-sensenova-suite 扩展）不写任何账号状态，仅用于换 key；
+   * 'connect-timeout'（2026-11-13）= 建连/首包挂起的本请求内转向——挂起≠限流/
+   * 账号态，不记账不踢，仅换一把连接重试（adapter 侧一次性门）。
    * 第三参 model：本次请求的模型 id——拒绝类型不带组信息，池格的组由实现侧
    * groupOf(model) 现算（2026-10-31 起，写读同组；此前硬编码 general 是错位源）。
    * 返回 undefined 表示无更多 key（含全池格子标记的快速失败）。
@@ -152,7 +154,7 @@ export interface SensenovaAdapterDeps {
    */
   rotateApiKey: (
     rejectedKey: string,
-    rejection: 'invalid-credential' | 'quota-exhausted' | 'pool-exhausted' | 'rate-unclassified' | 'rate-soft',
+    rejection: 'invalid-credential' | 'quota-exhausted' | 'pool-exhausted' | 'rate-unclassified' | 'rate-soft' | 'connect-timeout',
     model: string | undefined,
     roundExclude?: ReadonlySet<string>,
   ) => Promise<string | undefined>;
@@ -1409,13 +1411,22 @@ export class SensenovaAdapter extends LlmAdapter {
     // an 线 200 后零字节 EOF（TRUNCATED receivedBytes=0）→ 标记 + 本请求内切
     // 下一线重拉，不等宿主重试曲线（真机特殊场景实测宿主不接=体感卡死）。
     let truncationFallbackUsed = false;
+    // 建连/首包挂起的换 key 门（2026-11-13）：单次，独立计数——45s→分档 60/120s
+    // 预算内响应头没到 = 连接级挂起，本请求内换一把 key（新连接）重试一次；
+    // 挂起≠限流/账号态，走 'connect-timeout' 分支不记账不踢。池空/单 key/已转
+    // 向过 → 抛宿主（TIMEOUT 可重试档）。
+    let connectPivotUsed = false;
     // 未分类失败（未知 429 / 402 / 403）的兜底换 key 也只在 402/403 上单次；
     // 未知 429 走完整轮池（见下方兜底段的注释）。
     let unclassifiedFallbackUsed = false;
     const tried = new Set<string>();
     const limit = connection.concurrency;
-    // 三段超时（design D4/D6，2026-09-04 实测）：生产用常量，测试可注入小值。
-    const connectMs = this.deps.timeouts?.connectMs ?? CONNECT_TIMEOUT_MS;
+    // 三段超时（design D4/D6，2026-09-04 实测）：生产按请求体分档
+    // （connectTimeoutFor：小包 60s / 大包 120s——头部时间≈上行+预处理，都
+    // 正比于包大小），测试可注入小值。分档只在首个请求体上判一次：换线
+    // （0B/400）重建体的尺寸差异是几百字节量级，对 256KB 阈值无影响。
+    const bodyBytes = Buffer.byteLength(body, "utf8");
+    const connectMs = this.deps.timeouts?.connectMs ?? connectTimeoutFor(bodyBytes);
     const streamIdleMs = this.deps.timeouts?.streamIdleMs ?? STREAM_IDLE_TIMEOUT_MS;
     const queueMs = this.deps.timeouts?.queueMs;
     const quotaRotation = connection.quotaRotation === true;
@@ -1512,8 +1523,22 @@ export class SensenovaAdapter extends LlmAdapter {
           release = undefined;
           if (options.signal?.aborted) throw error;
           if (isTimeoutReason(error)) {
+            // 建连/首包挂起的本请求内转向（一次性）：挂起≠限流/账号态——走
+            // 'connect-timeout' 分支不记账不踢，只换一把连接重试；池空/单 key/
+            // 已转向过才交宿主。体≈NB 随行：命中的档位从日志可核对。
+            const pivot = !connectPivotUsed
+              ? await this.deps.rotateApiKey(apiKey, 'connect-timeout', options.model, tried)
+              : undefined;
+            connectPivotUsed = true;
+            if (pivot !== undefined) {
+              traceLog(`[dsh-sensenova-suite] 建连/首包超时 model=${options.model} key=${maskKey(apiKey)} 等=${Math.round(connectMs / 1000)}s 体≈${bodyBytes}B——已释放并发槽位（无泄漏），换 key ${maskKey(pivot)} 本请求内重试`);
+              apiKey = pivot;
+              totalAttempts += 1; // 转向重发是一次真实上游尝试（与换线门同纪律）
+              continue;
+            }
+            traceLog(`[dsh-sensenova-suite] 建连/首包超时 model=${options.model} key=${maskKey(apiKey)} 等=${Math.round(connectMs / 1000)}s 体≈${bodyBytes}B——已释放并发槽位（无泄漏），交宿主重试层`);
             throw new LlmError(
-              `llm-sensenova: request to ${connection.apiBase} timed out after ${connectMs}ms；SenseNova 请求建连或首包超时（已释放并发额度），交宿主重试层处理`,
+              `llm-sensenova: request to ${connection.apiBase} timed out after ${connectMs}ms；SenseNova 平台 ${Math.round(connectMs / 1000)} 秒未返回响应头，将自动重试`,
               LLM_CODES.timeout,
               { cause: error },
             );
